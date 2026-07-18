@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Knowledge base — Friendly CRM</title>
+<meta name="description" content="Guides for Friendly CRM: setup, roles and permissions, leads, bookings and payment schedules, portals, and installing the app.">
+<meta name="theme-color" content="#6366f1">
+<link rel="icon" type="image/png" sizes="32x32" href="/icons/favicon-32.png">
+<link rel="stylesheet" href="/assets/site.css">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="wrap nav-in">
+    <a class="brand" href="/"><span class="brand-mark">◧</span> Friendly CRM</a>
+    <div class="nav-links">
+      <a class="hide-sm" href="/docs.html">Knowledge base</a>
+      <a class="hide-sm" href="/api.html">API</a>
+      <a data-app="/login" href="https://app.example.com/login">Log in</a>
+      <a class="btn btn-ghost" href="/">← Site</a>
+    </div>
+  </div>
+</nav>
+
+<div class="wrap doc-wrap">
+  <aside class="doc-side">
+    <h4>Start here</h4>
+    <a href="#setup">Setting up</a>
+    <a href="#workspace">Your workspace</a>
+    <a href="#install">Installing the app</a>
+    <h4>Daily use</h4>
+    <a href="#leads">Leads &amp; pipeline</a>
+    <a href="#scoring">Lead scoring</a>
+    <a href="#inventory">Projects &amp; inventory</a>
+    <a href="#bookings">Bookings &amp; payments</a>
+    <a href="#partners">Channel partners</a>
+    <h4>Your customers</h4>
+    <a href="#portal">Buyer &amp; partner portal</a>
+    <a href="#microsites">Project microsites</a>
+    <h4>Administration</h4>
+    <a href="#roles">Roles &amp; permissions</a>
+    <a href="#team">Managing your team</a>
+    <a href="#branding">Branding &amp; subdomain</a>
+    <a href="#platform">Platform &amp; branches</a>
+    <a href="#data">Data &amp; export</a>
+  </aside>
+
+  <main class="doc">
+    <p class="eyebrow">Knowledge base</p>
+    <h2 id="setup">Setting up</h2>
+    <p>
+      A new Friendly CRM installation starts completely empty. There are no demo
+      accounts and no default password — the first screen asks you to create the
+      platform administrator, with a password you choose.
+    </p>
+    <ol>
+      <li>Open your Friendly CRM address.</li>
+      <li>Fill in <strong>Set up Friendly CRM</strong> — your name, email, and a password of at least 8 characters.</li>
+      <li>Sign in with it on the <strong>Platform</strong> tab.</li>
+    </ol>
+    <div class="note">
+      <p>
+        Setup runs once. As soon as an account exists the screen is replaced by
+        the normal sign-in form, so it cannot be used again to create a second
+        administrator.
+      </p>
+    </div>
+
+    <h3>Just evaluating?</h3>
+    <p>
+      The setup screen also offers <strong>Load showcase demo</strong>. It builds
+      a sample builder workspace with projects, units, leads at every stage, a
+      booking with a payment schedule, and a login for every role. Passwords are
+      generated on the spot and shown once — you can copy them all in one click.
+    </p>
+    <div class="note warn">
+      <p>
+        Demo credentials are meant to be shared, so never load the showcase on an
+        installation that holds real customer data. The option only appears while
+        the installation is empty.
+      </p>
+    </div>
+
+    <hr>
+
+    <h2 id="workspace">Your workspace</h2>
+    <p>
+      A <strong>workspace</strong> is one builder. Everything — leads, projects,
+      units, bookings, team — belongs to exactly one workspace and is invisible
+      to every other. Your plan, currency and branding are set per workspace.
+    </p>
+    <p>
+      Every workspace begins on a <strong>14-day trial</strong> with no card
+      required. When the trial ends, sign-in is blocked until the workspace is
+      activated; your data is not touched.
+    </p>
+
+    <hr>
+
+    <h2 id="install">Installing the app</h2>
+    <p>
+      Friendly CRM installs from the browser onto a phone, tablet or computer.
+      There is no app store download and no separate mobile build — same address,
+      same account.
+    </p>
+    <table>
+      <thead><tr><th>Device</th><th>How</th></tr></thead>
+      <tbody>
+        <tr><td>Android</td><td>Tap <strong>Get the app</strong> on the sign-in page, or Chrome's ⋮ menu → <strong>Install app</strong>.</td></tr>
+        <tr><td>Windows / macOS / Linux</td><td>Click <strong>Get the app</strong>, or the install icon in the Chrome/Edge address bar.</td></tr>
+        <tr><td>iPhone / iPad</td><td>In <strong>Safari</strong>: <strong>Share</strong> → <strong>Add to Home Screen</strong>. Chrome on iOS cannot install apps — that is an Apple restriction, not ours.</td></tr>
+      </tbody>
+    </table>
+    <p>
+      Once installed it opens full-screen from the home screen and
+      <strong>keeps working offline</strong>. Updates arrive on their own — nobody
+      has to reinstall.
+    </p>
+    <div class="note warn">
+      <p>
+        <strong>Installing requires HTTPS.</strong> If your Friendly CRM is served
+        over plain <code>http://</code> — an IP address with no certificate — browsers
+        refuse to install it and offline mode is unavailable. The site still works
+        normally; it just cannot be installed until a certificate is in place.
+      </p>
+    </div>
+
+    <hr>
+
+    <h2 id="leads">Leads &amp; pipeline</h2>
+    <p>
+      Leads are the core of the workspace. View them as a <strong>Kanban</strong>
+      board, a <strong>list</strong>, or a <strong>grid</strong>, and filter by
+      stage, source, priority or owner.
+    </p>
+    <h3>Stages are yours</h3>
+    <p>
+      Rename, reorder or add pipeline stages in <strong>Settings → Pipeline &amp;
+      Fields</strong>. No deploy, no support ticket. Three stages are fixed —
+      <strong>New</strong>, <strong>Booked</strong> and <strong>Lost</strong> — because
+      reporting and the booking flow depend on them. You can add anything between.
+    </p>
+    <h3>Working a lead</h3>
+    <p>
+      Open a lead for the full picture: score, stage, notes, activity timeline,
+      and one-tap <strong>Call</strong>, <strong>WhatsApp</strong> and
+      <strong>Email</strong> that open the real app on your phone. Every call ends
+      with a short log so the timeline stays honest.
+    </p>
+    <h3>Site visits</h3>
+    <p>
+      <strong>Geo-Verified Site Check-in</strong> stamps the rep's location onto the
+      lead's timeline. It turns "I visited the site" into a record.
+    </p>
+    <h3>Bulk work</h3>
+    <p>
+      Import leads from CSV, and select many at once to reassign, change stage or
+      delete.
+    </p>
+
+    <hr>
+
+    <h2 id="scoring">Lead scoring</h2>
+    <p>
+      Every lead carries a score from 0 to 100, shown as Hot, Warm or Cold. It is
+      not a black box — open a lead and click <strong>“Why this score?”</strong>.
+    </p>
+    <p>Five factors, each with its own points:</p>
+    <table>
+      <thead><tr><th>Factor</th><th>What moves it</th></tr></thead>
+      <tbody>
+        <tr><td>Pipeline stage</td><td>How deep in the funnel the lead is.</td></tr>
+        <tr><td>Priority</td><td>Hot, warm or cold.</td></tr>
+        <tr><td>Budget</td><td>Which band the budget falls into.</td></tr>
+        <tr><td>Engagement recency</td><td>How recently you last spoke. This decays.</td></tr>
+        <tr><td>Lead source</td><td>Referrals, walk-ins and website enquiries convert better.</td></tr>
+      </tbody>
+    </table>
+    <p>
+      Underneath, the <strong>next best action</strong> names the one thing to do —
+      derived from whichever factor is dragging the score down.
+    </p>
+
+    <hr>
+
+    <h2 id="inventory">Projects &amp; inventory</h2>
+    <p>
+      A project holds towers, floors and units. Each unit has a configuration,
+      area, price and live status — available, reserved, blocked, booked or sold.
+      Book a unit directly from a lead; it is marked immediately, so two reps
+      cannot sell the same flat.
+    </p>
+
+    <hr>
+
+    <h2 id="bookings">Bookings &amp; payments</h2>
+    <p>This is where a generic CRM stops and Friendly CRM keeps going.</p>
+    <p>
+      Convert a lead to a booking and the <strong>payment schedule generates
+      itself</strong> from the plan you pick:
+    </p>
+    <ul>
+      <li><strong>30-70</strong>, <strong>20-80</strong>, <strong>40-60</strong> — staged splits</li>
+      <li><strong>Construction-linked</strong> — tied to build milestones</li>
+      <li><strong>Flexi</strong> — your own arrangement</li>
+    </ul>
+    <p>
+      Instalments always add up to the exact unit price — any rounding is absorbed
+      into the final instalment, so the schedule never drifts by a rupee. Mark
+      instalments paid as money arrives; overdue ones surface on their own, and
+      the buyer sees the same schedule in their portal.
+    </p>
+    <div class="note">
+      <p>
+        Friendly CRM <strong>records</strong> payments; it does not collect them.
+        There is no card processing or payment gateway. You take money the way you
+        already do and record it here.
+      </p>
+    </div>
+
+    <hr>
+
+    <h2 id="partners">Channel partners</h2>
+    <p>
+      Add channel partners with their firm, RERA id and commission rate. When a
+      partner-sourced lead converts, the commission is calculated on the
+      <strong>booked unit price</strong> and raised for approval.
+    </p>
+    <p>
+      Attribution follows the partner's identity on the lead, not a name match —
+      so two partners with similar firm names never get each other's commission.
+    </p>
+
+    <hr>
+
+    <h2 id="portal">Buyer &amp; partner portal</h2>
+    <p>
+      The portal is a separate front door for people outside your team. It carries
+      your logo, colour and name — not ours — and portal accounts are entirely
+      separate from CRM logins.
+    </p>
+    <h3>Home buyers</h3>
+    <p>
+      Invite a buyer from the lead's <strong>Customer Portal Access</strong> button.
+      Credentials are generated and copied for you to send. They see their booking,
+      their payment schedule and what is due next.
+    </p>
+    <h3>Channel partners</h3>
+    <p>
+      Invite a partner from their card in <strong>Partners</strong>. They see the
+      leads they referred and the commission earned on each closed booking.
+    </p>
+    <p>Both sign in at <code>/portal?builder=your-slug</code>.</p>
+
+    <hr>
+
+    <h2 id="microsites">Project microsites</h2>
+    <p>
+      Publish any project as a public landing page — no login. Share the link in a
+      campaign; enquiries land straight in your pipeline, routed to whoever has
+      the lightest load, and the buyer gets an instant welcome message.
+    </p>
+
+    <hr>
+
+    <h2 id="roles">Roles &amp; permissions</h2>
+    <p>
+      Permissions are enforced in the navigation, on the routes, and in the data —
+      not just by hiding buttons. Typing a URL directly does not get you in.
+    </p>
+    <table>
+      <thead><tr><th>Role</th><th>Scope</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>Sales Executive</strong></td>
+          <td>Only their own leads. Pipeline, inventory, calendar, site visits, calling. No reports, settings, billing or audit log.</td>
+        </tr>
+        <tr>
+          <td><strong>Sales Manager</strong></td>
+          <td>The whole team's leads, assignment, reports, sales performance and coaching. Cannot manage users or settings.</td>
+        </tr>
+        <tr>
+          <td><strong>Builder Admin</strong></td>
+          <td>The whole workspace: team, projects, inventory, finance, documents, branding, and the audit log.</td>
+        </tr>
+        <tr>
+          <td><strong>Branch Team</strong></td>
+          <td>Platform staff scoped to one branch. Onboards builders for approval; cannot approve, suspend or price them.</td>
+        </tr>
+        <tr>
+          <td><strong>Super Admin</strong></td>
+          <td>The whole platform. Approvals, plans, module control, credentials, support access.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <hr>
+
+    <h2 id="team">Managing your team</h2>
+    <p>
+      A Builder Admin adds team members in <strong>Settings → Team</strong> and
+      assigns each a role. Your plan caps how many can be active — Starter 5,
+      Growth 15, Enterprise unlimited. Deactivate someone and their access stops
+      immediately; their leads stay and can be reassigned.
+    </p>
+
+    <hr>
+
+    <h2 id="branding">Branding &amp; subdomain</h2>
+    <p>
+      In <strong>Settings → Builder Profile</strong>, set your logo and accent
+      colour. They apply across the workspace and every portal your buyers see.
+    </p>
+    <p>
+      On <strong>Growth</strong> and <strong>Enterprise</strong> you also get a
+      custom subdomain for your portal. Subdomains are unique across the platform —
+      if yours is taken you will be asked for another.
+    </p>
+
+    <hr>
+
+    <h2 id="platform">Platform &amp; branches</h2>
+    <p>For operators running Friendly CRM for several builders.</p>
+    <h3>Approvals</h3>
+    <p>
+      New workspaces arrive <strong>pending</strong> and cannot sign in until a
+      super admin approves them in <strong>Pending Approvals</strong>. That applies
+      to self-serve signups and to builders onboarded by a branch team.
+    </p>
+    <h3>Branches</h3>
+    <p>
+      Branches divide the platform by region or team. A branch team member sees
+      only the builders in their own branch — not a filtered view they can undo, a
+      hard boundary.
+    </p>
+    <h3>Per-workspace control</h3>
+    <p>
+      Open any builder's <strong>Manage</strong> panel to see real usage — team,
+      records, storage, revenue, last activity — and to:
+    </p>
+    <ul>
+      <li>Turn individual modules on or off for that builder</li>
+      <li>Override user, project and storage limits</li>
+      <li>Set a negotiated monthly price that overrides the plan</li>
+      <li>Extend a trial</li>
+      <li>Export their whole workspace as JSON</li>
+    </ul>
+    <h3>Support access</h3>
+    <p>
+      <strong>Login as</strong> opens a builder's workspace as any of their users —
+      no password needed — with a banner and a one-click way back. You get exactly
+      that user's permissions, not super admin ones, so you see precisely what they
+      see. Every use is written to the audit log.
+    </p>
+
+    <hr>
+
+    <h2 id="data">Data &amp; export</h2>
+    <p>
+      It is your data. An admin can export a full workspace as JSON at any time —
+      leads, projects, bookings, payments, documents. Passwords are never included.
+    </p>
+    <p>
+      Sensitive actions are recorded in the audit log with who, what and when.
+      Deleting a workspace removes its data across every table; it is permanent and
+      asks twice.
+    </p>
+    <p>Building an integration? See the <a style="color:var(--indigo);font-weight:600" href="/api.html">API reference</a>.</p>
+  </main>
+</div>
+
+<footer>
+  <div class="wrap">
+    <p class="foot-note" style="margin-top:0">© 2026 Friendly CRM · <a style="color:var(--indigo)" href="/">Home</a> · <a style="color:var(--indigo)" href="/api.html">API reference</a></p>
+  </div>
+</footer>
+
+<script src="/assets/config.js"></script>
+<script src="/assets/motion.js"></script>
+</body>
+</html>

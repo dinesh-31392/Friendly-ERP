@@ -1,0 +1,495 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Friendly CRM — the CRM built for property builders</title>
+<meta name="description" content="Lead to booking to final instalment, in one place. A real-estate CRM with transparent lead scoring, payment schedules, channel-partner tracking and white-label buyer portals.">
+<meta name="theme-color" content="#6366f1">
+<link rel="icon" type="image/png" sizes="32x32" href="/icons/favicon-32.png">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<link rel="stylesheet" href="/assets/site.css">
+
+<meta property="og:title" content="Friendly CRM — the CRM built for property builders">
+<meta property="og:description" content="From first enquiry to final instalment, in one place.">
+<meta property="og:type" content="website">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="wrap nav-in">
+    <a class="brand" href="/"><span class="brand-mark">◧</span> Friendly CRM</a>
+    <div class="nav-links">
+      <a class="hide-sm" href="#features">Features</a>
+      <a class="hide-sm" href="#how">How it works</a>
+      <a class="hide-sm" href="#pricing">Pricing</a>
+      <a class="hide-sm" href="/docs.html">Docs</a>
+      <!-- data-app: href rebuilt from APP_URL in assets/config.js -->
+      <a data-app="/login" href="https://app.example.com/login">Log in</a>
+      <a class="btn btn-primary" data-app="/login" href="https://app.example.com/login">Start free trial</a>
+    </div>
+  </div>
+</nav>
+
+<!-- ══ Hero ═══════════════════════════════════════════════════════════════ -->
+<section class="hero">
+  <div class="aurora"><span></span><span></span><span></span></div>
+  <div class="wrap hero-grid">
+
+    <div>
+      <p class="eyebrow" data-reveal>Built for property builders</p>
+      <h1 data-reveal>From first enquiry to <span class="grad">final instalment</span>.</h1>
+      <p class="lede" data-reveal>
+        Most CRMs stop at "deal won". Real estate doesn't. Friendly CRM follows the
+        buyer past the booking — through the payment schedule, the partner
+        commission, and the documents — so nothing ends up back in a spreadsheet.
+      </p>
+      <div class="hero-cta" data-reveal>
+        <a class="btn btn-primary btn-lg" data-app="/login" href="https://app.example.com/login">Start 14-day free trial</a>
+        <a class="btn btn-ghost btn-lg" href="#how">See how it works</a>
+      </div>
+      <div class="trust" data-reveal>
+        <div>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#6366f1" stroke-width="2.5"><path d="M20 6 9 17l-5-5"/></svg>
+          No card required
+        </div>
+        <div>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#6366f1" stroke-width="2.5"><rect x="5" y="2" width="14" height="20" rx="2"/><path d="M12 18h.01"/></svg>
+          Installs on any device
+        </div>
+        <div>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#6366f1" stroke-width="2.5"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+          Works offline
+        </div>
+      </div>
+    </div>
+
+    <!-- Product mock: CSS-drawn, not a screenshot — stays crisp, weighs nothing,
+         and can't go stale when the real UI changes. -->
+    <div style="position:relative" data-reveal>
+      <div class="mock">
+        <div class="mock-bar">
+          <span class="mock-dot"></span><span class="mock-dot"></span><span class="mock-dot"></span>
+          <span class="mock-url">app.yourbuilder.com/leads</span>
+        </div>
+        <div class="mock-body">
+          <div class="mock-side">
+            <span class="mock-ico on"></span><span class="mock-ico"></span>
+            <span class="mock-ico"></span><span class="mock-ico"></span><span class="mock-ico"></span>
+          </div>
+          <div class="mock-main">
+            <div class="mock-cols">
+              <div class="mock-col">
+                <div class="mock-col-h"><span>New</span><span>3</span></div>
+                <div class="mock-card fresh">
+                  <div class="mock-line w70"></div><div class="mock-line w45"></div>
+                  <span class="mock-chip chip-new">NEW</span> <span class="mock-score">62</span>
+                </div>
+                <div class="mock-card">
+                  <div class="mock-line w85"></div><div class="mock-line w45"></div>
+                  <span class="mock-chip chip-warm">WARM</span> <span class="mock-score">48</span>
+                </div>
+              </div>
+              <div class="mock-col">
+                <div class="mock-col-h"><span>Qualified</span><span>2</span></div>
+                <div class="mock-card">
+                  <div class="mock-line w70"></div><div class="mock-line w45"></div>
+                  <span class="mock-chip chip-hot">HOT</span> <span class="mock-score">88</span>
+                </div>
+              </div>
+              <div class="mock-col">
+                <div class="mock-col-h"><span>Booked</span><span>1</span></div>
+                <div class="mock-card">
+                  <div class="mock-line w85"></div><div class="mock-line w45"></div>
+                  <span class="mock-chip chip-hot">HOT</span> <span class="mock-score">94</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- The differentiator, shown rather than described -->
+      <div class="mock-badge">
+        <b>Why this score? · 88</b>
+        <div class="bar"><i style="width:72%"></i></div>
+        <div style="font-size:10px;color:#a1a1aa;display:flex;justify-content:space-between">
+          <span>Priority · hot</span><b style="color:#6366f1">+25</b>
+        </div>
+        <div class="bar" style="margin-top:6px"><i style="width:46%;animation-delay:.15s"></i></div>
+        <div style="font-size:10px;color:#a1a1aa;display:flex;justify-content:space-between">
+          <span>Spoke 2h ago</span><b style="color:#6366f1">+15</b>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<!-- ══ Stats ══════════════════════════════════════════════════════════════ -->
+<section class="soft" style="padding:52px 0">
+  <div class="wrap stats" data-reveal data-reveal-group>
+    <div class="stat"><b><span data-count="5">0</span></b><span>roles, each scoped</span></div>
+    <div class="stat"><b><span data-count="5" data-suffix="+">0</span></b><span>payment plan templates</span></div>
+    <div class="stat"><b><span data-count="14">0</span></b><span>day free trial</span></div>
+    <!-- Not a counter: the symbol belongs BEFORE the number in INR, and
+         animating up to zero animates nothing. -->
+    <div class="stat"><b>₹0</b><span>per lead, forever</span></div>
+  </div>
+</section>
+
+<!-- ══ Problem ════════════════════════════════════════════════════════════ -->
+<section>
+  <div class="wrap">
+    <div class="sec-head" data-reveal>
+      <p class="eyebrow">The gap</p>
+      <h2>A generic CRM was never built for a booking.</h2>
+      <p class="lede">
+        Sell a home and the work starts: instalments, RERA paperwork, partner
+        commissions, a buyer who wants to know what they owe. Generic CRMs mark the
+        deal "closed" and go quiet. That's where the spreadsheets creep back in.
+      </p>
+    </div>
+    <div class="grid g3" data-reveal data-reveal-group>
+      <div class="card">
+        <div class="ico">📉</div>
+        <h3>Leads go cold unnoticed</h3>
+        <p>A hot enquiry sits untouched for a week and nobody spots it until the review meeting.</p>
+      </div>
+      <div class="card">
+        <div class="ico">🧾</div>
+        <h3>Payments live in Excel</h3>
+        <p>The 30-70 plan, the demand letters, who paid what — tracked outside the CRM, by hand.</p>
+      </div>
+      <div class="card">
+        <div class="ico">🤝</div>
+        <h3>Commissions get messy</h3>
+        <p>Which partner actually sourced this buyer? Paid on the budget, or the unit price?</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══ Features (bento) ═══════════════════════════════════════════════════ -->
+<section id="features" class="soft">
+  <div class="wrap">
+    <div class="sec-head center" data-reveal>
+      <p class="eyebrow">What's different</p>
+      <h2>The parts other CRMs leave to you.</h2>
+    </div>
+
+    <div class="bento" data-reveal data-reveal-group>
+      <div class="card b-wide">
+        <span class="pill">Transparent scoring</span>
+        <h3 style="margin-top:14px">Lead scores that show their work</h3>
+        <p>
+          Every lead gets a 0–100 score — and a <strong>“Why this score?”</strong>
+          breakdown naming each factor and its points: stage, priority, budget band,
+          how recently you spoke, and the source. It ends with the one next action.
+        </p>
+        <p style="margin-top:10px;color:var(--muted);font-size:13px">
+          An open rulebook, not a model you take on faith. You can read exactly why
+          a lead scored 74 — and disagree with it.
+        </p>
+      </div>
+      <div class="card b-tall">
+        <span class="pill">Post-booking</span>
+        <h3 style="margin-top:14px">Payment schedules, generated</h3>
+        <p>
+          Book a unit and the instalment plan writes itself — 30-70, 20-80, 40-60,
+          construction-linked or flexi. Amounts reconcile to the unit price to the
+          rupee. Mark them paid; overdue ones surface on their own.
+        </p>
+      </div>
+
+      <div class="card">
+        <div class="ico">🏷️</div>
+        <h3>White-label portals</h3>
+        <p>Buyers and partners sign in to <em>your</em> brand — logo, colour, subdomain.</p>
+      </div>
+      <div class="card">
+        <div class="ico">📍</div>
+        <h3>Geo-verified visits</h3>
+        <p>Check in at the site from a phone. "I did the visit" stops being a claim.</p>
+      </div>
+      <div class="card">
+        <div class="ico">🏢</div>
+        <h3>Inventory matrix</h3>
+        <p>Towers, floors, units and live status. Book straight from the lead.</p>
+      </div>
+
+      <div class="card">
+        <div class="ico">📊</div>
+        <h3>Your pipeline, your stages</h3>
+        <p>Rename or add stages yourself. No deploy, no support ticket.</p>
+      </div>
+      <div class="card">
+        <div class="ico">🌐</div>
+        <h3>Project microsites</h3>
+        <p>Publish a public page per project. Enquiries land in the pipeline.</p>
+      </div>
+      <div class="card">
+        <div class="ico">📱</div>
+        <h3>Call, WhatsApp, email</h3>
+        <p>Tap to dial or message from the lead. Every call gets logged.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══ How it works (dark) ════════════════════════════════════════════════ -->
+<section id="how" class="dark">
+  <div class="wrap">
+    <div class="sec-head" data-reveal>
+      <p class="eyebrow">How it works</p>
+      <h2>One thread, enquiry to keys.</h2>
+      <p class="lede" style="color:#a1a1aa">
+        Every step below happens in one place, against one record. Nothing is
+        re-keyed into another system.
+      </p>
+    </div>
+    <div class="flow" data-reveal data-reveal-group>
+      <div class="card step">
+        <div class="step-n">1</div>
+        <h3>Capture</h3>
+        <p>Enquiries arrive from a microsite, a CSV import, or by hand — and route to whoever has the lightest load.</p>
+      </div>
+      <div class="card step">
+        <div class="step-n">2</div>
+        <h3>Qualify</h3>
+        <p>The score ranks the queue and tells the rep the next action. Site visits are geo-stamped on the timeline.</p>
+      </div>
+      <div class="card step">
+        <div class="step-n">3</div>
+        <h3>Book</h3>
+        <p>Pick the unit. It locks immediately, so two reps can't sell the same flat.</p>
+      </div>
+      <div class="card step">
+        <div class="step-n">4</div>
+        <h3>Collect</h3>
+        <p>The schedule generates itself. The buyer sees it in their portal; the partner's commission is raised.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══ Roles ══════════════════════════════════════════════════════════════ -->
+<section id="roles">
+  <div class="wrap">
+    <div class="sec-head" data-reveal>
+      <p class="eyebrow">Who it's for</p>
+      <h2>Everyone sees exactly their job. Nothing more.</h2>
+      <p class="lede">
+        Five roles, enforced in navigation, routes and data. A sales executive
+        cannot reach reports or settings, and cannot see another rep's leads.
+      </p>
+    </div>
+    <div class="grid g3" data-reveal data-reveal-group>
+      <div class="card">
+        <h3>Sales Executive</h3>
+        <p>Their own leads, the pipeline, site visits, one-tap calling. Focused by design.</p>
+      </div>
+      <div class="card">
+        <h3>Sales Manager</h3>
+        <p>The team's pipeline, assignment, coaching, and an at-risk panel that flags leads gone quiet — with one-click reassign.</p>
+      </div>
+      <div class="card">
+        <h3>Builder Admin</h3>
+        <p>Owns the workspace: team, projects, inventory, finance, branding, audit log.</p>
+      </div>
+      <div class="card">
+        <h3>Home buyer</h3>
+        <p>A portal on your branding: their booking, documents, and what they owe next.</p>
+      </div>
+      <div class="card">
+        <h3>Channel partner</h3>
+        <p>Their referred leads and the commission earned on each closed booking.</p>
+      </div>
+      <div class="card">
+        <h3>Platform &amp; branch teams</h3>
+        <p>Running this for several builders? Branch-scoped consoles and an approval queue. <a style="color:var(--indigo);font-weight:600" href="/docs.html#platform">See the docs →</a></p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══ App ════════════════════════════════════════════════════════════════ -->
+<section class="soft">
+  <div class="wrap grid g2" style="align-items:center;gap:56px">
+    <div data-reveal>
+      <p class="eyebrow">Mobile, tablet &amp; desktop</p>
+      <h2>Install it like an app. Use it without signal.</h2>
+      <p class="lede" style="margin-bottom:18px">
+        Friendly CRM installs to an Android home screen, an iPhone or iPad, and to
+        Windows or macOS — straight from the browser. No app store, no review
+        queue, no separate build per platform.
+      </p>
+      <ul class="ticks" style="margin-bottom:24px">
+        <li>Opens full-screen from the home screen, like any native app</li>
+        <li>Keeps working in a basement flat with no signal</li>
+        <li>Updates itself — nobody reinstalls anything</li>
+      </ul>
+      <a class="btn btn-ghost" href="/docs.html#install">How to install →</a>
+    </div>
+    <div class="card" data-reveal style="background:linear-gradient(135deg,#eef2ff,#f5f3ff);border-color:#e0e7ff">
+      <p class="eyebrow" style="margin-bottom:16px">On a site visit</p>
+      <p style="font-size:16px;color:var(--ink);line-height:1.75">
+        Your rep is standing in a half-built tower with no signal. They open the app
+        from the home screen, pull up the buyer, check the unit, and log the visit.
+        It syncs when they're back in range.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- ══ Pricing ════════════════════════════════════════════════════════════ -->
+<section id="pricing">
+  <div class="wrap">
+    <div class="sec-head center" data-reveal>
+      <p class="eyebrow">Pricing</p>
+      <h2>Per workspace. Not per lead.</h2>
+      <p class="lede" style="margin-inline:auto">Every plan starts with a 14-day trial. No card up front.</p>
+    </div>
+    <div class="grid g3" data-reveal data-reveal-group>
+      <div class="card price-card">
+        <h3>Starter</h3>
+        <p style="min-height:40px">For a single project and a small sales team.</p>
+        <div class="price">₹1,999<span>/month</span></div>
+        <div class="price-alt">or $29/month</div>
+        <ul class="ticks">
+          <li>Unlimited leads</li>
+          <li>5 team members</li>
+          <li>2 projects</li>
+          <li>Bookings &amp; payment schedules</li>
+          <li>Buyer &amp; partner portals</li>
+          <li>Basic reports</li>
+          <li>Standard support</li>
+        </ul>
+        <a class="btn btn-ghost" data-app="/login" href="https://app.example.com/login">Start free trial</a>
+      </div>
+
+      <div class="card price-card hi">
+        <span class="tag">MOST POPULAR</span>
+        <h3>Growth</h3>
+        <p style="min-height:40px">For builders running several projects at once.</p>
+        <div class="price">₹4,999<span>/month</span></div>
+        <div class="price-alt">or $79/month</div>
+        <ul class="ticks">
+          <li>Everything in Starter</li>
+          <li>15 team members</li>
+          <li>10 projects</li>
+          <li>Custom subdomain for your buyer portal</li>
+          <li>Project microsites</li>
+          <li>Advanced reports</li>
+          <li>Priority support</li>
+        </ul>
+        <a class="btn btn-primary" data-app="/login" href="https://app.example.com/login">Start free trial</a>
+      </div>
+
+      <div class="card price-card">
+        <h3>Enterprise</h3>
+        <p style="min-height:40px">For large developers with no ceiling.</p>
+        <div class="price">₹14,999<span>/month</span></div>
+        <div class="price-alt">or $299/month</div>
+        <ul class="ticks">
+          <li>Everything in Growth</li>
+          <li>Unlimited team &amp; projects</li>
+          <li>Custom integrations</li>
+          <li>Dedicated support</li>
+          <li>SLA guarantee</li>
+        </ul>
+        <a class="btn btn-ghost" href="#start">Talk to us</a>
+      </div>
+    </div>
+    <p class="center" style="margin-top:26px;font-size:13px;color:var(--muted)" data-reveal>
+      Prices in INR and USD. Your workspace displays amounts in its own currency.
+    </p>
+  </div>
+</section>
+
+<!-- ══ FAQ ════════════════════════════════════════════════════════════════ -->
+<section class="soft">
+  <div class="wrap" style="max-width:860px">
+    <div class="sec-head center" data-reveal>
+      <p class="eyebrow">Questions</p>
+      <h2>Straight answers.</h2>
+    </div>
+    <div class="faq" data-reveal>
+      <details open>
+        <summary>Do my buyers need an app?</summary>
+        <p>No. They open a link and sign in to a portal on your branding. They can install it if they want, but it works in any browser.</p>
+      </details>
+      <details>
+        <summary>Can two builders on the platform see each other's data?</summary>
+        <p>No. Every record is scoped to its workspace, and on the server that isolation is enforced by the database itself through row-level security — not only by application code. A bug in the app cannot leak another builder's leads.</p>
+      </details>
+      <details>
+        <summary>What happens to my data if I leave?</summary>
+        <p>An admin can export the full workspace as JSON at any time — leads, projects, bookings, payments, documents. It's your data.</p>
+      </details>
+      <details>
+        <summary>Can I change the sales stages to match how we work?</summary>
+        <p>Yes. Stages, lead sources and configurations are yours to rename, add or reorder. Three core stages — New, Booked and Lost — are fixed because reporting and the booking flow depend on them.</p>
+      </details>
+      <details>
+        <summary>Is there an API?</summary>
+        <p>There's a read-only API for authentication, leads and workspace metadata — enough to feed a dashboard or a warehouse. Write endpoints aren't published yet. The <a style="color:var(--indigo);font-weight:600" href="/api.html">API reference</a> documents exactly what exists and what doesn't.</p>
+      </details>
+      <details>
+        <summary>Do you take a cut of my sales?</summary>
+        <p>No. A flat monthly price per workspace. Nothing per lead, per user overage, or per booking.</p>
+      </details>
+    </div>
+  </div>
+</section>
+
+<!-- ══ CTA ════════════════════════════════════════════════════════════════ -->
+<section id="start">
+  <div class="wrap">
+    <div class="cta-band" data-reveal>
+      <h2>See it with your own projects in it.</h2>
+      <p>Start a 14-day trial, load your first project, and watch a lead run all the way to a payment schedule.</p>
+      <div style="display:flex;gap:12px;justify-content:center;flex-wrap:wrap">
+        <a class="btn btn-ghost btn-lg" data-app="/login" href="https://app.example.com/login">Start free trial</a>
+        <a class="btn btn-lg" style="border-color:rgba(255,255,255,.5);color:#fff" href="/docs.html">Read the docs</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div class="foot-grid">
+      <div style="max-width:280px">
+        <a class="brand" href="/"><span class="brand-mark">◧</span> Friendly CRM</a>
+        <p style="margin-top:12px;font-size:13px">The CRM that follows the buyer past the booking.</p>
+      </div>
+      <div class="foot-col">
+        <h4>Product</h4>
+        <a href="#features">Features</a>
+        <a href="#how">How it works</a>
+        <a href="#pricing">Pricing</a>
+        <a href="/docs.html#install">Install the app</a>
+        <a data-app="/login" href="https://app.example.com/login">Log in</a>
+      </div>
+      <div class="foot-col">
+        <h4>Developers</h4>
+        <a href="/api.html">API reference</a>
+        <a href="/docs.html">Knowledge base</a>
+        <a href="/docs.html#platform">Platform admin</a>
+      </div>
+      <div class="foot-col">
+        <h4>Company</h4>
+        <a href="#">Contact</a>
+        <a href="#">Privacy</a>
+        <a href="#">Terms</a>
+      </div>
+    </div>
+    <p class="foot-note">© 2026 Friendly CRM. All rights reserved.</p>
+  </div>
+</footer>
+
+<script src="/assets/config.js"></script>
+<script src="/assets/motion.js"></script>
+</body>
+</html>

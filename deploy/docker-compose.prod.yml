@@ -1,0 +1,134 @@
+# Friendly CRM — production stack for a single VPS (Hostinger KVM 4)
+# Services: PostgreSQL 16, the Fastify API, and nginx serving the SPA +
+# reverse-proxying /api to the backend.
+#
+# Usage (from /opt/friendly-crm on the VPS):
+#   cp .env.production.example .env   # then EDIT every secret
+#   docker compose -f docker-compose.prod.yml up -d --build
+#   docker compose -f docker-compose.prod.yml exec api npx tsx scripts/migrate.ts
+#   docker compose -f docker-compose.prod.yml exec api npx tsx scripts/seed.ts   # optional demo data
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: friendly_crm
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d friendly_crm"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    # NOT exposed to the internet — only the api container can reach it
+
+  api:
+    build:
+      context: ../server
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    # The long-running, internet-facing API holds ONLY the RLS-bound app_user and
+    # the platform role — never the Postgres superuser. Migrations/seeding run in
+    # the one-shot `migrate` service below, so an RCE or a malicious dependency in
+    # this process cannot read a BYPASSRLS/superuser credential out of its env and
+    # defeat the entire RLS isolation model.
+    environment:
+      DATABASE_URL: postgres://app_user:${APP_USER_PASSWORD:?set in .env}@db:5432/friendly_crm
+      DATABASE_PLATFORM_URL: postgres://app_platform:${APP_PLATFORM_PASSWORD:?set in .env}@db:5432/friendly_crm
+      JWT_SECRET: ${JWT_SECRET:?set in .env}
+      PORT: 4000
+      CORS_ORIGIN: ${PUBLIC_URL:?set in .env}
+    expose:
+      - "4000"
+
+  # One-shot admin tasks: schema migrations, role creation, and (optionally) the
+  # first-admin bootstrap. NOT started by `up` (profiles gate it). Run explicitly:
+  #   docker compose -f docker-compose.prod.yml run --rm migrate
+  #   docker compose -f docker-compose.prod.yml run --rm \
+  #     -e ADMIN_EMAIL=you@co.com -e ADMIN_PASSWORD='<strong>' seed
+  # This is the ONLY place the superuser connection string exists at runtime, and
+  # it exits as soon as the task finishes.
+  migrate:
+    build:
+      context: ../server
+      dockerfile: Dockerfile
+    profiles: ["tools"]
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_ADMIN_URL: postgres://postgres:${POSTGRES_PASSWORD}@db:5432/friendly_crm
+      APP_USER_PASSWORD: ${APP_USER_PASSWORD:?set in .env}
+      APP_PLATFORM_PASSWORD: ${APP_PLATFORM_PASSWORD:?set in .env}
+    command: ["npx", "tsx", "scripts/migrate.ts"]
+
+  seed:
+    build:
+      context: ../server
+      dockerfile: Dockerfile
+    profiles: ["tools"]
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_ADMIN_URL: postgres://postgres:${POSTGRES_PASSWORD}@db:5432/friendly_crm
+      APP_USER_PASSWORD: ${APP_USER_PASSWORD:?set in .env}
+      APP_PLATFORM_PASSWORD: ${APP_PLATFORM_PASSWORD:?set in .env}
+    command: ["npx", "tsx", "scripts/seed.ts"]
+
+  web:
+    image: nginx:alpine
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ../dist:/usr/share/nginx/html:ro
+      - certs:/etc/letsencrypt
+      - certbot-www:/var/www/certbot
+
+  # One-shot / renewal container for Let's Encrypt certificates
+  certbot:
+    image: certbot/certbot
+    volumes:
+      - certs:/etc/letsencrypt
+      - certbot-www:/var/www/certbot
+    entrypoint: /bin/sh -c 'trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 12h & wait $${!}; done'
+
+  # Encrypted daily database backups. AES-256 via BACKUP_PASSPHRASE, 14-day
+  # retention, written to the `backups` named volume. Restore with restore.sh.
+  # Copy the backups volume off-box regularly (rsync/S3) — a backup on the same
+  # VPS does not survive the VPS.
+  backup:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+      BACKUP_PASSPHRASE: ${BACKUP_PASSPHRASE:?set in .env}
+    volumes:
+      - ./backup.sh:/usr/local/bin/backup.sh:ro
+      - ./restore.sh:/usr/local/bin/restore.sh:ro
+      - backups:/backups
+    entrypoint: >
+      /bin/sh -c 'apk add --no-cache gnupg >/dev/null 2>&1;
+      trap exit TERM;
+      while :; do /bin/sh /usr/local/bin/backup.sh || echo "backup FAILED";
+      sleep 24h & wait $${!}; done'
+
+volumes:
+  pgdata:
+  certs:
+  certbot-www:
+  backups:

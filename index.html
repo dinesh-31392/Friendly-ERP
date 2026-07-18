@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- viewport-fit=cover lets the standalone window paint under the iOS notch
+         / home indicator instead of letterboxing. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Friendly CRM - Real Estate Operating System</title>
+    <meta name="description" content="Manage leads, inventory, bookings and payments for your real estate business." />
+
+    <!-- PWA. These files live in public/ and are copied to the build output
+         verbatim: vite-plugin-singlefile only rewrites the Rollup bundle, so
+         public/ is the one way to ship real sibling files next to the inlined
+         index.html — and a service worker can never be inlined. -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <meta name="theme-color" content="#6366f1" />
+
+    <!-- iOS ignores the web manifest almost entirely (no icons, no name, no
+         theme_color). These tags are the ONLY way to get a proper home-screen
+         install on iPhone/iPad. -->
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="Friendly CRM" />
+
+    <link rel="icon" type="image/png" sizes="32x32" href="/icons/favicon-32.png" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

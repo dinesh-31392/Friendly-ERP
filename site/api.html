@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>API reference — Friendly CRM</title>
+<meta name="description" content="The Friendly CRM REST API: authentication, leads and workspace metadata. Read-only.">
+<meta name="theme-color" content="#6366f1">
+<link rel="icon" type="image/png" sizes="32x32" href="/icons/favicon-32.png">
+<link rel="stylesheet" href="/assets/site.css">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="wrap nav-in">
+    <a class="brand" href="/"><span class="brand-mark">◧</span> Friendly CRM</a>
+    <div class="nav-links">
+      <a class="hide-sm" href="/docs.html">Knowledge base</a>
+      <a class="hide-sm" href="/api.html">API</a>
+      <a data-app="/login" href="https://app.example.com/login">Log in</a>
+      <a class="btn btn-ghost" href="/">← Site</a>
+    </div>
+  </div>
+</nav>
+
+<div class="wrap doc-wrap">
+  <aside class="doc-side">
+    <h4>Getting started</h4>
+    <a href="#overview">Overview</a>
+    <a href="#auth">Authentication</a>
+    <a href="#tenancy">Tenant isolation</a>
+    <a href="#errors">Errors</a>
+    <a href="#limits">Rate limits</a>
+    <h4>Endpoints</h4>
+    <a href="#health">Health</a>
+    <a href="#login">Log in</a>
+    <a href="#me">Current user</a>
+    <a href="#leads">List leads</a>
+    <a href="#lead">Get a lead</a>
+    <a href="#meta">Workspace metadata</a>
+    <h4>Scope</h4>
+    <a href="#not-available">Not yet available</a>
+  </aside>
+
+  <main class="doc">
+    <p class="eyebrow">API reference</p>
+    <h2 id="overview">Overview</h2>
+    <p>
+      The Friendly CRM API is a small REST API over HTTPS. Every response is JSON.
+      It exists to get data <em>out</em> of a workspace — into a dashboard, a
+      warehouse, or a report.
+    </p>
+
+    <div class="note warn">
+      <p>
+        <strong>This API is read-only.</strong> Apart from logging in, every
+        endpoint below is a <code>GET</code>. There are no endpoints to create or
+        update leads, bookings or users yet. We would rather tell you that here
+        than have you find out halfway through an integration — see
+        <a href="#not-available">Not yet available</a>.
+      </p>
+    </div>
+
+    <p><strong>Base URL</strong></p>
+    <pre><code>https://your-domain.example/api</code></pre>
+
+    <hr>
+
+    <h2 id="auth">Authentication</h2>
+    <p>
+      Log in once to exchange an email and password for a JSON Web Token, then
+      send that token on every request. Tokens are valid for <strong>24 hours</strong>.
+    </p>
+    <pre><code>Authorization: Bearer &lt;token&gt;</code></pre>
+    <p>
+      The token carries your user and workspace identity. It is signed with
+      HS256 and the algorithm is pinned on verification, so a token cannot be
+      downgraded to <code>none</code>.
+    </p>
+
+    <h3>Which workspace?</h3>
+    <p>
+      If the same email exists in more than one workspace, the login is ambiguous
+      and will be rejected. Pass <code>tenantSlug</code> to say which one you mean.
+    </p>
+
+    <hr>
+
+    <h2 id="tenancy">Tenant isolation</h2>
+    <p>
+      Your token determines your workspace, and you cannot read outside it. That
+      boundary is enforced by <strong>PostgreSQL row-level security</strong>, not
+      by the API code: each request runs inside a transaction that sets the
+      tenant context, and the database filters every row against it.
+    </p>
+    <p>
+      This matters for a reason worth being blunt about: if the API had a bug,
+      the database would still refuse to return another workspace's rows.
+    </p>
+    <p>
+      Permissions apply on top. <code>GET /api/leads</code> requires
+      <code>view_leads</code>. If your user can only manage their own leads, the
+      endpoint silently returns only leads assigned to you — the same rule the
+      app itself uses.
+    </p>
+
+    <hr>
+
+    <h2 id="errors">Errors</h2>
+    <p>Errors return a JSON body with an <code>error</code> string.</p>
+    <table>
+      <thead><tr><th>Status</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>400</code></td><td>Missing or malformed parameters.</td></tr>
+        <tr><td><code>401</code></td><td>Missing, expired or invalid token. Also returned for a failed login.</td></tr>
+        <tr><td><code>403</code></td><td>Authenticated, but your role lacks the permission.</td></tr>
+        <tr><td><code>404</code></td><td>Not found — or in another workspace, which is indistinguishable by design.</td></tr>
+        <tr><td><code>429</code></td><td>Rate limited. Back off and retry.</td></tr>
+        <tr><td><code>500</code></td><td>Server error. Includes a <code>correlationId</code>.</td></tr>
+      </tbody>
+    </table>
+    <p>
+      A <code>500</code> never leaks internal detail. It returns a correlation id
+      that matches the server log line:
+    </p>
+    <pre><code>{
+  "error": "Internal server error",
+  "correlationId": "7f07ba33-4c1e-4a2b-9d5e-2f8c1b0a9e44"
+}</code></pre>
+    <p>Quote that id to support and the exact failure can be found.</p>
+
+    <hr>
+
+    <h2 id="limits">Rate limits</h2>
+    <table>
+      <thead><tr><th>Scope</th><th>Limit</th></tr></thead>
+      <tbody>
+        <tr><td><code>POST /api/auth/login</code></td><td>5 requests per minute, per IP</td></tr>
+        <tr><td>Everything else</td><td>120 requests per minute, per IP</td></tr>
+      </tbody>
+    </table>
+    <p>Exceeding a limit returns <code>429</code> with a <code>Retry-After</code> header.</p>
+
+    <hr>
+
+    <h2>Endpoints</h2>
+
+    <div class="endpoint" id="health">
+      <div class="endpoint-head"><span class="method get">GET</span> <code>/api/health</code></div>
+      <p>Liveness check. No authentication. Use it for uptime monitoring and after a deploy.</p>
+      <pre><code>curl https://your-domain.example/api/health</code></pre>
+      <pre><code>{ "ok": true }</code></pre>
+    </div>
+
+    <div class="endpoint" id="login">
+      <div class="endpoint-head"><span class="method post">POST</span> <code>/api/auth/login</code></div>
+      <p>Exchange credentials for a token. No authentication required.</p>
+      <table>
+        <thead><tr><th>Field</th><th>Type</th><th>Required</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr><td><code>email</code></td><td>string</td><td>Yes</td><td>Case-insensitive.</td></tr>
+          <tr><td><code>password</code></td><td>string</td><td>Yes</td><td>Verified with argon2id.</td></tr>
+          <tr><td><code>tenantSlug</code></td><td>string</td><td>No</td><td>Required only if the email exists in several workspaces.</td></tr>
+        </tbody>
+      </table>
+      <pre><code>curl -X POST https://your-domain.example/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"you@builder.com","password":"..."}'</code></pre>
+      <p><strong>200</strong> — token plus the signed-in user and workspace.</p>
+      <pre><code>{
+  "token": "eyJhbGciOiJIUzI1NiIs...",
+  "user":   { "id": "...", "name": "...", "email": "...", "role": "..." },
+  "tenant": { "id": "...", "name": "...", "slug": "...", "plan": "Growth" }
+}</code></pre>
+      <p><strong>401</strong> — <code>{ "error": "Invalid email or password" }</code></p>
+      <div class="note">
+        <p>
+          The same message and the same response time are returned for an unknown
+          email and a wrong password, so the endpoint cannot be used to discover
+          which addresses have accounts.
+        </p>
+      </div>
+      <p><strong>403</strong> — the workspace is suspended. This is returned only <em>after</em> the password is verified, so it tells a legitimate user what is wrong without leaking anything to a stranger.</p>
+    </div>
+
+    <div class="endpoint" id="me">
+      <div class="endpoint-head"><span class="method get">GET</span> <code>/api/auth/me</code> <span class="pill">Auth</span></div>
+      <p>The signed-in user, their workspace, and their resolved permission list. Use it to render UI without hardcoding what each role can do.</p>
+      <pre><code>curl https://your-domain.example/api/auth/me \
+  -H "Authorization: Bearer $TOKEN"</code></pre>
+      <pre><code>{
+  "user":        { "id": "...", "name": "...", "email": "...", "role": "sales_manager" },
+  "tenant":      { "id": "...", "name": "...", "slug": "..." },
+  "permissions": ["view_dashboard", "view_leads", "manage_leads", "..."]
+}</code></pre>
+    </div>
+
+    <div class="endpoint" id="leads">
+      <div class="endpoint-head"><span class="method get">GET</span> <code>/api/leads</code> <span class="pill">Auth</span></div>
+      <p>List leads in your workspace. Requires <code>view_leads</code>.</p>
+      <table>
+        <thead><tr><th>Query</th><th>Type</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr><td><code>stage</code></td><td>string</td><td>Filter by pipeline stage key, e.g. <code>qualified</code>.</td></tr>
+          <tr><td><code>assigned_to</code></td><td>uuid</td><td>Filter by the assigned user.</td></tr>
+          <tr><td><code>search</code></td><td>string</td><td>Matches name, or phone. Phone matching ignores spaces, brackets and dashes, so <code>98765 43210</code> finds <code>+91-98765-43210</code>.</td></tr>
+          <tr><td><code>limit</code></td><td>integer</td><td>Page size.</td></tr>
+          <tr><td><code>offset</code></td><td>integer</td><td>Rows to skip.</td></tr>
+        </tbody>
+      </table>
+      <pre><code>curl "https://your-domain.example/api/leads?stage=qualified&limit=25" \
+  -H "Authorization: Bearer $TOKEN"</code></pre>
+      <pre><code>{
+  "leads": [
+    {
+      "id": "...",
+      "tenantId": "...",
+      "name": "Ananya Reddy",
+      "email": "ananya@example.com",
+      "phone": "+91 99001 23456",
+      "source": "Website",
+      "project": "Horizon Heights",
+      "projectId": "...",
+      "budget": 16500000,
+      "configuration": "2 BHK",
+      "stage": "qualified",
+      "priority": "hot",
+      "assignedTo": "...",
+      "lastContact": "2026-07-16T09:12:00.000Z",
+      "createdAt": "2026-07-01T11:04:00.000Z",
+      "customFields": {},
+      "score": 74
+    }
+  ]
+}</code></pre>
+      <div class="note">
+        <p>
+          <strong>Role-aware results.</strong> If your user has only
+          <code>manage_own_leads</code> — a sales executive — this returns just
+          the leads assigned to them. There is no parameter to override that.
+        </p>
+      </div>
+      <p><strong>403</strong> — <code>{ "error": "Missing permission: view_leads" }</code></p>
+    </div>
+
+    <div class="endpoint" id="lead">
+      <div class="endpoint-head"><span class="method get">GET</span> <code>/api/leads/:id</code> <span class="pill">Auth</span></div>
+      <p>A single lead by id. Same shape as one entry above. Requires <code>view_leads</code>.</p>
+      <pre><code>curl https://your-domain.example/api/leads/8a1f... \
+  -H "Authorization: Bearer $TOKEN"</code></pre>
+      <p><strong>404</strong> if the lead does not exist, is outside your workspace, or is not yours to see. All three are the same answer on purpose.</p>
+    </div>
+
+    <div class="endpoint" id="meta">
+      <div class="endpoint-head"><span class="method get">GET</span> <code>/api/meta/:entity</code> <span class="pill">Auth</span></div>
+      <p>
+        The workspace's active definitions for an entity — its pipeline stages,
+        form fields and list views. This is how the app avoids hardcoding
+        anything: it renders from this JSON.
+      </p>
+      <p>
+        Read this before interpreting a lead's <code>stage</code>. Stages are
+        defined per workspace, so a stage key you have never seen is normal.
+      </p>
+      <pre><code>curl https://your-domain.example/api/meta/lead \
+  -H "Authorization: Bearer $TOKEN"</code></pre>
+      <pre><code>{
+  "pipeline": {
+    "stages": [
+      { "key": "new",       "label": "New",       "color": "#3b82f6", "order": 1 },
+      { "key": "qualified", "label": "Qualified", "color": "#6366f1", "order": 3 },
+      { "key": "booked",    "label": "Booked",    "color": "#10b981", "order": 6, "terminal": true }
+    ],
+    "_version": 1
+  },
+  "form": { "fields": [ ... ], "_version": 1 }
+}</code></pre>
+    </div>
+
+    <hr>
+
+    <h2 id="not-available">Not yet available</h2>
+    <p>
+      An API reference that lists endpoints which do not exist is worse than no
+      reference. So, plainly — the following are <strong>not</strong> in the API today:
+    </p>
+    <ul>
+      <li><strong>Any writes.</strong> No creating or updating leads, bookings, projects, units or users.</li>
+      <li><strong>Bookings, payments and inventory.</strong> Not exposed. Available in the app and the workspace export.</li>
+      <li><strong>Workspace administration.</strong> No API to create a workspace, invite users or change plans.</li>
+      <li><strong>Webhooks.</strong> No outbound events. The app has an inbound lead-capture webhook for microsites and integrations, which is not part of this API.</li>
+      <li><strong>Portal accounts.</strong> Buyer and channel-partner logins are a separate system and have no public API.</li>
+    </ul>
+    <p>
+      Need to move data out in bulk today? An admin can export the entire
+      workspace as JSON from Platform Control. If you need a specific write
+      endpoint, tell us which one — that is how this list gets shorter.
+    </p>
+  </main>
+</div>
+
+<footer>
+  <div class="wrap">
+    <p class="foot-note" style="margin-top:0">© 2026 Friendly CRM · <a style="color:var(--indigo)" href="/">Home</a> · <a style="color:var(--indigo)" href="/docs.html">Knowledge base</a></p>
+  </div>
+</footer>
+
+<script src="/assets/config.js"></script>
+<script src="/assets/motion.js"></script>
+</body>
+</html>

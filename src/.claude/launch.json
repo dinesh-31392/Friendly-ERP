@@ -1,0 +1,18 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "friendly-crm",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "..", "run", "dev"],
+      "port": 5173,
+      "autoPort": true
+    },
+    {
+      "name": "leadrat-crm",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "C:/Users/Admin/Desktop/friendly-crm", "run", "dev"],
+      "port": 3005
+    }
+  ]
+}

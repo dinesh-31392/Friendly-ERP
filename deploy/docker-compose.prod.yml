@@ -5,8 +5,11 @@
 # Usage (from /opt/friendly-crm on the VPS):
 #   cp .env.production.example .env   # then EDIT every secret
 #   docker compose -f docker-compose.prod.yml up -d --build
-#   docker compose -f docker-compose.prod.yml exec api npx tsx scripts/migrate.ts
-#   docker compose -f docker-compose.prod.yml exec api npx tsx scripts/seed.ts   # optional demo data
+#   docker compose -f docker-compose.prod.yml run --rm migrate
+#   docker compose -f docker-compose.prod.yml run --rm \
+#     -e ADMIN_EMAIL=you@yourcompany.com -e ADMIN_PASSWORD='<strong-secret>' seed
+# (migrate/seed are one-shot `tools`-profile containers — they hold the Postgres
+#  superuser credential and exit; the long-running api never sees it.)
 
 services:
   db:

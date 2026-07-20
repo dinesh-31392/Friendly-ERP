@@ -5,9 +5,12 @@ the **Fastify API** (auth + leads + metadata, RLS-enforced), and **nginx**
 serving the CRM app and proxying `/api`. KVM 4 (4 vCPU / 16 GB) is more than
 enough — this stack idles under 1 GB.
 
-> The CRM also runs fully standalone in demo mode (browser localStorage) the
-> moment nginx serves it — the backend activates real multi-tenant auth and
-> the leads API when you flip the SPA's API flag (Step 7).
+> **You must build the SPA in API mode (Step 4).** The same codebase can also run
+> standalone on browser localStorage — fine for a single-user demo, unsafe as
+> multi-tenant SaaS, because then every tenant's data (including passwords) sits
+> in the visitor's browser and permission checks are client-side JavaScript.
+> Setting `VITE_API_URL` at build time is what makes PostgreSQL — RLS, argon2id,
+> JWT — the authority instead.
 
 ---
 
@@ -30,16 +33,36 @@ ssh root@YOUR_VPS_IP
 curl -fsSL https://get.docker.com | sh
 ```
 
-## Step 4 — Upload the package
+## Step 4 — Build the app in API mode, then upload
 
-From your local machine (where `friendly-crm-deploy.zip` is):
+Build on your local machine, from the project root:
 
 ```bash
-scp friendly-crm-deploy.zip root@YOUR_VPS_IP:/opt/
-ssh root@YOUR_VPS_IP
-cd /opt && apt-get install -y unzip && unzip friendly-crm-deploy.zip -d friendly-crm
-cd friendly-crm/deploy
+npm ci
+VITE_API_URL=/ npm run build      # → dist/index.html, API mode (same-origin /api)
 ```
+
+`VITE_API_URL=/` trims to an empty base URL, meaning "same origin" — the app calls
+`/api/...`, which nginx proxies to the API container. **Omit it and you ship the
+insecure demo build** (see the note at the top).
+
+> **Windows Git Bash mangles a bare `/` argument** into a filesystem path
+> (`C:/Program Files/Git`). On Windows, put `VITE_API_URL=/` in a `.env.local`
+> file next to `package.json` and just run `npm run build` — Vite reads it
+> literally. This repo already ships that file.
+
+Upload the three directories the compose file needs (`dist/`, `server/`, `deploy/`):
+
+```bash
+ssh root@YOUR_VPS_IP 'mkdir -p /opt/friendly-crm'
+scp -r dist server deploy root@YOUR_VPS_IP:/opt/friendly-crm/
+ssh root@YOUR_VPS_IP
+cd /opt/friendly-crm/deploy
+```
+
+`dist/` is a build artifact and is **not** in the git repo, so a `git clone` on the
+VPS is not enough on its own — either upload `dist/` as above, or install Node on
+the VPS and run the same build there.
 
 ## Step 5 — Configure secrets
 
@@ -79,22 +102,40 @@ Verify:
 curl http://localhost/api/health          # → {"ok":true,...}
 ```
 
-Open `http://YOUR_VPS_IP` in a browser. This build ships with **no seed data and
-no default credentials**, so the first load shows **first-run setup**: create your
-platform administrator there, then sign in. Setup runs once — once an account
-exists the screen is replaced by the normal sign-in form.
+Open `http://YOUR_VPS_IP` and sign in with the `ADMIN_EMAIL` / `ADMIN_PASSWORD`
+you just bootstrapped. There is no demo data and no default account.
 
-## Step 7 — Switch the app to the real backend
+> The browser-side **"Set up Friendly CRM"** first-run screen belongs to *demo
+> mode only*. In API mode identity lives in Postgres, so your administrator comes
+> from the `seed` bootstrap above. If the VPS shows you that setup screen, your
+> build is in demo mode — rebuild per Step 4.
 
-In the browser console on your CRM page:
+## Step 7 — Verify you are on the real backend (not demo mode)
 
-```js
-localStorage.setItem('friendly_crm_api_url', window.location.origin); location.reload();
-```
+If you built with `VITE_API_URL` in Step 4, the app is already
+server-authoritative — there is nothing to switch on. Confirm it, because this is
+the single most important property of the deployment:
 
-Login now authenticates against PostgreSQL (JWT + argon2id + row-level
-security), and the Leads page reads from the API. Remove the key to fall back
-to demo mode. (When the Phase-2 write APIs land, this flag becomes the default.)
+1. Sign in at `http://YOUR_VPS_IP`. There must be **no amber "Demo mode" banner**
+   in the header. That banner means the browser is the database — rebuild per
+   Step 4, re-upload `dist/`, then
+   `docker compose -f docker-compose.prod.yml restart web`.
+2. Confirm the request actually reached Postgres:
+   ```bash
+   docker compose -f docker-compose.prod.yml logs api | tail -20   # POST /api/auth/login 200
+   ```
+3. Sanity-check that identity is server-side: `friendly_crm_api_token` exists in
+   the browser's localStorage, and `friendly_crm_users` does **not**.
+
+A per-browser override remains for pointing a local build at a staging API
+(`localStorage.setItem('friendly_crm_api_url', 'https://staging.example.com')`).
+That is a developer tool — it must never be how production reaches the backend.
+
+> **Known scope limit:** the API is currently read-only (auth, leads, metadata).
+> Login, tenant isolation, RBAC and lead reads are enforced by Postgres; other
+> modules still write through the browser store. Treat this deployment as
+> production-grade for *identity and access*, and stage the remaining write-path
+> cutover before onboarding real customer data at scale.
 
 ## Step 8 — Domain + HTTPS (required for the mobile/desktop app)
 
@@ -202,7 +243,8 @@ docker compose -f docker-compose.prod.yml up -d --build api  # backend changes
 |---|---|
 | `api` container restarting | `docker compose logs api` — usually a bad `.env` value |
 | 502 on `/api` | API still booting; check `depends_on` health with `docker compose ps` |
-| Login screen shows "Set up Friendly CRM" | Expected on a fresh install — there are no default accounts. Create your administrator there. |
+| Login screen shows "Set up Friendly CRM" | On a VPS this means the build is in **demo mode** — it was made without `VITE_API_URL`. Rebuild (Step 4), re-upload `dist/`, `restart web`. |
+| Amber "Demo mode" banner in the header | Same cause as above — the browser, not Postgres, is holding the data. |
 | Login says invalid for your admin | Re-run the bootstrap with `ADMIN_EMAIL`/`ADMIN_PASSWORD` (it re-hashes an existing address); confirm with `docker compose exec db psql -U postgres -d friendly_crm -c "select email from users;"` |
 | Port 80 busy | Hostinger templates sometimes ship Apache: `systemctl stop apache2 && systemctl disable apache2` |
 

@@ -17,6 +17,7 @@ import { toCsv } from '../utils/csv';
 import { inviteCustomer, portalPath } from '../services/portalService';
 import { isApiEnabled, apiGetLeads } from '../services/apiClient';
 import { createLead, patchLead, deleteLead as removeLead, patchLeads, deleteLeads } from '../services/leadWrites';
+import { useTenantUsers } from '../hooks/useTenantUsers';
 import {
   getCallingMode, setCallingMode, initiateCloudCall,
   CALL_STATUSES, type CallingMode, type CallStatus,
@@ -164,7 +165,7 @@ export default function Leads() {
     () => isExecutive ? allLeadsData.filter(l => l.assignedTo === userId) : allLeadsData,
     [allLeadsData, isExecutive, userId]
   );
-  const allUsers = useMemo(() => getByTenant<UserType>('users', tenantId), [tenantId, refreshKey]);
+  const allUsers = useTenantUsers(tenantId, refreshKey);
   const tenantProjects = useMemo(() => getByTenant<{ tenantId: string; id: string; name: string }>('projects', tenantId), [tenantId, refreshKey]);
   const notes = useMemo(() => getByTenant<Note>('notes', tenantId), [tenantId, refreshKey]);
   const activities = useMemo(() => getByTenant<Activity>('activities', tenantId), [tenantId, refreshKey]);

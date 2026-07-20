@@ -4,9 +4,10 @@ import { formatCurrencyFull } from '../utils/format';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, AreaChart, Area } from 'recharts';
 import { useAuth } from '../context/AuthContext';
 import { getByTenant } from '../services/db';
+import { useTenantUsers } from '../hooks/useTenantUsers';
 import { getLeadStages } from '../services/metaService';
 import { formatCurrency } from '../utils/format';
-import type { Lead, User as UserType } from '../types';
+import type { Lead } from '../types';
 
 const sourceColors: Record<string, string> = {
   Website: '#6366f1', 'Google Ads': '#8b5cf6', Referral: '#10b981',
@@ -43,7 +44,7 @@ export default function Reports() {
 
   const allLeadsData = useMemo(() => getByTenant<Lead>('leads', tenantId), [tenantId]);
   const leads = useMemo(() => isExecutive ? allLeadsData.filter(l => l.assignedTo === userId) : allLeadsData, [allLeadsData, isExecutive, userId]);
-  const allUsers = useMemo(() => getByTenant<UserType>('users', tenantId), [tenantId]);
+  const allUsers = useTenantUsers(tenantId);
 
   // Dynamic conversion data from actual leads
   const conversionData = useMemo(() => {

@@ -2,8 +2,9 @@ import { useState, useMemo, useEffect } from 'react';
 import { Wrench, Plus, Search, Filter, Clock, AlertCircle, CheckCircle2, User, MapPin, X, Trash2 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { getByTenant, create, update, remove } from '../services/db';
+import { useTenantUsers } from '../hooks/useTenantUsers';
 import { localeFor } from '../utils/format';
-import type { Ticket, TicketPriority, TicketStatus, User as UserType, Project, Lead } from '../types';
+import type { Ticket, TicketPriority, TicketStatus, Project, Lead } from '../types';
 import toast from 'react-hot-toast';
 
 const priorityColors: Record<TicketPriority, string> = {
@@ -52,7 +53,7 @@ export default function Service() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshKey]);
-  const users = useMemo(() => getByTenant<UserType>('users', tenantId), [tenantId, refreshKey]);
+  const users = useTenantUsers(tenantId, refreshKey);
   const projects = useMemo(() => getByTenant<Project>('projects', tenantId), [tenantId, refreshKey]);
 
   const filtered = tickets.filter(t => {

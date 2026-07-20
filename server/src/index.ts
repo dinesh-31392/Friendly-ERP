@@ -8,6 +8,7 @@ import { pool, platformPool } from './db.js';
 import { authRoutes } from './routes/authRoutes.js';
 import { leadsRoutes } from './routes/leadsRoutes.js';
 import { metaRoutes } from './routes/metaRoutes.js';
+import { usersRoutes } from './routes/usersRoutes.js';
 
 // trustProxy MUST be a hop count, not `true`. nginx sets
 // `X-Forwarded-For: $proxy_add_x_forwarded_for`, which APPENDS the real peer to
@@ -57,6 +58,7 @@ await app.register(cors, { origin: env.corsOrigin.split(',').map(o => o.trim()) 
 await app.register(authRoutes);
 await app.register(leadsRoutes);
 await app.register(metaRoutes);
+await app.register(usersRoutes);
 
 app.get('/api/health', async () => {
   const { rows: [r] } = await pool.query('SELECT 1 AS ok');

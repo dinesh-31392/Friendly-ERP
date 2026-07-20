@@ -5,9 +5,10 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { getByTenant } from '../services/db';
+import { useTenantUsers } from '../hooks/useTenantUsers';
 import { getLeadStages } from '../services/metaService';
 import { formatCurrency } from '../utils/format';
-import type { Lead, LeadStage, User as UserType } from '../types';
+import type { Lead, LeadStage } from '../types';
 import { Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 
 export default function SalesPerformance() {
@@ -18,7 +19,7 @@ export default function SalesPerformance() {
   const [timeRange, setTimeRange] = useState<'week' | 'month' | 'quarter' | 'year'>('month');
 
   const allLeads = useMemo(() => getByTenant<Lead>('leads', tenantId), [tenantId, refreshKey]);
-  const allUsers = useMemo(() => getByTenant<UserType>('users', tenantId), [tenantId, refreshKey]);
+  const allUsers = useTenantUsers(tenantId, refreshKey);
 
   // Filter leads by time range
   const filteredLeads = useMemo(() => {

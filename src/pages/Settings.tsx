@@ -11,6 +11,7 @@ import PipelineSettings from '../components/PipelineSettings';
 import { PLANS, getPlanForTenant, getEffectiveLimits, withinLimit, planPriceLabel } from '../services/planService';
 import { portalUrl, portalPath, isPremium, slugify, isSlugAvailable } from '../services/portalService';
 import { getByTenant, update, create, remove, clearDatabase, logAudit } from '../services/db';
+import { useTenantUsers } from '../hooks/useTenantUsers';
 import type { User as UserType, Tenant, Role, AuditLog } from '../types';
 import toast from 'react-hot-toast';
 
@@ -38,10 +39,7 @@ export default function Settings() {
   const refresh = () => setRefreshKey(k => k + 1);
   const [showAddUser, setShowAddUser] = useState(false);
 
-  const tenantUsers = useMemo(
-    () => tenant ? getByTenant<UserType>('users', tenant.id) : [],
-    [tenant, refreshKey]
-  );
+  const tenantUsers = useTenantUsers(tenant?.id || '', refreshKey);
 
   const auditLogs = useMemo(
     () => tenant

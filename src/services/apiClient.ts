@@ -188,6 +188,15 @@ export async function apiDeleteLead(id: string): Promise<void> {
   await request<void>(`/api/leads/${id}`, { method: 'DELETE' });
 }
 
+// ── Users (workspace directory) ──────────────────────────────────────────────
+
+/** The tenant's users. Needed to resolve an `assignedTo` id to a person —
+ *  without it the UI can only show "Unassigned". Never includes a password. */
+export async function apiGetUsers(): Promise<User[]> {
+  const res = await request<{ users: User[] }>('/api/users');
+  return res.users;
+}
+
 // ── Metadata (dynamic forms / pipelines) ─────────────────────────────────────
 
 export async function apiGetMeta(entity: string): Promise<Record<string, unknown>> {

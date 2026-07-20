@@ -2,8 +2,9 @@ import { useState, useMemo, useEffect } from 'react';
 import { ChevronLeft, ChevronRight, Plus, Clock, MapPin, Calendar as CalendarIcon, X } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { getByTenant, create, update, remove } from '../services/db';
+import { useTenantUsers } from '../hooks/useTenantUsers';
 import { localeFor } from '../utils/format';
-import type { Task, Lead, User as UserType, Priority, TaskCategory, TaskStatus } from '../types';
+import type { Task, Lead, Priority, TaskCategory, TaskStatus } from '../types';
 import toast from 'react-hot-toast';
 
 const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -63,7 +64,7 @@ export default function Calendar() {
   const allTasks = useMemo(() => getByTenant<Task>('tasks', tenantId), [tenantId, refreshKey]);
   const tasks = isExecutive ? allTasks.filter(t => t.userId === userId) : allTasks;
   const leads = useMemo(() => getByTenant<Lead>('leads', tenantId), [tenantId, refreshKey]);
-  const users = useMemo(() => getByTenant<UserType>('users', tenantId), [tenantId, refreshKey]);
+  const users = useTenantUsers(tenantId, refreshKey);
 
   // Convert an ISO timestamp to the user's LOCAL calendar date — comparing
   // against the raw UTC date (`iso.split('T')[0]`) puts events on the wrong

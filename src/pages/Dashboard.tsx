@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { getByTenant, update, logAudit } from '../services/db';
+import { useTenantUsers } from '../hooks/useTenantUsers';
 import { getLeadStages } from '../services/metaService';
 import { formatCurrency } from '../utils/format';
 import type { Lead, Task, Unit, Activity, User as UserType } from '../types';
@@ -31,7 +32,7 @@ export default function Dashboard() {
   const allTasks = useMemo(() => getByTenant<Task>('tasks', tenantId), [tenantId, refreshKey]);
   const units = useMemo(() => getByTenant<Unit>('units', tenantId), [tenantId, refreshKey]);
   const activities = useMemo(() => getByTenant<Activity>('activities', tenantId), [tenantId, refreshKey]);
-  const users = useMemo(() => getByTenant<UserType>('users', tenantId), [tenantId, refreshKey]);
+  const users = useTenantUsers(tenantId, refreshKey);
 
   // Performance: Create lookup maps for O(1) access
   const userMap = useMemo(() => {

@@ -62,6 +62,30 @@ export const ROLE_PERMS: Record<string, string[]> = {
   ],
 };
 
+/**
+ * Default lead pipeline. This is NOT cosmetic seed data — it is REQUIRED.
+ *
+ * `validate_lead_stage()` rejects any lead whose stage is not in the tenant's
+ * active pipeline definition, so a tenant without one cannot have a single lead
+ * created (every INSERT fails with 23514). Bootstrapping a deployment without
+ * this row produces a CRM that looks fine and silently refuses all writes.
+ *
+ * Each stage carries BOTH `key` and `id` on purpose: the trigger matches on
+ * `key` (`definition->'stages' @> [{"key": ...}]`) while the SPA's StageDef
+ * reads `id`. Mirrors LEAD_STAGES in src/types/index.ts — keep them in step.
+ */
+const DEFAULT_PIPELINE = {
+  stages: [
+    { key: 'new',             label: 'New',             color: 'bg-blue-500',    core: true },
+    { key: 'contacted',       label: 'Contacted',       color: 'bg-purple-500',  core: false },
+    { key: 'qualified',       label: 'Qualified',       color: 'bg-indigo-500',  core: false },
+    { key: 'visit_scheduled', label: 'Visit Scheduled', color: 'bg-amber-500',   core: false },
+    { key: 'negotiation',     label: 'Negotiation',     color: 'bg-orange-500',  core: false },
+    { key: 'booked',          label: 'Booked',          color: 'bg-emerald-500', core: true },
+    { key: 'lost',            label: 'Lost',            color: 'bg-red-400',     core: true },
+  ].map(s => ({ ...s, id: s.key })),
+};
+
 for (const key of PERMISSIONS) {
   await client.query(
     `INSERT INTO permissions (key, description) VALUES ($1, $1) ON CONFLICT DO NOTHING`,
@@ -100,6 +124,23 @@ const { rows: [platform] } = await client.query(
    RETURNING id`,
   [adminEmail.toLowerCase()],
 );
+
+// Give EVERY tenant that lacks one an active lead pipeline. Written as a
+// backfill rather than a single insert for the platform tenant so that re-running
+// the bootstrap repairs any workspace that predates this (or was created by a
+// path that forgot), and so it stays idempotent.
+const { rowCount: pipelinesAdded } = await client.query(
+  `INSERT INTO schema_definitions (tenant_id, entity, kind, version, is_active, definition)
+   SELECT t.id, 'lead', 'pipeline', 1, true, $1::jsonb
+     FROM tenants t
+    WHERE NOT EXISTS (
+      SELECT 1 FROM schema_definitions sd
+       WHERE sd.tenant_id = t.id
+         AND sd.entity = 'lead' AND sd.kind = 'pipeline' AND sd.is_active
+    )`,
+  [JSON.stringify(DEFAULT_PIPELINE)],
+);
+console.log(`lead pipeline ensured (${pipelinesAdded} tenant(s) provisioned)`);
 
 const { rows: [adminRole] } = await client.query(
   `INSERT INTO roles (tenant_id, name, is_system) VALUES ($1, 'super_admin', true)

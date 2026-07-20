@@ -7,7 +7,7 @@ import {
   List, LayoutGrid, Kanban, UserCheck
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { getByTenant, create, update, remove, logAudit } from '../services/db';
+import { getByTenant, create, update, logAudit } from '../services/db';
 import type { Lead, LeadStage, Note, Activity, Task, Priority, User as UserType } from '../types';
 import { leadScoreBand, explainLeadScore } from '../types';
 import { getLeadStages, getLeadSources, getConfigurations, type StageDef } from '../services/metaService';
@@ -16,6 +16,7 @@ import { telHref, whatsappHref, mailtoHref } from '../utils/contact';
 import { toCsv } from '../utils/csv';
 import { inviteCustomer, portalPath } from '../services/portalService';
 import { isApiEnabled, apiGetLeads } from '../services/apiClient';
+import { createLead, patchLead, deleteLead as removeLead, patchLeads, deleteLeads } from '../services/leadWrites';
 import {
   getCallingMode, setCallingMode, initiateCloudCall,
   CALL_STATUSES, type CallingMode, type CallStatus,
@@ -244,7 +245,7 @@ export default function Leads() {
     logAudit({ tenantId, userId, userName: user.name, action, entity: 'lead', entityId, details });
   };
 
-  const handleMerge = (primary: Lead, secondary: Lead) => {
+  const handleMerge = async (primary: Lead, secondary: Lead) => {
     if (!confirm(`Merge "${secondary.name}" into "${primary.name}"? Notes & activities will be moved to the primary lead and the duplicate will be deleted.`)) return;
     // Move notes & activities to the primary lead
     getByTenant<Note>('notes', tenantId).filter(n => n.leadId === secondary.id).forEach(n => {
@@ -258,12 +259,19 @@ export default function Leads() {
     const stageOrder = leadStages.map(s => s.id);
     const stageRank = (s: LeadStage) => (s === 'lost' ? -1 : stageOrder.indexOf(s));
     const bestStage = stageRank(secondary.stage) > stageRank(primary.stage) ? secondary.stage : primary.stage;
-    update<Lead>('leads', primary.id, {
-      budget: Math.max(primary.budget, secondary.budget),
-      stage: bestStage,
-      lastContact: new Date().toISOString(),
-    });
-    remove('leads', secondary.id);
+    try {
+      await patchLead(primary.id, {
+        budget: Math.max(primary.budget, secondary.budget),
+        stage: bestStage,
+        lastContact: new Date().toISOString(),
+      });
+      // Only drop the duplicate once the survivor actually took the merge —
+      // otherwise a failed patch would still destroy the secondary lead.
+      await removeLead(secondary.id);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not merge the leads');
+      return;
+    }
     audit('merge', primary.id, `Merged duplicate "${secondary.name}" into "${primary.name}"`);
     setSelectedIds(prev => {
       if (!prev.has(secondary.id)) return prev;
@@ -273,7 +281,7 @@ export default function Leads() {
     toast.success('Leads merged successfully');
   };
 
-  const handleStageChange = (leadId: string, newStage: LeadStage) => {
+  const handleStageChange = async (leadId: string, newStage: LeadStage) => {
     // "Booked" is an outcome, not a label: it requires a unit + payment
     // schedule, which only the booking flow creates
     if (newStage === 'booked') {
@@ -283,21 +291,29 @@ export default function Leads() {
         return;
       }
     }
-    update<Lead>('leads', leadId, { stage: newStage, lastContact: new Date().toISOString() });
+    const now = new Date().toISOString();
+    try {
+      await patchLead(leadId, { stage: newStage, lastContact: now });
+    } catch (err) {
+      // Surface the server's reason (e.g. a stage not in this tenant's
+      // pipeline, or no permission) instead of leaving the board looking moved.
+      toast.error(err instanceof Error ? err.message : 'Could not update the stage');
+      return;
+    }
     create<Activity>('activities', {
       id: '', tenantId, leadId, userId, type: 'status_change',
       description: `Stage changed to ${leadStages.find(s => s.id === newStage)?.label}`,
-      createdAt: new Date().toISOString(),
+      createdAt: now,
     });
     audit('stage_change', leadId, `Stage changed to ${leadStages.find(s => s.id === newStage)?.label}`);
     refresh();
     if (selectedLead?.id === leadId) {
-      setSelectedLead(prev => prev ? { ...prev, stage: newStage, lastContact: new Date().toISOString() } : null);
+      setSelectedLead(prev => prev ? { ...prev, stage: newStage, lastContact: now } : null);
     }
     toast.success('Lead stage updated');
   };
 
-  const handleAddNote = () => {
+  const handleAddNote = async () => {
     if (!noteInput.trim() || !selectedLead) return;
     create<Note>('notes', {
       id: '', tenantId, leadId: selectedLead.id, userId, content: noteInput.trim(),
@@ -309,14 +325,16 @@ export default function Leads() {
       createdAt: new Date().toISOString(),
     });
     const now = new Date().toISOString();
-    update<Lead>('leads', selectedLead.id, { lastContact: now });
+    // Non-fatal: the note itself is already saved, so a failed "last contact"
+    // touch must not present as the note having failed.
+    await patchLead(selectedLead.id, { lastContact: now }).catch(() => {});
     setSelectedLead(prev => prev ? { ...prev, lastContact: now } : null);
     setNoteInput('');
     refresh();
     toast.success('Note added');
   };
 
-  const handleAddLead = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleAddLead = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const form = e.currentTarget;
     const formData = new FormData(form);
@@ -335,25 +353,36 @@ export default function Leads() {
       if (!confirm(`A lead with this phone/email already exists ("${existing.name}"). Create anyway?`)) return;
     }
 
-    const created = create<Lead>('leads', {
-      id: '', tenantId, name, email: email || '', phone,
-      source: (formData.get('source') as string) || 'Manual',
-      project: (formData.get('project') as string) || tenantProjects[0]?.name || 'General Enquiry',
-      budget: Number(formData.get('budget')) || 0,
-      configuration: (formData.get('configuration') as string) || '2 BHK',
-      stage: 'new', priority: 'warm', assignedTo: (formData.get('assignedTo') as string) || userId,
-      lastContact: new Date().toISOString(), createdAt: new Date().toISOString(),
-    });
+    let created: Lead;
+    try {
+      created = await createLead({
+        tenantId, name, email: email || '', phone,
+        source: (formData.get('source') as string) || 'Manual',
+        project: (formData.get('project') as string) || tenantProjects[0]?.name || 'General Enquiry',
+        budget: Number(formData.get('budget')) || 0,
+        configuration: (formData.get('configuration') as string) || '2 BHK',
+        stage: 'new', priority: 'warm', assignedTo: (formData.get('assignedTo') as string) || userId,
+        lastContact: new Date().toISOString(), createdAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not create the lead');
+      return;
+    }
     audit('create', created.id, `Created lead "${name}"`);
     setShowAddModal(false);
     refresh();
     toast.success('Lead created successfully');
   };
 
-  const handleDeleteLead = (leadId: string) => {
+  const handleDeleteLead = async (leadId: string) => {
     if (!confirm('Are you sure you want to delete this lead?')) return;
     const target = leads.find(l => l.id === leadId);
-    remove('leads', leadId);
+    try {
+      await removeLead(leadId);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not delete the lead');
+      return;
+    }
     audit('delete', leadId, `Deleted lead "${target?.name || leadId}"`);
     if (selectedLead?.id === leadId) setSelectedLead(null);
     // Keep the bulk-selection count honest
@@ -387,17 +416,19 @@ export default function Leads() {
 
   const clearSelection = () => setSelectedIds(new Set());
 
-  const handleBulkAssign = (assigneeId: string) => {
+  const handleBulkAssign = async (assigneeId: string) => {
     if (!assigneeId || selectedLeads.length === 0) return;
-    selectedLeads.forEach(l => update<Lead>('leads', l.id, { assignedTo: assigneeId }));
+    const { ok, failed } = await patchLeads(selectedLeads.map(l => l.id), { assignedTo: assigneeId });
     setSelectedLead(prev => prev && selectedIds.has(prev.id) ? { ...prev, assignedTo: assigneeId } : prev);
-    audit('bulk_assign', 'bulk', `Bulk-assigned ${selectedLeads.length} lead(s) to ${getUserName(assigneeId)}`);
-    toast.success(`${selectedLeads.length} lead(s) assigned to ${getUserName(assigneeId)}`);
+    audit('bulk_assign', 'bulk', `Bulk-assigned ${ok} lead(s) to ${getUserName(assigneeId)}`);
+    // Report what actually happened — a partial failure used to be invisible.
+    if (ok) toast.success(`${ok} lead(s) assigned to ${getUserName(assigneeId)}`);
+    if (failed) toast.error(`${failed} lead(s) could not be assigned`);
     clearSelection();
     refresh();
   };
 
-  const handleBulkStage = (stage: LeadStage) => {
+  const handleBulkStage = async (stage: LeadStage) => {
     if (selectedLeads.length === 0) return;
     if (stage === 'booked') {
       toast.error('Bulk-moving to Booked is disabled — each booking needs a unit and payment schedule. Use "Confirm Unit Booking" per lead.');
@@ -405,36 +436,39 @@ export default function Leads() {
     }
     const label = leadStages.find(s => s.id === stage)?.label;
     const now = new Date().toISOString();
+    const { ok, failed } = await patchLeads(selectedLeads.map(l => l.id), { stage, lastContact: now });
     selectedLeads.forEach(l => {
-      update<Lead>('leads', l.id, { stage, lastContact: now });
       create<Activity>('activities', {
         id: '', tenantId, leadId: l.id, userId, type: 'status_change',
         description: `Stage changed to ${label} (bulk update)`, createdAt: now,
       });
     });
-    audit('bulk_stage', 'bulk', `Bulk-moved ${selectedLeads.length} lead(s) to ${label}`);
-    toast.success(`${selectedLeads.length} lead(s) moved to ${label}`);
+    audit('bulk_stage', 'bulk', `Bulk-moved ${ok} lead(s) to ${label}`);
+    if (ok) toast.success(`${ok} lead(s) moved to ${label}`);
+    if (failed) toast.error(`${failed} lead(s) could not be moved`);
     clearSelection();
     refresh();
   };
 
-  const handleBulkPriority = (priority: Priority) => {
+  const handleBulkPriority = async (priority: Priority) => {
     if (selectedLeads.length === 0) return;
-    selectedLeads.forEach(l => update<Lead>('leads', l.id, { priority }));
+    const { ok, failed } = await patchLeads(selectedLeads.map(l => l.id), { priority });
     setSelectedLead(prev => prev && selectedIds.has(prev.id) ? { ...prev, priority } : prev);
-    audit('bulk_priority', 'bulk', `Bulk-set priority ${priority} on ${selectedLeads.length} lead(s)`);
-    toast.success(`${selectedLeads.length} lead(s) set to ${priority}`);
+    audit('bulk_priority', 'bulk', `Bulk-set priority ${priority} on ${ok} lead(s)`);
+    if (ok) toast.success(`${ok} lead(s) set to ${priority}`);
+    if (failed) toast.error(`${failed} lead(s) could not be updated`);
     clearSelection();
     refresh();
   };
 
-  const handleBulkDelete = () => {
+  const handleBulkDelete = async () => {
     if (selectedLeads.length === 0) return;
     if (!confirm(`Delete ${selectedLeads.length} lead(s)? This cannot be undone.`)) return;
-    selectedLeads.forEach(l => remove('leads', l.id));
-    audit('bulk_delete', 'bulk', `Bulk-deleted ${selectedLeads.length} lead(s): ${selectedLeads.slice(0, 5).map(l => l.name).join(', ')}${selectedLeads.length > 5 ? '…' : ''}`);
+    const { ok, failed } = await deleteLeads(selectedLeads.map(l => l.id));
+    audit('bulk_delete', 'bulk', `Bulk-deleted ${ok} lead(s): ${selectedLeads.slice(0, 5).map(l => l.name).join(', ')}${selectedLeads.length > 5 ? '…' : ''}`);
     if (selectedLead && selectedIds.has(selectedLead.id)) setSelectedLead(null);
-    toast.success(`${selectedLeads.length} lead(s) deleted`);
+    if (ok) toast.success(`${ok} lead(s) deleted`);
+    if (failed) toast.error(`${failed} lead(s) could not be deleted`);
     clearSelection();
     refresh();
   };
@@ -499,18 +533,24 @@ export default function Leads() {
     setImportPreview({ valid, invalid, dupes });
   };
 
-  const handleConfirmImport = () => {
+  const handleConfirmImport = async () => {
     if (!importPreview || importPreview.valid.length === 0) return;
     const now = new Date().toISOString();
-    importPreview.valid.forEach(rowData => {
-      create<Lead>('leads', {
-        id: '', tenantId, ...rowData,
-        stage: 'new', priority: 'warm', assignedTo: userId,
-        lastContact: now, createdAt: now,
-      });
-    });
-    audit('bulk_import', 'bulk', `Bulk-imported ${importPreview.valid.length} lead(s) from CSV`);
-    toast.success(`${importPreview.valid.length} lead(s) imported`);
+    // Sequential: a CSV can be hundreds of rows and the API rate-limits per IP.
+    let ok = 0, failed = 0;
+    for (const rowData of importPreview.valid) {
+      try {
+        await createLead({
+          tenantId, ...rowData,
+          stage: 'new', priority: 'warm', assignedTo: userId,
+          lastContact: now, createdAt: now,
+        });
+        ok++;
+      } catch { failed++; }
+    }
+    audit('bulk_import', 'bulk', `Bulk-imported ${ok} lead(s) from CSV`);
+    if (ok) toast.success(`${ok} lead(s) imported`);
+    if (failed) toast.error(`${failed} row(s) could not be imported`);
     setImportPreview(null);
     setShowImport(false);
     refresh();
@@ -623,7 +663,7 @@ export default function Leads() {
             local until the Phase-2 write APIs land */}
         {apiLeads !== null && (
           <div className="flex items-center gap-2 bg-indigo-50 border border-indigo-200 text-indigo-700 rounded-xl px-3 py-2 mb-4 text-xs font-medium">
-            ⚡ Live API data (RLS-scoped) — read-only preview; edits made here stay in the local demo store until write APIs are enabled.
+            ⚡ Live server data — leads are stored in PostgreSQL with tenant isolation (RLS) and permissions enforced in the database. Creates, edits and deletes are saved to the server.
           </div>
         )}
 
@@ -1035,9 +1075,15 @@ export default function Leads() {
                 <p className="text-[11px] text-zinc-500 uppercase tracking-wider font-medium mb-1.5">Assigned To</p>
                 <select
                   value={selectedLead.assignedTo}
-                  onChange={e => {
-                    update<Lead>('leads', selectedLead.id, { assignedTo: e.target.value });
-                    setSelectedLead(prev => prev ? { ...prev, assignedTo: e.target.value } : null);
+                  onChange={async e => {
+                    const assignedTo = e.target.value;   // capture before awaiting
+                    try {
+                      await patchLead(selectedLead.id, { assignedTo });
+                    } catch (err) {
+                      toast.error(err instanceof Error ? err.message : 'Could not reassign the lead');
+                      return;
+                    }
+                    setSelectedLead(prev => prev ? { ...prev, assignedTo } : null);
                     refresh();
                     toast.success('Lead reassigned');
                   }}
@@ -1057,8 +1103,13 @@ export default function Leads() {
                 {(['hot', 'warm', 'cold'] as const).map(p => (
                   <button
                     key={p}
-                    onClick={() => {
-                      update<Lead>('leads', selectedLead.id, { priority: p });
+                    onClick={async () => {
+                      try {
+                        await patchLead(selectedLead.id, { priority: p });
+                      } catch (err) {
+                        toast.error(err instanceof Error ? err.message : 'Could not set the priority');
+                        return;
+                      }
                       setSelectedLead(prev => prev ? { ...prev, priority: p } : null);
                       refresh();
                       toast.success(`Priority set to ${p}`);
@@ -1221,7 +1272,7 @@ export default function Leads() {
                   const targetName = selectedLead.name;
                   toast.loading('Getting your location…', { id: 'geo' });
                   navigator.geolocation.getCurrentPosition(
-                    pos => {
+                    async pos => {
                       const { latitude, longitude, accuracy } = pos.coords;
                       const mapsLink = `https://maps.google.com/?q=${latitude.toFixed(6)},${longitude.toFixed(6)}`;
                       create<Activity>('activities', {
@@ -1231,7 +1282,7 @@ export default function Leads() {
                       });
                       audit('site_checkin', targetId, `Geo-verified site visit check-in (${latitude.toFixed(5)}, ${longitude.toFixed(5)})`);
                       const now = new Date().toISOString();
-                      update<Lead>('leads', targetId, { lastContact: now });
+                      await patchLead(targetId, { lastContact: now }).catch(() => {});
                       setSelectedLead(prev => prev && prev.id === targetId ? { ...prev, lastContact: now } : prev);
                       refresh();
                       toast.success('Site visit check-in verified with your GPS location ✓', { id: 'geo' });
@@ -1349,7 +1400,7 @@ export default function Leads() {
               {callLogModal.mode === 'API_CLOUD' ? '☁️ Cloud call (recording attached automatically in production)' : '📱 SIM call from your device'}
             </p>
             <form
-              onSubmit={e => {
+              onSubmit={async e => {
                 e.preventDefault();
                 const fd = new FormData(e.currentTarget);
                 const status = fd.get('status') as CallStatus;
@@ -1363,7 +1414,7 @@ export default function Leads() {
                   createdAt: now,
                 });
                 audit('call_log', callLogModal.leadId, `Logged ${callLogModal.mode === 'API_CLOUD' ? 'cloud' : 'SIM'} call: ${statusLabel}, ${duration} min`);
-                update<Lead>('leads', callLogModal.leadId, { lastContact: now });
+                await patchLead(callLogModal.leadId, { lastContact: now }).catch(() => {});
                 setSelectedLead(prev => prev && prev.id === callLogModal.leadId ? { ...prev, lastContact: now } : prev);
                 setCallLogModal(null);
                 refresh();

@@ -70,7 +70,13 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const res = await fetch(`${getApiUrl()}${path}`, {
     ...init,
     headers: {
-      'Content-Type': 'application/json',
+      // Declare a JSON body ONLY when there is one. Fastify rejects a request
+      // carrying `Content-Type: application/json` with an empty body
+      // ("Body cannot be empty when content-type is set to 'application/json'"),
+      // which made every bodyless DELETE fail with a 400.
+      ...(init.body !== undefined && init.body !== null
+        ? { 'Content-Type': 'application/json' }
+        : {}),
       ...(getApiToken() ? { Authorization: `Bearer ${getApiToken()}` } : {}),
       ...(init.headers || {}),
     },
@@ -132,6 +138,54 @@ export async function apiGetLeads(params: { stage?: string; search?: string } = 
   if (params.search) qs.set('search', params.search);
   const res = await request<{ leads: Lead[] }>(`/api/leads${qs.size ? `?${qs}` : ''}`);
   return res.leads;
+}
+
+// ── Leads (write API — phase 2 of the cutover) ───────────────────────────────
+
+/**
+ * The only fields the write API accepts. The server sets
+ * `additionalProperties: false`, so forwarding a whole `Lead` (with id,
+ * tenantId, createdAt) would be rejected with a 400 — server-owned columns are
+ * not the client's to set. Undefined values are dropped so a PATCH stays
+ * genuinely partial.
+ */
+const WRITABLE_LEAD_FIELDS = [
+  'name', 'email', 'phone', 'source', 'project', 'projectId', 'budget',
+  'configuration', 'stage', 'priority', 'score', 'assignedTo', 'customFields',
+  'lastContact',
+] as const;
+
+function toWritable(patch: Partial<Lead>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const key of WRITABLE_LEAD_FIELDS) {
+    const value = (patch as Record<string, unknown>)[key];
+    if (value === undefined) continue;
+    // Form inputs hand back strings; the API schema wants real numbers.
+    if (key === 'budget') out[key] = Number(value) || 0;
+    else if (key === 'score') out[key] = Math.round(Number(value)) || 0;
+    else out[key] = value;
+  }
+  return out;
+}
+
+export async function apiCreateLead(input: Partial<Lead>): Promise<Lead> {
+  const res = await request<{ lead: Lead }>('/api/leads', {
+    method: 'POST',
+    body: JSON.stringify(toWritable(input)),
+  });
+  return res.lead;
+}
+
+export async function apiUpdateLead(id: string, patch: Partial<Lead>): Promise<Lead> {
+  const res = await request<{ lead: Lead }>(`/api/leads/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify(toWritable(patch)),
+  });
+  return res.lead;
+}
+
+export async function apiDeleteLead(id: string): Promise<void> {
+  await request<void>(`/api/leads/${id}`, { method: 'DELETE' });
 }
 
 // ── Metadata (dynamic forms / pipelines) ─────────────────────────────────────

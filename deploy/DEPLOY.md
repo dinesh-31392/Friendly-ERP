@@ -131,11 +131,13 @@ A per-browser override remains for pointing a local build at a staging API
 (`localStorage.setItem('friendly_crm_api_url', 'https://staging.example.com')`).
 That is a developer tool — it must never be how production reaches the backend.
 
-> **Known scope limit:** the API is currently read-only (auth, leads, metadata).
-> Login, tenant isolation, RBAC and lead reads are enforced by Postgres; other
-> modules still write through the browser store. Treat this deployment as
-> production-grade for *identity and access*, and stage the remaining write-path
-> cutover before onboarding real customer data at scale.
+> **Known scope limit:** **Leads are fully server-backed** — create, edit, delete,
+> bulk actions and CSV import all go through the API, with RLS, RBAC and the
+> immutable audit log enforced by PostgreSQL. Auth and metadata are server-backed
+> too. The *other* modules (bookings, inventory, notes/activities, projects…)
+> still write through the browser store, so treat this deployment as
+> production-grade for **identity, access and the lead pipeline**, and stage the
+> remaining modules before relying on them for real customer data.
 
 ## Step 8 — Domain + HTTPS (required for the mobile/desktop app)
 

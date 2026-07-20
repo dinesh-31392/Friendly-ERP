@@ -95,7 +95,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 interface ApiLoginResponse {
   token: string;
-  user: { id: string; name: string; email: string; role: string };
+  user: { id: string; name: string; email: string; role: string; mustChangePassword?: boolean };
   tenant: {
     id: string; name: string; company: string; slug: string;
     plan: string; status: string; currency: string; country: string;
@@ -117,6 +117,9 @@ export async function apiLogin(
     id: res.user.id, tenantId: res.tenant.id, name: res.user.name,
     email: res.user.email, password: '', role: res.user.role as Role,
     avatar: '', phone: '', active: true, createdAt: new Date().toISOString(),
+    // Drives the blocking ForcePasswordChange screen after an admin issues a
+    // temporary password.
+    mustChangePassword: res.user.mustChangePassword ?? false,
   };
   const tenant: Tenant = {
     id: res.tenant.id, name: res.tenant.name, company: res.tenant.company,
@@ -195,6 +198,46 @@ export async function apiDeleteLead(id: string): Promise<void> {
 export async function apiGetUsers(): Promise<User[]> {
   const res = await request<{ users: User[] }>('/api/users');
   return res.users;
+}
+
+export interface ApiRole {
+  id: string;
+  name: string;
+  isSystem: boolean;
+  /** False when the role grants permissions the caller doesn't hold, so the UI
+   *  can disable it instead of offering a choice the server will reject. */
+  assignable: boolean;
+}
+
+export async function apiGetRoles(): Promise<ApiRole[]> {
+  const res = await request<{ roles: ApiRole[] }>('/api/roles');
+  return res.roles;
+}
+
+/**
+ * Create a colleague's account. The server generates the password and returns
+ * it EXACTLY once — it is not stored in plain text and cannot be fetched again,
+ * so the caller must show or copy it immediately.
+ */
+export async function apiCreateUser(input: {
+  name: string; email: string; phone?: string; roleId: string;
+}): Promise<{ user: User; temporaryPassword: string }> {
+  return request<{ user: User; temporaryPassword: string }>('/api/users', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}
+
+/** Rename, deactivate/reactivate, reassign a role, or issue a fresh temporary
+ *  password. `temporaryPassword` comes back only when resetPassword was set. */
+export async function apiUpdateUser(
+  id: string,
+  patch: { name?: string; phone?: string; active?: boolean; roleId?: string; resetPassword?: boolean },
+): Promise<{ user: User; temporaryPassword?: string }> {
+  return request<{ user: User; temporaryPassword?: string }>(`/api/users/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify(patch),
+  });
 }
 
 // ── Metadata (dynamic forms / pipelines) ─────────────────────────────────────

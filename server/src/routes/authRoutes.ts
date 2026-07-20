@@ -46,6 +46,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
 
     const { rows } = await platformPool.query(
       `SELECT u.id, u.tenant_id, u.name, u.email, u.password_hash, u.active,
+              u.must_change_password,
               r.name AS role_name,
               t.name AS tenant_name, t.company, t.slug, t.plan, t.status,
               t.currency, t.country, t.primary_color, t.logo_url
@@ -85,7 +86,13 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     const token = signToken({ sub: user.id, tid: user.tenant_id, rol: user.role_name });
     return {
       token,
-      user: { id: user.id, name: user.name, email: user.email, role: user.role_name },
+      // mustChangePassword drives the blocking ForcePasswordChange screen. It
+      // has to travel with the login response, or an admin-issued temporary
+      // password silently becomes the user's permanent one.
+      user: {
+        id: user.id, name: user.name, email: user.email, role: user.role_name,
+        mustChangePassword: user.must_change_password,
+      },
       tenant: {
         id: user.tenant_id, name: user.tenant_name, company: user.company,
         slug: user.slug, plan: user.plan, status: user.status,
@@ -99,7 +106,8 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/auth/me', { preHandler: requireAuth }, async (req, reply) =>
     withTenantContext(req.ctx, async (db) => {
       const { rows: [me] } = await db.query(
-        `SELECT u.id, u.name, u.email, r.name AS role
+        `SELECT u.id, u.name, u.email, u.must_change_password AS "mustChangePassword",
+                r.name AS role
            FROM users u JOIN roles r ON r.id = u.role_id
           WHERE u.id = app_current_user() AND u.active`,
       );

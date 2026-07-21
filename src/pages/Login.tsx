@@ -164,8 +164,8 @@ export default function Login() {
               <Building2 className="h-6 w-6 text-white" />
             </div>
             <div>
-              <p className="text-lg font-bold text-white tracking-tight">Friendly CRM</p>
-              <p className="text-sm text-indigo-200">Real Estate Operating System</p>
+              <p className="text-lg font-bold text-white tracking-tight">Friendly ERP</p>
+              <p className="text-sm text-indigo-200">Real Estate & Construction ERP</p>
             </div>
           </div>
 
@@ -213,7 +213,7 @@ export default function Login() {
             <div className="h-10 w-10 rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center">
               <Building2 className="h-5 w-5 text-white" />
             </div>
-            <p className="text-lg font-bold text-zinc-900">Friendly CRM</p>
+            <p className="text-lg font-bold text-zinc-900">Friendly ERP</p>
           </div>
 
           <div className="bg-white rounded-2xl border border-zinc-200/60 p-6 sm:p-8 shadow-sm">
@@ -227,7 +227,7 @@ export default function Login() {
                 <div className="h-11 w-11 rounded-2xl bg-indigo-50 flex items-center justify-center mb-4">
                   <Shield className="h-5 w-5 text-indigo-500" />
                 </div>
-                <h2 className="text-xl font-bold text-zinc-900">Set up Friendly CRM</h2>
+                <h2 className="text-xl font-bold text-zinc-900">Set up Friendly ERP</h2>
                 <p className="text-sm text-zinc-500 mt-1 mb-5">
                   This is a fresh installation. Create your platform administrator account — you'll use it to onboard builders and run the platform.
                 </p>
@@ -485,7 +485,7 @@ export default function Login() {
           </div>
 
           <p className="text-center text-xs text-zinc-400 mt-6">
-            By continuing, you agree to Friendly CRM's Terms of Service and Privacy Policy.
+            By continuing, you agree to Friendly ERP's Terms of Service and Privacy Policy.
           </p>
         </div>
       </div>

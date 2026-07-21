@@ -7,7 +7,9 @@ export type LeadStage =
 export type UnitStatus = 'available' | 'reserved' | 'blocked' | 'booked' | 'sold' | 'on_hold';
 // 'tech_team' = branch-scoped platform staff who onboard builders (into a
 // PENDING state) but cannot approve them — approval is super_admin only.
-export type Role = 'super_admin' | 'tech_team' | 'builder_admin' | 'sales_manager' | 'sales_executive';
+// 'site_engineer' = field/construction staff: runs execution & site stock but
+// never sees the sales pipeline or finance.
+export type Role = 'super_admin' | 'tech_team' | 'builder_admin' | 'sales_manager' | 'sales_executive' | 'site_engineer';
 
 export type ApprovalStatus = 'pending' | 'approved' | 'rejected';
 
@@ -389,6 +391,319 @@ export interface SiteVisit {
   assignedTo: string;
   createdAt: string;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ERP: Project Execution (site tasks, progress log, RFIs, change orders,
+// inspections). Distinct from `Task`, which is a personal CRM to-do — these are
+// construction-side records scoped to a project/site.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type SiteTaskStatus = 'not_started' | 'in_progress' | 'blocked' | 'done';
+
+export interface SiteTask {
+  id: string;
+  tenantId: string;
+  projectId: string;
+  title: string;
+  description?: string;
+  /** Milestones drive the project timeline & the "next milestone" dashboards */
+  isMilestone: boolean;
+  startDate?: string;
+  dueDate: string;
+  completedAt?: string;
+  status: SiteTaskStatus;
+  progress: number;          // 0–100
+  assignedTo?: string;       // userId
+  /** Other SiteTask ids that must finish first — a task with unfinished
+   *  dependencies cannot be started (enforced in executionService). */
+  dependsOn: string[];
+  createdAt: string;
+}
+
+/** Daily/weekly site progress entry with photos (stored as compressed
+ *  data-URLs in demo mode; object storage in server mode). */
+export interface ProgressUpdate {
+  id: string;
+  tenantId: string;
+  projectId: string;
+  userId: string;
+  date: string;
+  summary: string;
+  workforce?: number;        // headcount on site that day
+  photos: string[];
+  createdAt: string;
+}
+
+export type RfiStatus = 'open' | 'answered' | 'closed';
+
+export interface Rfi {
+  id: string;
+  tenantId: string;
+  projectId: string;
+  number: number;            // sequential per project → "RFI-004"
+  subject: string;
+  question: string;
+  raisedBy: string;          // userId
+  assignedTo?: string;
+  status: RfiStatus;
+  answer?: string;
+  answeredAt?: string;
+  dueDate?: string;
+  createdAt: string;
+}
+
+export type ChangeOrderStatus = 'pending_approval' | 'approved' | 'rejected';
+
+export interface ChangeOrder {
+  id: string;
+  tenantId: string;
+  projectId: string;
+  number: number;            // sequential per project → "CO-002"
+  title: string;
+  reason: string;
+  costImpact: number;        // signed; + increases contract value
+  timeImpactDays: number;    // signed; + extends the schedule
+  status: ChangeOrderStatus;
+  requestedBy: string;       // userId
+  decidedBy?: string;
+  decidedAt?: string;
+  createdAt: string;
+}
+
+export type InspectionType = 'quality' | 'safety';
+export type InspectionStatus = 'scheduled' | 'passed' | 'failed';
+export type InspectionItemResult = 'pending' | 'pass' | 'fail' | 'na';
+
+export interface InspectionItem {
+  id: string;
+  label: string;
+  result: InspectionItemResult;
+  remark?: string;
+}
+
+export interface Inspection {
+  id: string;
+  tenantId: string;
+  projectId: string;
+  type: InspectionType;
+  title: string;
+  date: string;
+  inspectorId: string;       // userId
+  status: InspectionStatus;
+  items: InspectionItem[];
+  notes?: string;
+  createdAt: string;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ERP: Procurement & Materials (vendors, POs, site stock, plant & machinery)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface Vendor {
+  id: string;
+  tenantId: string;
+  name: string;
+  category: string;          // 'Cement & RMC', 'Steel', 'Electrical', …
+  contactPerson?: string;
+  phone: string;
+  email?: string;
+  gst?: string;
+  address?: string;
+  rating?: number;           // 1–5, set from received-order experience
+  status: 'active' | 'inactive';
+  createdAt: string;
+}
+
+export type PoStatus = 'pending_approval' | 'approved' | 'partially_received' | 'received' | 'cancelled';
+
+export interface PurchaseOrderLine {
+  id: string;
+  materialId?: string;       // links receipts into site stock
+  description: string;
+  unit: string;              // 'bag', 'MT', 'nos', …
+  qty: number;
+  rate: number;
+  receivedQty: number;
+}
+
+export interface PurchaseOrder {
+  id: string;
+  tenantId: string;
+  number: number;            // sequential per tenant → "PO-0007"
+  vendorId: string;
+  projectId?: string;        // deliver-to site
+  status: PoStatus;
+  lines: PurchaseOrderLine[];
+  expectedDate?: string;
+  notes?: string;
+  createdBy: string;         // userId
+  approvedBy?: string;
+  approvedAt?: string;
+  createdAt: string;
+}
+
+export interface Material {
+  id: string;
+  tenantId: string;
+  name: string;
+  category: string;
+  unit: string;
+  /** Aggregate on-hand quantity at/below this level raises a reorder alert */
+  reorderLevel: number;
+  createdAt: string;
+}
+
+export type StockTxnType = 'inward' | 'outward';
+
+/** Material movement at a site. Inward = GRN against a PO or direct purchase;
+ *  outward = issued for consumption. On-hand stock is derived, never stored. */
+export interface StockTransaction {
+  id: string;
+  tenantId: string;
+  materialId: string;
+  projectId?: string;        // site; undefined = central store
+  type: StockTxnType;
+  qty: number;
+  rate?: number;             // inward cost per unit
+  vendorId?: string;
+  poId?: string;
+  reference?: string;        // challan / bill no.
+  notes?: string;
+  createdBy: string;         // userId
+  date: string;
+  createdAt: string;
+}
+
+export type MachineStatus = 'on_site' | 'idle' | 'maintenance';
+
+export interface Machine {
+  id: string;
+  tenantId: string;
+  name: string;
+  category: string;          // 'Excavator', 'Tower Crane', …
+  registrationNo?: string;
+  ownership: 'owned' | 'rented';
+  projectId?: string;        // current deployment site
+  status: MachineStatus;
+  nextServiceDate?: string;
+  notes?: string;
+  createdAt: string;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ERP: Finance — accounts payable & project budgets. The receivable side
+// (Invoice / PaymentPlan / Installment) already exists above.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type VendorBillStatus = 'pending' | 'approved' | 'paid';
+
+export interface VendorBill {
+  id: string;
+  tenantId: string;
+  vendorId: string;
+  poId?: string;
+  projectId?: string;
+  billNumber: string;        // the vendor's own invoice number
+  category: string;          // cost head — matches ProjectBudget.category
+  amount: number;
+  billDate: string;
+  dueDate: string;
+  status: VendorBillStatus;
+  paidAt?: string;
+  notes?: string;
+  createdAt: string;
+}
+
+/** One budget line per cost head per project. Actuals are derived from vendor
+ *  bills (approved + paid) in the same category — never stored. */
+export interface ProjectBudget {
+  id: string;
+  tenantId: string;
+  projectId: string;
+  category: string;
+  budgeted: number;
+  createdAt: string;
+}
+
+export const SITE_TASK_STATUSES: { id: SiteTaskStatus; label: string; color: string }[] = [
+  { id: 'not_started', label: 'Not Started', color: 'bg-zinc-400' },
+  { id: 'in_progress', label: 'In Progress', color: 'bg-blue-500' },
+  { id: 'blocked', label: 'Blocked', color: 'bg-red-500' },
+  { id: 'done', label: 'Done', color: 'bg-emerald-500' },
+];
+
+export const PO_STATUSES: { id: PoStatus; label: string }[] = [
+  { id: 'pending_approval', label: 'Pending Approval' },
+  { id: 'approved', label: 'Approved' },
+  { id: 'partially_received', label: 'Partially Received' },
+  { id: 'received', label: 'Received' },
+  { id: 'cancelled', label: 'Cancelled' },
+];
+
+export const VENDOR_CATEGORIES = [
+  'Cement & RMC', 'Steel', 'Aggregates & Sand', 'Electrical', 'Plumbing & Sanitary',
+  'Paint & Finishes', 'Tiles & Flooring', 'Doors & Windows', 'Labour Contractor',
+  'Equipment Rental', 'Other',
+];
+
+export const MATERIAL_UNITS = ['bag', 'MT', 'kg', 'cum', 'sqft', 'nos', 'ltr', 'roll', 'box'];
+
+/** Cost heads shared by vendor bills and project budgets so budget-vs-actual
+ *  lines up without any mapping table. */
+export const BUDGET_CATEGORIES = [
+  'Civil & Structure', 'Materials', 'Electrical', 'Plumbing', 'Finishes',
+  'Labour', 'Equipment', 'Consultants & Fees', 'Marketing', 'Other',
+];
+
+export const MACHINE_CATEGORIES = [
+  'Excavator', 'Backhoe Loader', 'Tower Crane', 'Mobile Crane', 'Concrete Pump',
+  'Transit Mixer', 'Batching Plant', 'Compactor', 'Generator', 'Hoist', 'Other',
+];
+
+/** Default inspection checklists — sensible starting points a site team can
+ *  edit per inspection. Friendly-ERP principle: defaults over configuration. */
+export const INSPECTION_TEMPLATES: Record<InspectionType, { title: string; items: string[] }[]> = {
+  quality: [
+    {
+      title: 'Concrete Pour — Pre-pour Checklist',
+      items: [
+        'Shuttering aligned, plumb and rigid', 'Reinforcement as per bar-bending schedule',
+        'Cover blocks in place', 'Embedments & sleeves positioned', 'Surface clean and watered',
+      ],
+    },
+    {
+      title: 'Brickwork / Blockwork Quality',
+      items: [
+        'Mortar mix proportion verified', 'Courses level and joints staggered',
+        'Wall plumb within tolerance', 'Curing arrangement in place',
+      ],
+    },
+    {
+      title: 'Waterproofing Check',
+      items: [
+        'Surface preparation complete', 'Membrane/coating applied per spec',
+        'Upturns & corners treated', 'Ponding test passed',
+      ],
+    },
+  ],
+  safety: [
+    {
+      title: 'Weekly Site Safety Walk',
+      items: [
+        'PPE worn by all workers', 'Scaffolding tagged and inspected',
+        'Edge protection & barricades in place', 'Electrical panels covered, cables routed safely',
+        'First-aid box stocked & accessible', 'Housekeeping — access routes clear',
+      ],
+    },
+    {
+      title: 'Height Work Permit Check',
+      items: [
+        'Work-at-height permit issued', 'Full-body harnesses anchored',
+        'Lifelines certified', 'Area below cordoned off',
+      ],
+    },
+  ],
+};
 
 export const LEAD_STAGES: { id: LeadStage; label: string; color: string }[] = [
   { id: 'new', label: 'New', color: 'bg-blue-500' },

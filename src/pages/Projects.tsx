@@ -3,10 +3,11 @@ import { useNavigate } from 'react-router-dom';
 import {
   Building2, Plus, Search, MapPin, Users, TrendingUp,
   Trash2, Eye, X, CheckCircle2, Clock, AlertCircle,
-  Download, BarChart3, IndianRupee,
+  Download, BarChart3, IndianRupee, HardHat, Flag,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { getEffectiveLimits, withinLimit } from '../services/planService';
+import { getEffectiveLimits, withinLimit, isModuleEnabled } from '../services/planService';
+import { projectProgress, projectHealth, nextMilestone, HEALTH_META } from '../services/executionService';
 import { getByTenant, create, update, remove, logAudit } from '../services/db';
 import { formatCurrency, currencySymbol } from '../utils/format';
 import type { Project, Lead, Unit, ProjectStatus, Tower } from '../types';
@@ -19,6 +20,7 @@ export default function Projects() {
   const tenantId = tenant?.id || '';
   const currency = tenant?.currency || 'INR';
   const canManage = hasPermission('manage_projects');
+  const execOn = hasPermission('view_execution') && isModuleEnabled(tenant, 'execution');
   const [refreshKey, setRefreshKey] = useState(0);
   const refresh = () => setRefreshKey(k => k + 1);
 
@@ -287,6 +289,35 @@ export default function Projects() {
                   </div>
                 </div>
 
+                {/* Construction pulse — derived from Site Execution when in use */}
+                {execOn && (() => {
+                  const prog = projectProgress(tenantId, project.id);
+                  if (prog === null) return null;
+                  const health = projectHealth(tenantId, project.id);
+                  const ms = nextMilestone(tenantId, project.id);
+                  return (
+                    <div className="mb-3 pt-2 border-t border-zinc-100">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-[10px] font-semibold text-zinc-500 uppercase flex items-center gap-1"><HardHat className="h-3 w-3" /> Build Progress</span>
+                        <span className="flex items-center gap-1.5">
+                          <span className={`inline-flex items-center gap-1 text-[9px] font-semibold px-1.5 py-0.5 rounded-full border ${HEALTH_META[health].badge}`}>
+                            <span className={`h-1 w-1 rounded-full ${HEALTH_META[health].dot}`} />{HEALTH_META[health].label}
+                          </span>
+                          <span className="text-xs font-bold text-zinc-800">{prog}%</span>
+                        </span>
+                      </div>
+                      <div className="h-1.5 bg-zinc-100 rounded-full overflow-hidden">
+                        <div className="h-full bg-gradient-to-r from-indigo-500 to-violet-500 rounded-full" style={{ width: `${prog}%` }} />
+                      </div>
+                      {ms && (
+                        <p className="text-[10px] text-zinc-500 mt-1 flex items-center gap-1 truncate">
+                          <Flag className="h-2.5 w-2.5 text-zinc-400 shrink-0" /> Next: {ms.title} · {new Date(ms.dueDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}
+                        </p>
+                      )}
+                    </div>
+                  );
+                })()}
+
                 <div className="grid grid-cols-3 gap-2 py-3 border-t border-zinc-100">
                   <div className="text-center">
                     <p className="text-lg font-bold text-zinc-900">{stats.leads}</p>
@@ -513,13 +544,21 @@ export default function Projects() {
               </div>
             </div>
 
-            <div className="flex gap-2">
+            <div className="flex gap-2 flex-wrap">
               <button
                 onClick={() => navigate(`/leads?project=${selectedProject.id}`)}
                 className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 transition-colors"
               >
                 <Users className="h-4 w-4" /> View All Leads
               </button>
+              {execOn && (
+                <button
+                  onClick={() => navigate(`/execution?project=${selectedProject.id}`)}
+                  className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-zinc-900 text-white rounded-xl text-sm font-semibold hover:bg-zinc-800 transition-colors"
+                >
+                  <HardHat className="h-4 w-4" /> Site Execution
+                </button>
+              )}
               <button
                 onClick={() => navigate(`/inventory?project=${selectedProject.id}`)}
                 className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-zinc-100 text-zinc-700 rounded-xl text-sm font-semibold hover:bg-zinc-200 transition-colors"

@@ -1,5 +1,5 @@
 /**
- * Friendly CRM — FULL local stack server (SPA + API proxy).
+ * Friendly ERP — FULL local stack server (SPA + API proxy).
  *
  * Serves the built app (dist/) AND reverse-proxies /api/* to the Fastify backend
  * on 127.0.0.1:4000 — exactly like nginx does in production. Because the API is
@@ -71,7 +71,7 @@ server.on('error', (err) => {
 server.listen(PORT, '0.0.0.0', () => {
   const lan = Object.values(networkInterfaces()).flat()
     .filter((n) => n && n.family === 'IPv4' && !n.internal).map((n) => n.address);
-  console.log('\n  Friendly CRM (full stack: app + API + Postgres) is running.\n');
+  console.log('\n  Friendly ERP (full stack: app + API + Postgres) is running.\n');
   console.log(`  On this PC:        http://localhost:${PORT}`);
   lan.forEach((ip) => console.log(`  On your network:   http://${ip}:${PORT}`));
   console.log('\n  Proxying /api -> 127.0.0.1:4000. Ctrl+C to stop this server.\n');

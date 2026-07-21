@@ -179,7 +179,7 @@ export default function Microsite() {
       </main>
 
       <footer className="border-t border-zinc-100 py-6 text-center text-[11px] text-zinc-400">
-        {tenant.name} · Powered by Friendly CRM{tenant.rera ? ` · RERA ${tenant.rera}` : ''}
+        {tenant.name} · Powered by Friendly ERP{tenant.rera ? ` · RERA ${tenant.rera}` : ''}
       </footer>
     </div>
   );

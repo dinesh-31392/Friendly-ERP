@@ -411,7 +411,7 @@ export default function PortalDashboard() {
         )}
 
         <p className="text-center text-[11px] text-zinc-400 pb-6">
-          Powered by Friendly CRM{tenant.slug ? ` · ${tenant.slug}.friendlycrm.app` : ''}
+          Powered by Friendly ERP{tenant.slug ? ` · ${tenant.slug}.friendlyerp.app` : ''}
         </p>
       </main>
     </div>

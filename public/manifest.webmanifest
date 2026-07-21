@@ -1,8 +1,8 @@
 {
   "id": "/",
-  "name": "Friendly CRM — Real Estate Operating System",
-  "short_name": "Friendly CRM",
-  "description": "Manage leads, inventory, bookings and payments for your real estate business — on phone, tablet, or desktop.",
+  "name": "Friendly ERP — Real Estate & Construction ERP",
+  "short_name": "Friendly ERP",
+  "description": "Manage leads, projects, site execution, procurement and payments for your real estate business — on phone, tablet, or desktop.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

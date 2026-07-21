@@ -243,7 +243,7 @@ export function getWebhookInfo(tenantId: string): { url: string; secret: string;
       .map(b => b.toString(16).padStart(2, '0')).join('');
     localStorage.setItem(secretKey, secret);
   }
-  const url = `https://api.friendlycrm.app/v1/webhooks/leads/${tenantId}?key=${secret}`;
+  const url = `https://api.friendlyerp.app/v1/webhooks/leads/${tenantId}?key=${secret}`;
   const samplePayload = JSON.stringify({
     name: 'Rohan Verma',
     email: 'rohan.v@email.com',
@@ -402,9 +402,9 @@ export function syncLeadsFromProvider(
  *  instantly (and get scored like any other inbound lead). */
 export function getChatbotSnippet(tenantId: string, opts: { primaryColor?: string; brandName?: string } = {}): string {
   const { url } = getWebhookInfo(tenantId);
-  return `<!-- Friendly CRM Chatbot -->
+  return `<!-- Friendly ERP Chatbot -->
 <script>
-  window.FriendlyCRMChat = {
+  window.FriendlyERPChat = {
     tenantId: "${tenantId}",
     captureEndpoint: "${url.replace('/v1/webhooks/leads/', '/api/v1/leads/capture/')}",
     config: {
@@ -415,7 +415,7 @@ export function getChatbotSnippet(tenantId: string, opts: { primaryColor?: strin
     }
   };
 </script>
-<script src="https://cdn.friendlycrm.app/chatbot/v1/widget.js" async></script>`;
+<script src="https://cdn.friendlyerp.app/chatbot/v1/widget.js" async></script>`;
 }
 
 /** Next.js installation instructions for the chatbot snippet. */
@@ -425,9 +425,9 @@ import Script from 'next/script';
 
 // Inside <body>, after {children}:
 <Script id="friendly-crm-chat-config" strategy="afterInteractive">
-  {\`window.FriendlyCRMChat = { /* paste the config object from the snippet */ };\`}
+  {\`window.FriendlyERPChat = { /* paste the config object from the snippet */ };\`}
 </Script>
-<Script src="https://cdn.friendlycrm.app/chatbot/v1/widget.js" strategy="lazyOnload" />`;
+<Script src="https://cdn.friendlyerp.app/chatbot/v1/widget.js" strategy="lazyOnload" />`;
 }
 
 /** HTML snippet builders can paste on their website; posts to the inbound webhook. */

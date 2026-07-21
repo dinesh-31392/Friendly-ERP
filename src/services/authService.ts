@@ -289,6 +289,8 @@ export function hasPermission(user: User, action: string): boolean {
       'view_service', 'manage_service', 'view_calendar', 'schedule_visits', 'use_ai_studio',
       'create_bookings', 'view_audit_log', 'view_bookings', 'manage_bookings',
       'view_brokers', 'manage_brokers',
+      'view_execution', 'manage_execution', 'approve_change_orders',
+      'view_procurement', 'manage_procurement', 'approve_purchase_orders',
     ],
     sales_manager: [
       'view_dashboard', 'view_leads', 'manage_leads', 'assign_leads', 'add_notes', 'manage_team',
@@ -296,12 +298,22 @@ export function hasPermission(user: User, action: string): boolean {
       'view_documents', 'view_service', 'manage_service', 'view_calendar', 'schedule_visits',
       'use_ai_studio', 'create_bookings', 'approve_reminders', 'view_campaigns', 'manage_campaigns',
       'view_bookings', 'manage_bookings', 'view_brokers',
+      // Read-only construction visibility so sales can answer "how far along is my flat?"
+      'view_execution',
     ],
     sales_executive: [
       'view_dashboard', 'view_leads', 'manage_own_leads', 'add_notes',
       'view_inventory', 'view_projects', 'view_messages', 'send_messages', 'view_documents',
       'view_calendar', 'schedule_visits', 'use_ai_studio', 'create_bookings',
       'view_bookings',
+    ],
+    // Field staff: everything on the construction side, nothing on the sales
+    // pipeline or finance. Raises POs / change orders but cannot approve them.
+    site_engineer: [
+      'view_dashboard', 'view_projects',
+      'view_execution', 'manage_execution',
+      'view_procurement', 'manage_procurement',
+      'view_documents', 'view_calendar', 'view_messages', 'send_messages',
     ],
   };
   const perms = permissions[user.role];

@@ -1,4 +1,4 @@
-# Friendly CRM — full local stack (Postgres-backed)
+# Friendly ERP — full local stack (Postgres-backed)
 
 This runs the **real** server-backed version on your PC — the same architecture
 you'd deploy, with tenant isolation enforced by PostgreSQL — with **no Docker and

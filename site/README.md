@@ -1,4 +1,4 @@
-# Friendly CRM — marketing site & knowledge base
+# Friendly ERP — marketing site & knowledge base
 
 Static, dependency-free HTML. No build step: what's here is what you deploy.
 

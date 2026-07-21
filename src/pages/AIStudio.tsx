@@ -44,7 +44,7 @@ export default function AIStudio() {
   const projects = useMemo(() => getByTenant<Project>('projects', tenantId), [tenantId]);
 
   const currency = tenant?.currency || 'INR';
-  const brandName = tenant?.name || 'Friendly CRM';
+  const brandName = tenant?.name || 'Friendly ERP';
   const brandVoice = tenant?.brandVoice || 'Professional and trustworthy.';
   const channels = tenant?.channels || ['WhatsApp', 'Email'];
   const activeLeads = leads.filter(l => l.stage !== 'lost' && l.stage !== 'booked').length;

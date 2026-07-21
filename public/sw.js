@@ -1,5 +1,5 @@
 /**
- * Friendly CRM — service worker.
+ * Friendly ERP — service worker.
  *
  * This app is unusual: vite-plugin-singlefile inlines ALL JS and CSS into one
  * self-contained index.html (~1.2MB, ~320KB gzipped). So "the app shell" is
@@ -124,7 +124,7 @@ self.addEventListener('fetch', (event) => {
           return cached || new Response(
             '<!doctype html><meta charset="utf-8"><title>Offline</title>' +
             '<body style="font:16px system-ui;padding:2rem;color:#3f3f46">' +
-            '<h1>You are offline</h1><p>Open Friendly CRM once while connected, ' +
+            '<h1>You are offline</h1><p>Open Friendly ERP once while connected, ' +
             'then it will work offline.</p>',
             { status: 503, headers: { 'Content-Type': 'text/html; charset=utf-8' } },
           );

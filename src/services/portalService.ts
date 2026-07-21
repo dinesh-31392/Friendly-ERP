@@ -175,8 +175,8 @@ export function isPremium(tenant: Tenant | null): boolean {
  *  subdomain; others share the generic portal with a ?builder= link. */
 export function portalUrl(tenant: Tenant): string {
   return isPremium(tenant)
-    ? `https://${tenant.slug}.friendlycrm.app/portal`
-    : `https://app.friendlycrm.app/portal?builder=${tenant.slug}`;
+    ? `https://${tenant.slug}.friendlyerp.app/portal`
+    : `https://app.friendlyerp.app/portal?builder=${tenant.slug}`;
 }
 
 /** In-app portal link (works in this demo build). */

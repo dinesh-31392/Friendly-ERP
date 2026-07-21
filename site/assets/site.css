@@ -1,4 +1,4 @@
-/* Friendly CRM — marketing site + docs.
+/* Friendly ERP — marketing site + docs.
    Original design. Brand matches the product (indigo 500 → violet 600).
    No framework, no build step: this is static HTML served by nginx, so it must
    stay small and dependency-free. All motion is CSS + one small IO script. */

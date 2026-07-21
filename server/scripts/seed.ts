@@ -39,6 +39,10 @@ const PERMISSIONS = [
   'schedule_visits', 'use_ai_studio', 'create_bookings', 'view_audit_log',
   'view_bookings', 'manage_bookings', 'view_brokers', 'manage_brokers',
   'manage_team', 'approve_reminders',
+  // ERP: project execution + procurement (approval rights are separate grants
+  // so the person raising a PO / change order can't approve their own)
+  'view_execution', 'manage_execution', 'approve_change_orders',
+  'view_procurement', 'manage_procurement', 'approve_purchase_orders',
 ];
 
 /**
@@ -54,11 +58,18 @@ export const ROLE_PERMS: Record<string, string[]> = {
     'view_messages', 'send_messages', 'view_documents', 'view_service', 'manage_service',
     'view_calendar', 'schedule_visits', 'use_ai_studio', 'create_bookings', 'approve_reminders',
     'view_campaigns', 'manage_campaigns', 'view_bookings', 'manage_bookings', 'view_brokers',
+    'view_execution',
   ],
   sales_executive: [
     'view_dashboard', 'view_leads', 'manage_own_leads', 'add_notes', 'view_inventory',
     'view_projects', 'view_messages', 'send_messages', 'view_documents', 'view_calendar',
     'schedule_visits', 'use_ai_studio', 'create_bookings', 'view_bookings',
+  ],
+  site_engineer: [
+    'view_dashboard', 'view_projects',
+    'view_execution', 'manage_execution',
+    'view_procurement', 'manage_procurement',
+    'view_documents', 'view_calendar', 'view_messages', 'send_messages',
   ],
 };
 

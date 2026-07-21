@@ -1,5 +1,5 @@
 /* ============================================================================
- * Friendly CRM — marketing site motion.
+ * Friendly ERP — marketing site motion.
  *
  * ~2KB, no dependencies. Three jobs:
  *   1. reveal elements as they scroll into view

@@ -8,7 +8,11 @@ const DB_PREFIX = 'friendly_crm_';
 type TableName = 'tenants' | 'users' | 'projects' | 'towers' | 'units' | 'leads' | 'notes' |
   'activities' | 'reminders' | 'tasks' | 'bookings' | 'invoices' | 'tickets' |
   'campaigns' | 'documents' | 'conversations' | 'chatMessages' | 'auditLogs' |
-  'templates' | 'agreements' | 'brokers' | 'commissions' | 'integrations' | 'portalUsers' | 'paymentPlans' | 'branches';
+  'templates' | 'agreements' | 'brokers' | 'commissions' | 'integrations' | 'portalUsers' | 'paymentPlans' | 'branches' |
+  // ERP modules: project execution, procurement & materials, AP/budgets
+  'siteTasks' | 'progressUpdates' | 'rfis' | 'changeOrders' | 'inspections' |
+  'vendors' | 'purchaseOrders' | 'materials' | 'stockTxns' | 'machines' |
+  'vendorBills' | 'projectBudgets';
 
 function readTable<T>(table: TableName): T[] {
   try {

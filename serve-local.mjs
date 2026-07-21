@@ -1,5 +1,5 @@
 /**
- * Friendly CRM — local server.
+ * Friendly ERP — local server.
  *
  * Serves the built app (dist/) on your PC with no dependencies — just Node.
  * Mirrors the production nginx behaviour: SPA fallback, correct MIME types, and
@@ -78,7 +78,7 @@ server.listen(PORT, '0.0.0.0', () => {
     .flat()
     .filter((n) => n && n.family === 'IPv4' && !n.internal)
     .map((n) => n.address);
-  console.log('\n  Friendly CRM is running.\n');
+  console.log('\n  Friendly ERP is running.\n');
   console.log(`  On this PC:        http://localhost:${PORT}`);
   lan.forEach((ip) => console.log(`  On your network:   http://${ip}:${PORT}   (phone/tablet on the same Wi-Fi)`));
   console.log('\n  Press Ctrl+C to stop.\n');

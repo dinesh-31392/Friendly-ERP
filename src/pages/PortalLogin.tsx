@@ -13,7 +13,7 @@ export default function PortalLogin() {
   // visitor arrives via the builder's subdomain / branded link
   const tenant = useMemo(() => (builderSlug ? findTenantBySlug(builderSlug) : undefined), [builderSlug]);
   const brandColor = tenant?.primaryColor || '#6366f1';
-  const brandName = tenant?.name || 'Friendly CRM';
+  const brandName = tenant?.name || 'Friendly ERP';
 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -100,7 +100,7 @@ export default function PortalLogin() {
 
         {tenant && (
           <p className="text-center text-[11px] text-zinc-400 mt-5">
-            Powered by Friendly CRM · {tenant.slug}.friendlycrm.app
+            Powered by Friendly ERP · {tenant.slug}.friendlyerp.app
           </p>
         )}
       </div>

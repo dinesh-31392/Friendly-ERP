@@ -80,7 +80,7 @@ export default function Settings() {
     // simply type a competitor's slug and take over their portal login, public
     // microsite, and branding. exceptTenantId lets us re-save our own unchanged.
     if (isPremium(tenant) && !isSlugAvailable(slug, tenant.id)) {
-      toast.error(`"${slug}.friendlycrm.app" is already taken — pick another subdomain`);
+      toast.error(`"${slug}.friendlyerp.app" is already taken — pick another subdomain`);
       return;
     }
     update<Tenant>('tenants', tenant.id, {
@@ -463,7 +463,7 @@ export default function Settings() {
                     placeholder="your-company"
                     className="flex-1 px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 disabled:opacity-60"
                   />
-                  <span className="text-sm text-zinc-500 whitespace-nowrap">.friendlycrm.app</span>
+                  <span className="text-sm text-zinc-500 whitespace-nowrap">.friendlyerp.app</span>
                 </div>
               </div>
 
@@ -868,7 +868,7 @@ export default function Settings() {
             <div className="flex items-center justify-between">
               <div>
                 <h3 className="text-lg font-semibold text-zinc-900">Billing & Subscription</h3>
-                <p className="text-sm text-zinc-500 mt-0.5">Manage your Friendly CRM subscription and billing information.</p>
+                <p className="text-sm text-zinc-500 mt-0.5">Manage your Friendly ERP subscription and billing information.</p>
               </div>
               <button 
                 onClick={() => toast.success('Billing portal coming soon!')}
@@ -1472,6 +1472,7 @@ export default function Settings() {
                   <select name="role" required defaultValue="sales_executive" className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20">
                     <option value="sales_executive">Sales Executive</option>
                     <option value="sales_manager">Sales Manager</option>
+                    <option value="site_engineer">Site Engineer</option>
                     <option value="builder_admin">Builder Admin</option>
                   </select>
                 </div>

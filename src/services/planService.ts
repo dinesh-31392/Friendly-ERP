@@ -75,6 +75,8 @@ export function tenantMrrUsd(t: Tenant): number {
 export const CONTROLLABLE_MODULES: { key: string; label: string }[] = [
   { key: 'leads', label: 'Leads' },
   { key: 'projects', label: 'Projects' },
+  { key: 'execution', label: 'Site Execution' },
+  { key: 'procurement', label: 'Procurement' },
   { key: 'inventory', label: 'Inventory' },
   { key: 'bookings', label: 'Bookings' },
   { key: 'sales-performance', label: 'Sales Performance' },

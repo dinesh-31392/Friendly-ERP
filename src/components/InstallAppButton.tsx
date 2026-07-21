@@ -14,7 +14,7 @@ function detectPlatform(): Platform {
 }
 
 /**
- * "Get the app" — installs Friendly CRM as a real app on phone, tablet, desktop.
+ * "Get the app" — installs Friendly ERP as a real app on phone, tablet, desktop.
  *
  * Two modes:
  *  - alwaysShow (login page): ALWAYS offered, so people can discover that the
@@ -52,7 +52,7 @@ export default function InstallAppButton({
   const handleClick = async () => {
     if (canPrompt) {
       const outcome = await promptInstall();
-      if (outcome === 'accepted') toast.success('Installing Friendly CRM…');
+      if (outcome === 'accepted') toast.success('Installing Friendly ERP…');
       return;
     }
     // No native prompt available (iOS always, Firefox, or Chrome hasn't offered
@@ -85,7 +85,7 @@ export default function InstallAppButton({
       steps: [
         <>Use <span className="font-semibold">Chrome</span> or <span className="font-semibold">Edge</span></>,
         <>Click the <span className="font-semibold">install icon</span> in the address bar (a screen with a ⬇), or ⋮ → <span className="font-semibold">Install</span></>,
-        <>Friendly CRM opens in its own window, like any desktop app</>,
+        <>Friendly ERP opens in its own window, like any desktop app</>,
       ],
     },
   };
@@ -95,7 +95,7 @@ export default function InstallAppButton({
     <>
       <button
         onClick={handleClick}
-        title="Install Friendly CRM as an app"
+        title="Install Friendly ERP as an app"
         className={compact
           ? 'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold bg-indigo-50 text-indigo-700 hover:bg-indigo-100 transition-colors'
           : 'flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold bg-white border border-zinc-200 text-zinc-700 hover:bg-zinc-50 hover:border-zinc-300 shadow-sm transition-colors'}
@@ -108,7 +108,7 @@ export default function InstallAppButton({
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-zinc-900/50 backdrop-blur-sm p-4 overflow-y-auto"
           onClick={() => setShowHelp(false)}
-          role="dialog" aria-modal="true" aria-label="Install Friendly CRM"
+          role="dialog" aria-modal="true" aria-label="Install Friendly ERP"
         >
           <div className="w-full max-w-md bg-white rounded-2xl shadow-xl border border-zinc-200 p-6 my-8" onClick={e => e.stopPropagation()}>
             <div className="flex items-start justify-between mb-1">
@@ -117,7 +117,7 @@ export default function InstallAppButton({
                   <MonitorSmartphone className="h-4 w-4 text-indigo-500" />
                 </div>
                 <div>
-                  <h3 className="text-base font-bold text-zinc-900">Install Friendly CRM</h3>
+                  <h3 className="text-base font-bold text-zinc-900">Install Friendly ERP</h3>
                   <p className="text-[11px] text-zinc-500">Works on phone, tablet and desktop — no app store needed.</p>
                 </div>
               </div>

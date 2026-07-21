@@ -3,19 +3,24 @@ import { Link } from 'react-router-dom';
 import {
   Users, TrendingUp, IndianRupee, Building2, CheckCircle, BarChart3,
   ArrowUpRight, ArrowDownRight, Clock, Phone, MessageCircle, Calendar,
-  AlertTriangle, Eye, MoreHorizontal,
+  AlertTriangle, Eye, MoreHorizontal, HardHat, Flag, FileQuestion, Package,
+  ShoppingCart, CalendarClock, Landmark, ClipboardCheck,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { getByTenant, update, logAudit } from '../services/db';
 import { useTenantUsers } from '../hooks/useTenantUsers';
 import { getLeadStages } from '../services/metaService';
+import { isModuleEnabled } from '../services/planService';
+import { projectProgress, projectHealth, nextMilestone, HEALTH_META } from '../services/executionService';
+import { lowStockMaterials, machinesDueForService, isBillOverdue } from '../services/procurementService';
 import { formatCurrency } from '../utils/format';
-import type { Lead, Task, Unit, Activity, User as UserType } from '../types';
+import type { Lead, Task, Unit, Activity, User as UserType, Project, SiteTask, Rfi, Inspection, PurchaseOrder, VendorBill, Invoice } from '../types';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
 const iconMap: Record<string, React.ElementType> = {
   'users': Users, 'trending-up': TrendingUp, 'indian-rupee': IndianRupee,
   'building': Building2, 'check-circle': CheckCircle, 'bar-chart': BarChart3,
+  'hard-hat': HardHat, 'alert': AlertTriangle,
 };
 
 export default function Dashboard() {
@@ -33,6 +38,79 @@ export default function Dashboard() {
   const units = useMemo(() => getByTenant<Unit>('units', tenantId), [tenantId, refreshKey]);
   const activities = useMemo(() => getByTenant<Activity>('activities', tenantId), [tenantId, refreshKey]);
   const users = useTenantUsers(tenantId, refreshKey);
+
+  // ERP visibility — each block needs both the permission AND the module on
+  const moduleOn = (key: string) => isModuleEnabled(tenant, key);
+  const showExecution = hasPermission('view_execution') && moduleOn('execution');
+  const showProcurement = hasPermission('view_procurement') && moduleOn('procurement');
+  const showFinance = hasPermission('view_finance') && moduleOn('billing');
+
+  const projects = useMemo(() => getByTenant<Project>('projects', tenantId), [tenantId, refreshKey]);
+  const siteTasks = useMemo(
+    () => showExecution ? getByTenant<SiteTask>('siteTasks', tenantId) : [],
+    [tenantId, refreshKey, showExecution]
+  );
+  const projectBoard = useMemo(
+    () => showExecution
+      ? projects.map(p => ({
+          project: p,
+          progress: projectProgress(tenantId, p.id),
+          health: projectHealth(tenantId, p.id),
+          milestone: nextMilestone(tenantId, p.id),
+        }))
+      : [],
+    [projects, tenantId, refreshKey, showExecution]
+  );
+  const overdueSiteTasks = siteTasks.filter(t => t.status !== 'done' && new Date(t.dueDate).getTime() < Date.now());
+  const openRfis = useMemo(
+    () => showExecution ? getByTenant<Rfi>('rfis', tenantId).filter(r => r.status === 'open') : [],
+    [tenantId, refreshKey, showExecution]
+  );
+  const failedInspections = useMemo(
+    () => showExecution ? getByTenant<Inspection>('inspections', tenantId).filter(i => i.status === 'failed') : [],
+    [tenantId, refreshKey, showExecution]
+  );
+  const lowStock = useMemo(
+    () => showProcurement ? lowStockMaterials(tenantId) : [],
+    [tenantId, refreshKey, showProcurement]
+  );
+  const pendingPos = useMemo(
+    () => showProcurement && hasPermission('approve_purchase_orders')
+      ? getByTenant<PurchaseOrder>('purchaseOrders', tenantId).filter(p => p.status === 'pending_approval')
+      : [],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [tenantId, refreshKey, showProcurement]
+  );
+  const serviceDue = useMemo(
+    () => showProcurement ? machinesDueForService(tenantId) : [],
+    [tenantId, refreshKey, showProcurement]
+  );
+  const overdueBills = useMemo(
+    () => showFinance ? getByTenant<VendorBill>('vendorBills', tenantId).filter(isBillOverdue) : [],
+    [tenantId, refreshKey, showFinance]
+  );
+  // Collections this month + overdue receivables — the CFO half of the KPI spec
+  const invoices = useMemo(
+    () => showFinance ? getByTenant<Invoice>('invoices', tenantId) : [],
+    [tenantId, refreshKey, showFinance]
+  );
+  const monthStart = new Date(); monthStart.setDate(1); monthStart.setHours(0, 0, 0, 0);
+  const collectionsThisMonth = invoices
+    .filter(i => i.status === 'Paid' && new Date(i.date) >= monthStart)
+    .reduce((s, i) => s + i.amount, 0);
+  const overdueReceivables = invoices
+    .filter(i => i.status === 'Overdue' || (i.status === 'Pending' && new Date(i.dueDate) < new Date()))
+    .reduce((s, i) => s + i.amount, 0);
+
+  const opsAlerts: { icon: React.ElementType; color: string; label: string; link: string }[] = [
+    ...(overdueSiteTasks.length ? [{ icon: Clock, color: 'text-red-500', label: `${overdueSiteTasks.length} site task${overdueSiteTasks.length === 1 ? '' : 's'} overdue`, link: '/execution' }] : []),
+    ...(failedInspections.length ? [{ icon: ClipboardCheck, color: 'text-red-500', label: `${failedInspections.length} failed inspection${failedInspections.length === 1 ? ' needs' : 's need'} corrective action`, link: '/execution' }] : []),
+    ...(openRfis.length ? [{ icon: FileQuestion, color: 'text-amber-500', label: `${openRfis.length} RFI${openRfis.length === 1 ? '' : 's'} awaiting an answer`, link: '/execution' }] : []),
+    ...(lowStock.length ? [{ icon: Package, color: 'text-red-500', label: `Reorder: ${lowStock.map(l => l.material.name).slice(0, 3).join(', ')}${lowStock.length > 3 ? '…' : ''}`, link: '/procurement' }] : []),
+    ...(pendingPos.length ? [{ icon: ShoppingCart, color: 'text-amber-500', label: `${pendingPos.length} purchase order${pendingPos.length === 1 ? '' : 's'} awaiting your approval`, link: '/procurement' }] : []),
+    ...(serviceDue.length ? [{ icon: CalendarClock, color: 'text-amber-500', label: `${serviceDue.length} machine${serviceDue.length === 1 ? '' : 's'} due for service`, link: '/procurement' }] : []),
+    ...(overdueBills.length ? [{ icon: Landmark, color: 'text-red-500', label: `${overdueBills.length} vendor bill${overdueBills.length === 1 ? '' : 's'} overdue`, link: '/billing' }] : []),
+  ];
 
   // Performance: Create lookup maps for O(1) access
   const userMap = useMemo(() => {
@@ -83,6 +161,15 @@ export default function Dashboard() {
     { label: 'Available Units', value: availableUnits, change: null, icon: 'building' },
     { label: 'Bookings', value: bookedLeads, change: bookingsChange, icon: 'check-circle' },
     { label: 'Avg Deal', value: formatCurrency(avgDealSize, currency), change: null, icon: 'bar-chart' },
+    // Role-tailored ERP KPIs (spec §5): projects for execution roles, cash
+    // position for finance roles — appended so sales KPIs keep their spots
+    ...(showExecution ? [
+      { label: 'Active Projects', value: projects.filter(p => p.status !== 'completed').length, change: null, icon: 'hard-hat' },
+    ] : []),
+    ...(showFinance ? [
+      { label: 'Collections (Month)', value: formatCurrency(collectionsThisMonth, currency), change: null, icon: 'indian-rupee' },
+      { label: 'Overdue Receivables', value: formatCurrency(overdueReceivables, currency), change: null, icon: 'alert' },
+    ] : []),
   ];
 
   // Metadata-driven: the pipeline reflects the tenant's own stage definitions
@@ -178,13 +265,77 @@ export default function Dashboard() {
       });
   }, [activities, userMap, leadMap]);
 
+  // Field-staff home: a site engineer has no pipeline, so the sales dashboard
+  // would render as a wall of empty charts. They get a construction-first view.
+  if (user?.role === 'site_engineer') {
+    const myTasks = siteTasks
+      .filter(t => t.assignedTo === userId && t.status !== 'done')
+      .sort((a, b) => new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime());
+    const engineerKpis = [
+      { label: 'Active Projects', value: projects.filter(p => p.status !== 'completed').length, icon: Building2 },
+      { label: 'My Open Tasks', value: myTasks.length, icon: HardHat },
+      { label: 'Open RFIs', value: openRfis.length, icon: FileQuestion },
+      { label: 'Reorder Alerts', value: lowStock.length, icon: Package },
+    ];
+    return (
+      <div className="space-y-6 max-w-[1400px]">
+        <div>
+          <h2 className="text-2xl font-bold text-zinc-900">Welcome back, {user?.name?.split(' ')[0] || 'User'}</h2>
+          <p className="text-sm text-zinc-500 mt-0.5">Here's what's happening on your sites today.</p>
+        </div>
+
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          {engineerKpis.map((kpi, i) => (
+            <div key={i} className="bg-white rounded-2xl border border-zinc-200/60 p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <kpi.icon className="h-5 w-5 text-zinc-400" />
+                <span className="text-xs font-medium text-zinc-500">{kpi.label}</span>
+              </div>
+              <p className="text-2xl font-bold text-zinc-900">{kpi.value}</p>
+            </div>
+          ))}
+        </div>
+
+        {opsAlerts.length > 0 && <OpsAlertsCard alerts={opsAlerts} />}
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <ProjectBoardCard board={projectBoard} />
+          <div className="bg-white rounded-2xl border border-zinc-200/60 p-5">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="font-semibold text-zinc-900 flex items-center gap-2"><HardHat className="h-4 w-4 text-indigo-500" /> My Site Tasks</h3>
+              <Link to="/execution" className="text-xs text-indigo-600 font-medium hover:underline">Open Execution</Link>
+            </div>
+            <div className="space-y-2">
+              {myTasks.slice(0, 6).map(t => {
+                const overdueTask = new Date(t.dueDate).getTime() < Date.now();
+                return (
+                  <Link to={`/execution?project=${t.projectId}`} key={t.id} className="flex items-center gap-3 p-2.5 rounded-xl hover:bg-zinc-50 transition-colors">
+                    {t.isMilestone && <Flag className="h-3.5 w-3.5 text-indigo-500 shrink-0" />}
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-zinc-800 truncate">{t.title}</p>
+                      <p className={`text-xs mt-0.5 ${overdueTask ? 'text-red-500 font-medium' : 'text-zinc-500'}`}>
+                        Due {new Date(t.dueDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}{overdueTask ? ' — overdue' : ''}
+                      </p>
+                    </div>
+                    <span className="text-xs font-semibold text-zinc-600 shrink-0">{t.status === 'done' ? 100 : t.progress}%</span>
+                  </Link>
+                );
+              })}
+              {myTasks.length === 0 && <p className="text-sm text-zinc-400 text-center py-4">Nothing assigned to you — enjoy the quiet.</p>}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6 max-w-[1400px]">
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h2 className="text-2xl font-bold text-zinc-900">Welcome back, {user?.name?.split(' ')[0] || 'User'}</h2>
           <p className="text-sm text-zinc-500 mt-0.5">
-            {isExecutive ? "Here's your personal pipeline overview." : `Here's what's happening at ${tenant?.name || 'Friendly CRM'} today.`}
+            {isExecutive ? "Here's your personal pipeline overview." : `Here's what's happening at ${tenant?.name || 'Friendly ERP'} today.`}
           </p>
         </div>
         <div className="flex items-center gap-2 bg-white rounded-xl border border-zinc-200 p-1">
@@ -232,6 +383,10 @@ export default function Dashboard() {
           );
         })}
       </div>
+
+      {/* ERP: cross-module alerts + construction status board */}
+      {opsAlerts.length > 0 && <OpsAlertsCard alerts={opsAlerts} />}
+      {showExecution && projectBoard.length > 0 && <ProjectBoardCard board={projectBoard} />}
 
       {/* At-Risk leads — manager accountability panel */}
       {isManager && atRiskLeads.length > 0 && (
@@ -409,6 +564,72 @@ export default function Dashboard() {
             })}
           </div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+/** Cross-module "needs attention" strip — every row deep-links to its module. */
+function OpsAlertsCard({ alerts }: { alerts: { icon: React.ElementType; color: string; label: string; link: string }[] }) {
+  return (
+    <div className="bg-white rounded-2xl border border-zinc-200/60 p-5">
+      <h3 className="font-semibold text-zinc-900 flex items-center gap-2 mb-3">
+        <AlertTriangle className="h-4 w-4 text-amber-500" /> Needs Attention
+      </h3>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-1">
+        {alerts.map((a, i) => (
+          <Link key={i} to={a.link} className="flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-zinc-50 transition-colors">
+            <a.icon className={`h-4 w-4 shrink-0 ${a.color}`} />
+            <span className="text-sm text-zinc-700">{a.label}</span>
+          </Link>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** Per-project construction status: % complete, health flag, next milestone —
+ *  the project board the spec asks for, derived live from site tasks. */
+function ProjectBoardCard({ board }: {
+  board: { project: Project; progress: number | null; health: keyof typeof HEALTH_META; milestone: SiteTask | null }[];
+}) {
+  return (
+    <div className="bg-white rounded-2xl border border-zinc-200/60 p-5">
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="font-semibold text-zinc-900 flex items-center gap-2">
+          <HardHat className="h-4 w-4 text-indigo-500" /> Site Progress
+        </h3>
+        <Link to="/execution" className="text-xs text-indigo-600 font-medium hover:underline">Open Execution</Link>
+      </div>
+      <div className="space-y-3">
+        {board.length === 0 && <p className="text-sm text-zinc-400 text-center py-4">No projects yet</p>}
+        {board.map(({ project, progress, health, milestone }) => (
+          <Link
+            key={project.id}
+            to={`/execution?project=${project.id}`}
+            className="block p-3 rounded-xl border border-zinc-100 hover:border-indigo-200 hover:bg-indigo-50/30 transition-colors"
+          >
+            <div className="flex items-center justify-between gap-3 mb-1.5 flex-wrap">
+              <p className="text-sm font-semibold text-zinc-900">{project.name}</p>
+              <div className="flex items-center gap-2">
+                <span className={`inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full border ${HEALTH_META[health].badge}`}>
+                  <span className={`h-1.5 w-1.5 rounded-full ${HEALTH_META[health].dot}`} />
+                  {HEALTH_META[health].label}
+                </span>
+                <span className="text-xs font-bold text-zinc-700">{progress === null ? '—' : `${progress}%`}</span>
+              </div>
+            </div>
+            <div className="h-1.5 bg-zinc-100 rounded-full overflow-hidden">
+              <div className="h-full bg-gradient-to-r from-indigo-500 to-violet-500 rounded-full" style={{ width: `${progress ?? 0}%` }} />
+            </div>
+            <p className="text-[11px] text-zinc-500 mt-1.5 flex items-center gap-1">
+              <Flag className="h-3 w-3 text-zinc-400" />
+              {milestone
+                ? <>Next: {milestone.title} · {new Date(milestone.dueDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}</>
+                : 'No open milestones'}
+            </p>
+          </Link>
+        ))}
       </div>
     </div>
   );

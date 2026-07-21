@@ -1,8 +1,10 @@
-# Friendly CRM
+# Friendly ERP
 
-A multi-tenant **real-estate CRM** (SaaS). Builders and brokerages get their own
-isolated workspace to manage leads, site visits, bookings, teams and reporting;
-a platform super-admin manages every workspace.
+A multi-tenant **ERP + CRM for real estate and construction** (SaaS). Builders and
+brokerages get their own isolated workspace to manage leads, site visits, bookings,
+site execution (tasks, RFIs, change orders, inspections), procurement (vendors,
+POs, site stock, machinery), finance (receivables, vendor bills, project budgets),
+teams and reporting; a platform super-admin manages every workspace.
 
 It ships in two forms from one codebase:
 

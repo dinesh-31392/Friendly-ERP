@@ -4,20 +4,24 @@ import {
   Settings, Calendar, ChevronDown, Bell, Search, Megaphone,
   MessageSquare, FileText, CreditCard, Wrench, Shield, LogOut,
   X, AlertCircle, CheckCircle2, Clock, Menu, BookOpenCheck, Handshake, Globe, ShieldAlert,
+  HardHat, Truck, Package,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { getByTenant } from '../services/db';
 import { isDemoMode } from '../services/apiClient';
 import { trialDaysLeft, isModuleEnabled } from '../services/planService';
+import { lowStockMaterials } from '../services/procurementService';
 import InstallAppButton from '../components/InstallAppButton';
 import ErrorBoundary from '../components/ErrorBoundary';
-import type { Lead, Task, Ticket, Conversation } from '../types';
+import type { Lead, Task, Ticket, Conversation, SiteTask, PurchaseOrder, Vendor, Material } from '../types';
 
 const navItems = [
   { to: '/', icon: LayoutDashboard, label: 'Dashboard', permission: 'view_dashboard' },
   { to: '/leads', icon: Users, label: 'Leads', permission: 'view_leads' },
   { to: '/projects', icon: Building2, label: 'Projects', permission: 'view_projects' },
+  { to: '/execution', icon: HardHat, label: 'Site Execution', permission: 'view_execution' },
+  { to: '/procurement', icon: Truck, label: 'Procurement', permission: 'view_procurement' },
   { to: '/inventory', icon: Building2, label: 'Inventory', permission: 'view_inventory' },
   { to: '/bookings', icon: BookOpenCheck, label: 'Bookings', permission: 'view_bookings' },
   { to: '/sales-performance', icon: TrendingUp, label: 'Sales Performance', permission: 'view_sales_performance' },
@@ -49,6 +53,7 @@ const roles = [
   { role: 'builder_admin' as const, label: 'Builder Admin' },
   { role: 'sales_manager' as const, label: 'Sales Manager' },
   { role: 'sales_executive' as const, label: 'Sales Executive' },
+  { role: 'site_engineer' as const, label: 'Site Engineer' },
 ];
 
 export default function DashboardLayout() {
@@ -88,12 +93,37 @@ export default function DashboardLayout() {
   // to nav, search, or notifications (and its routes are hard-blocked too).
   const moduleOn = (key: string) => key === '' || isModuleEnabled(tenant, key);
 
+  // ERP modules — gated on permission AND module so nothing leaks to roles
+  // (or tenants) that can't reach the pages
+  const canExec = hasPermission('view_execution') && moduleOn('execution');
+  const canProc = hasPermission('view_procurement') && moduleOn('procurement');
+  const overdueSiteTasks = useMemo(
+    () => canExec
+      ? getByTenant<SiteTask>('siteTasks', tenantId).filter(t => t.status !== 'done' && new Date(t.dueDate).getTime() < Date.now())
+      : [],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [tenantId, location.pathname, canExec]
+  );
+  const lowStock = useMemo(
+    () => canProc ? lowStockMaterials(tenantId) : [],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [tenantId, location.pathname, canProc]
+  );
+  const pendingPoApprovals = useMemo(
+    () => canProc && hasPermission('approve_purchase_orders')
+      ? getByTenant<PurchaseOrder>('purchaseOrders', tenantId).filter(p => p.status === 'pending_approval')
+      : [],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [tenantId, location.pathname, canProc]
+  );
+
   // Counts only from ENABLED modules (a disabled module must not leak counts)
   const unreadMessages = moduleOn('messages') ? conversations.reduce((s, c) => s + c.unread, 0) : 0;
   const openTickets = moduleOn('service') ? tickets.filter(t => t.status === 'open').length : 0;
   const pendingTasks = moduleOn('calendar') ? tasks.filter(t => t.status === 'pending' && t.priority === 'hot').length : 0;
   const newLeads = moduleOn('leads') ? leads.filter(l => l.stage === 'new').length : 0;
-  const totalNotifications = unreadMessages + openTickets + pendingTasks + newLeads;
+  const totalNotifications = unreadMessages + openTickets + pendingTasks + newLeads
+    + overdueSiteTasks.length + lowStock.length + pendingPoApprovals.length;
 
   // Build notifications list — each entry gated by its module being enabled
   const notifications = useMemo(() => {
@@ -110,9 +140,19 @@ export default function DashboardLayout() {
     if (moduleOn('messages') && unreadMessages > 0) {
       items.push({ id: 'msg-all', type: 'msg', title: `${unreadMessages} unread messages`, time: 'now', link: '/messages', icon: MessageSquare, color: 'text-indigo-500' });
     }
+    // ERP: construction & supply alerts
+    overdueSiteTasks.slice(0, 3).forEach(t => {
+      items.push({ id: `st-${t.id}`, type: 'site_task', title: `Overdue on site: ${t.title}`, time: new Date(t.dueDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }), link: `/execution?project=${t.projectId}`, icon: HardHat, color: 'text-red-500' });
+    });
+    lowStock.slice(0, 3).forEach(({ material, onHand }) => {
+      items.push({ id: `ls-${material.id}`, type: 'stock', title: `Reorder ${material.name} — ${onHand} ${material.unit} left`, time: 'now', link: '/procurement', icon: Package, color: 'text-red-500' });
+    });
+    if (pendingPoApprovals.length > 0) {
+      items.push({ id: 'po-approvals', type: 'po', title: `${pendingPoApprovals.length} purchase order${pendingPoApprovals.length === 1 ? '' : 's'} awaiting approval`, time: 'now', link: '/procurement', icon: Truck, color: 'text-amber-500' });
+    }
     return items;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [leads, tasks, tickets, unreadMessages, tenant]);
+  }, [leads, tasks, tickets, unreadMessages, tenant, overdueSiteTasks, lowStock, pendingPoApprovals]);
 
   // Global search results
   const searchResults = useMemo(() => {
@@ -142,9 +182,28 @@ export default function DashboardLayout() {
         results.push({ id: l.id, type: 'Booking', label: `${l.name} — ${l.project}`, link: '/bookings', icon: BookOpenCheck });
       });
     }
+    if (canExec) {
+      getByTenant<SiteTask>('siteTasks', tenantId)
+        .filter(t => t.title.toLowerCase().includes(q)).slice(0, 3)
+        .forEach(t => {
+          results.push({ id: t.id, type: 'Site Task', label: t.title, link: `/execution?project=${t.projectId}`, icon: HardHat });
+        });
+    }
+    if (canProc) {
+      getByTenant<Vendor>('vendors', tenantId)
+        .filter(v => v.name.toLowerCase().includes(q)).slice(0, 3)
+        .forEach(v => {
+          results.push({ id: v.id, type: 'Vendor', label: `${v.name} — ${v.category}`, link: '/procurement', icon: Truck });
+        });
+      getByTenant<Material>('materials', tenantId)
+        .filter(m => m.name.toLowerCase().includes(q)).slice(0, 3)
+        .forEach(m => {
+          results.push({ id: m.id, type: 'Material', label: m.name, link: '/procurement', icon: Package });
+        });
+    }
     return results;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchQuery, leads, tasks, tickets, tenantId]);
+  }, [searchQuery, leads, tasks, tickets, tenantId, canExec, canProc]);
 
   // Keyboard shortcut for search
   useEffect(() => {
@@ -219,8 +278,8 @@ export default function DashboardLayout() {
           )}
           {!sidebarCollapsed && (
             <div className="min-w-0 flex-1">
-              <p className="text-sm font-semibold text-zinc-900 leading-tight truncate">{tenant?.name || 'Friendly CRM'}</p>
-              <p className="text-[11px] text-zinc-500">Real Estate OS</p>
+              <p className="text-sm font-semibold text-zinc-900 leading-tight truncate">{tenant?.name || 'Friendly ERP'}</p>
+              <p className="text-[11px] text-zinc-500">Friendly ERP</p>
             </div>
           )}
         </div>

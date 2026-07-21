@@ -11,6 +11,7 @@ import { getByTenant } from '../services/db';
 import { isDemoMode } from '../services/apiClient';
 import { trialDaysLeft, isModuleEnabled } from '../services/planService';
 import InstallAppButton from '../components/InstallAppButton';
+import ErrorBoundary from '../components/ErrorBoundary';
 import type { Lead, Task, Ticket, Conversation } from '../types';
 
 const navItems = [
@@ -502,9 +503,14 @@ export default function DashboardLayout() {
           </div>
         </header>
 
-        {/* Content */}
+        {/* Content — wrapped so a single page's crash shows a friendly fallback
+            instead of tearing down the whole shell to a blank screen. Keying by
+            pathname remounts the boundary on navigation, so moving to another
+            page clears a prior error. */}
         <main className="flex-1 overflow-y-auto p-4 lg:p-6">
-          <Outlet />
+          <ErrorBoundary key={location.pathname} area="page">
+            <Outlet />
+          </ErrorBoundary>
         </main>
       </div>
 

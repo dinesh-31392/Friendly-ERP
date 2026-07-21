@@ -10,6 +10,10 @@ interface ImportMetaEnv {
    *   VITE_API_URL=  npm run build     # same-origin /api (recommended behind nginx)
    */
   readonly VITE_API_URL?: string;
+  /** Vite built-ins. DEV/PROD are booleans; MODE is the build mode name. */
+  readonly DEV: boolean;
+  readonly PROD: boolean;
+  readonly MODE: string;
 }
 
 interface ImportMeta {

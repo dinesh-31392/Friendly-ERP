@@ -27,6 +27,7 @@ import PortalDashboard from './pages/PortalDashboard';
 import ChatbotPortal from './pages/ChatbotPortal';
 import Microsite from './pages/Microsite';
 import ForcePasswordChange from './components/ForcePasswordChange';
+import ErrorBoundary from './components/ErrorBoundary';
 
 function AuthGuard({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, isLoading, user } = useAuth();
@@ -127,7 +128,11 @@ export default function App() {
   return (
     <BrowserRouter>
       <AuthProvider>
-        <AppRoutes />
+        {/* Top-level net: catches crashes outside the dashboard shell too
+            (login, portal, public microsite) so nothing ever blanks to white. */}
+        <ErrorBoundary>
+          <AppRoutes />
+        </ErrorBoundary>
         <Toaster
           position="top-right"
           toastOptions={{

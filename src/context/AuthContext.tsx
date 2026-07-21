@@ -12,7 +12,7 @@ interface AuthContextType {
   users: User[];
   isAuthenticated: boolean;
   isLoading: boolean;
-  login: (email: string, password: string) => Promise<{ success: boolean; error?: string }>;
+  login: (email: string, password: string, workspaceCode?: string) => Promise<{ success: boolean; error?: string }>;
   register: (name: string, email: string, password: string, phone: string, company: string, country?: string, currency?: string) => Promise<{ success: boolean; error?: string; pending?: boolean }>;
   resetPassword: (email: string, newPassword: string) => { success: boolean; error?: string };
   changeOwnPassword: (newPassword: string) => { success: boolean; error?: string };
@@ -79,27 +79,32 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUsers(tenantUsers);
   };
 
-  const login = useCallback(async (email: string, password: string) => {
+  const login = useCallback(async (email: string, password: string, workspaceCode?: string) => {
     // Feature flag: when an API URL is configured, authenticate against the
     // Fastify backend (JWT) instead of the localStorage demo store.
     if (isApiEnabled()) {
       try {
-        const apiResult = await apiLogin(email, password);
+        // The workspace code IS the tenant slug the API disambiguates with.
+        const apiResult = await apiLogin(email, password, workspaceCode?.trim() || undefined);
         setUser(apiResult.user);
         setTenant(apiResult.tenant);
+        authService.rememberAccount(apiResult.user, apiResult.tenant);
         return { success: true };
       } catch (err) {
         return { success: false, error: err instanceof Error ? err.message : 'API login failed' };
       }
     }
 
-    const result = authService.login(email, password);
+    const result = authService.login(email, password, workspaceCode);
+    if (result && 'error' in result) {
+      return { success: false, error: result.error };
+    }
     if (!result) {
       return { success: false, error: 'Invalid email or password. Please try again.' };
     }
     // Suspended workspaces cannot sign in (super admins are never suspended)
     if (result.tenant.status === 'suspended' && result.user.role !== 'super_admin') {
-      authService.clearSession();
+      authService.logout();
       return { success: false, error: 'This workspace has been suspended. Please contact support.' };
     }
     // Approval gate: a builder workspace only opens once a super admin has
@@ -107,18 +112,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // legacy tenants default to approved and are unaffected.
     const isPlatformStaff = result.user.role === 'super_admin' || result.user.role === 'tech_team';
     if (!isPlatformStaff && result.tenant.approvalStatus === 'pending') {
-      authService.clearSession();
+      authService.logout();
       return { success: false, error: 'Your workspace is pending approval. You\'ll be able to sign in once our team activates it.' };
     }
     if (!isPlatformStaff && result.tenant.approvalStatus === 'rejected') {
-      authService.clearSession();
+      authService.logout();
       return { success: false, error: 'This workspace application was not approved. Please contact support.' };
     }
     // Trial expiry is the revenue gate and was never enforced: isTrialExpired
     // had no call sites anywhere, so a lapsed 14-day trial kept full access
     // forever. getCurrentUser() re-checks this on every reload too.
     if (!isPlatformStaff && isTrialExpired(result.tenant)) {
-      authService.clearSession();
+      authService.logout();
       return { success: false, error: 'Your free trial has ended. Contact us to activate your workspace.' };
     }
     setUser(result.user);

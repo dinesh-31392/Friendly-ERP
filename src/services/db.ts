@@ -12,7 +12,10 @@ type TableName = 'tenants' | 'users' | 'projects' | 'towers' | 'units' | 'leads'
   // ERP modules: project execution, procurement & materials, AP/budgets
   'siteTasks' | 'progressUpdates' | 'rfis' | 'changeOrders' | 'inspections' |
   'vendors' | 'purchaseOrders' | 'materials' | 'stockTxns' | 'machines' |
-  'vendorBills' | 'projectBudgets';
+  'vendorBills' | 'projectBudgets' |
+  // ERP: HR & workforce, statutory compliance, signed-in device sessions
+  'employees' | 'attendance' | 'leaveRequests' | 'payrollRuns' |
+  'complianceItems' | 'sessions';
 
 function readTable<T>(table: TableName): T[] {
   try {

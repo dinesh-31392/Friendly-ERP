@@ -1,14 +1,16 @@
 import { useState, useMemo } from 'react';
 import {
   IndianRupee, Download, Filter, Search, CheckCircle, Clock, AlertTriangle,
-  Plus, X, Trash2, Receipt, Landmark, PiggyBank, ArrowUpRight,
+  Plus, X, Trash2, Receipt, Landmark, PiggyBank, ArrowUpRight, ShieldCheck,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { getByTenant, create, update, remove, logAudit } from '../services/db';
 import { isBillOverdue, projectActuals, formatPoNumber } from '../services/procurementService';
-import type { Invoice, InvoiceStatus, Lead, Vendor, VendorBill, VendorBillStatus, Project, ProjectBudget, PurchaseOrder } from '../types';
-import { BUDGET_CATEGORIES } from '../types';
+import { isFilingOverdue, markFiled } from '../services/complianceService';
+import type { Invoice, InvoiceStatus, Lead, Vendor, VendorBill, VendorBillStatus, Project, ProjectBudget, PurchaseOrder, ComplianceItem, FilingFrequency } from '../types';
+import { BUDGET_CATEGORIES, FILING_AUTHORITIES } from '../types';
 import { formatCurrency } from '../utils/format';
+import { downloadCsv } from '../utils/csv';
 import toast from 'react-hot-toast';
 
 const statusColors: Record<InvoiceStatus, string> = {
@@ -26,7 +28,7 @@ const billStatusColors: Record<VendorBillStatus, string> = {
 
 const invoiceTypes = ['Booking Token', '1st Installment', '2nd Installment', '3rd Installment', 'Final Payment', 'Quotation', 'Refund'];
 
-type Tab = 'receivables' | 'payables' | 'budgets';
+type Tab = 'receivables' | 'payables' | 'budgets' | 'compliance';
 
 export default function Billing() {
   const { user, tenant, hasPermission } = useAuth();
@@ -41,6 +43,7 @@ export default function Billing() {
   const [statusFilter, setStatusFilter] = useState<InvoiceStatus | 'all'>('all');
   const [showAdd, setShowAdd] = useState(false);
   const [showAddBill, setShowAddBill] = useState(false);
+  const [showAddFiling, setShowAddFiling] = useState(false);
   const [budgetProjectId, setBudgetProjectId] = useState('');
 
   const invoices = useMemo(
@@ -60,6 +63,16 @@ export default function Billing() {
   const projects = useMemo(() => getByTenant<Project>('projects', tenantId), [tenantId, refreshKey]);
   const budgets = useMemo(() => getByTenant<ProjectBudget>('projectBudgets', tenantId), [tenantId, refreshKey]);
   const pos = useMemo(() => getByTenant<PurchaseOrder>('purchaseOrders', tenantId), [tenantId, refreshKey]);
+  const filings = useMemo(
+    () => getByTenant<ComplianceItem>('complianceItems', tenantId).sort((a, b) => {
+      // Pending first (by due date), filed history after (most recent first)
+      if ((a.status === 'pending') !== (b.status === 'pending')) return a.status === 'pending' ? -1 : 1;
+      return a.status === 'pending'
+        ? new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime()
+        : new Date(b.filedAt || 0).getTime() - new Date(a.filedAt || 0).getTime();
+    }),
+    [tenantId, refreshKey]
+  );
 
   const vendorName = (id: string) => vendors.find(v => v.id === id)?.name || '—';
   const projectName = (id?: string) => projects.find(p => p.id === id)?.name || '—';
@@ -215,6 +228,74 @@ export default function Billing() {
     toast.success('Budget line added');
   };
 
+  // ── Compliance filings ─────────────────────────────────────────────────────
+  const handleAddFiling = (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    const fd = new FormData(e.currentTarget);
+    const title = (fd.get('title') as string)?.trim();
+    const dueDate = fd.get('dueDate') as string;
+    if (!title || !dueDate) { toast.error('Title and due date are required'); return; }
+    const created = create<ComplianceItem>('complianceItems', {
+      id: '', tenantId, title,
+      authority: (fd.get('authority') as string) || 'Other',
+      dueDate,
+      frequency: (fd.get('frequency') as FilingFrequency) || 'one_time',
+      projectId: (fd.get('projectId') as string) || undefined,
+      notes: (fd.get('notes') as string) || '',
+      status: 'pending',
+      createdAt: new Date().toISOString(),
+    });
+    audit('create', 'compliance_item', created.id, `Tracked filing "${title}" due ${dueDate}`);
+    setShowAddFiling(false);
+    refresh();
+    toast.success('Filing tracked');
+  };
+
+  const handleMarkFiled = (item: ComplianceItem) => {
+    if (!user) return;
+    const next = markFiled(item, { id: user.id, name: user.name });
+    refresh();
+    toast.success(next ? `Filed — next ${item.title} tracked for ${new Date(next.dueDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}` : 'Marked filed');
+  };
+
+  const deleteFiling = (item: ComplianceItem) => {
+    if (!confirm(`Stop tracking "${item.title}"?`)) return;
+    remove('complianceItems', item.id);
+    refresh();
+    toast.success('Filing removed');
+  };
+
+  /** Real export of whichever tab is on screen — Excel-safe CSV. */
+  const handleExport = () => {
+    const today = new Date().toISOString().slice(0, 10);
+    if (tab === 'receivables') {
+      if (invoices.length === 0) { toast.error('Nothing to export yet'); return; }
+      downloadCsv(`invoices-${today}.csv`, [
+        ['Invoice', 'Customer', 'Project', 'Type', 'Amount', 'Date', 'Due Date', 'Status'],
+        ...invoices.map(i => [i.id.slice(0, 6).toUpperCase(), i.leadName, i.project, i.type, i.amount, i.date.slice(0, 10), i.dueDate.slice(0, 10), i.status]),
+      ]);
+    } else if (tab === 'payables') {
+      if (bills.length === 0) { toast.error('Nothing to export yet'); return; }
+      downloadCsv(`vendor-bills-${today}.csv`, [
+        ['Bill No', 'Vendor', 'Project', 'Cost Head', 'Amount', 'Bill Date', 'Due Date', 'Status', 'Overdue'],
+        ...bills.map(b => [b.billNumber || b.id.slice(0, 6), vendorName(b.vendorId), projectName(b.projectId), b.category, b.amount, b.billDate, b.dueDate, b.status, isBillOverdue(b) ? 'yes' : 'no']),
+      ]);
+    } else if (tab === 'budgets') {
+      if (!budgetProject || budgetRows.length === 0) { toast.error('Nothing to export yet'); return; }
+      downloadCsv(`budget-vs-actual-${budgetProject.name.replace(/\s+/g, '-').toLowerCase()}-${today}.csv`, [
+        ['Project', 'Cost Head', 'Budgeted', 'Actual', 'Variance'],
+        ...budgetRows.map(r => [budgetProject.name, r.category, r.line?.budgeted ?? 0, r.actual, (r.line?.budgeted ?? 0) - r.actual]),
+      ]);
+    } else {
+      if (filings.length === 0) { toast.error('Nothing to export yet'); return; }
+      downloadCsv(`compliance-filings-${today}.csv`, [
+        ['Filing', 'Authority', 'Project', 'Due Date', 'Frequency', 'Status', 'Filed At'],
+        ...filings.map(f => [f.title, f.authority, f.projectId ? projectName(f.projectId) : '', f.dueDate, f.frequency.replace('_', ' '), isFilingOverdue(f) ? 'OVERDUE' : f.status, f.filedAt?.slice(0, 10) ?? '']),
+      ]);
+    }
+    toast.success('Exported as CSV (opens in Excel)');
+  };
+
   const fmtDate = (d?: string) => d ? new Date(d).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) : '—';
   const inputCls = 'w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20';
   const labelCls = 'block text-xs font-semibold text-zinc-500 uppercase mb-1';
@@ -223,7 +304,9 @@ export default function Billing() {
     { id: 'receivables', label: 'Receivables', icon: Receipt },
     { id: 'payables', label: 'Payables', icon: Landmark },
     { id: 'budgets', label: 'Budget vs Actual', icon: PiggyBank },
+    { id: 'compliance', label: 'Compliance', icon: ShieldCheck },
   ];
+  const filingsDue = filings.filter(f => f.status === 'pending' && new Date(f.dueDate).getTime() <= Date.now() + 14 * 86400000).length;
 
   return (
     <div className="space-y-6 max-w-[1200px]">
@@ -233,8 +316,8 @@ export default function Billing() {
           <p className="text-sm text-zinc-500 mt-0.5">Customer collections, vendor payables and project budgets in one place.</p>
         </div>
         <div className="flex items-center gap-2">
-          <button onClick={() => toast.success('Export started')} className="flex items-center gap-2 px-3 py-2.5 bg-white border border-zinc-200 rounded-xl text-sm font-medium text-zinc-600 hover:bg-zinc-50">
-            <Download className="h-4 w-4" /> Export
+          <button onClick={handleExport} className="flex items-center gap-2 px-3 py-2.5 bg-white border border-zinc-200 rounded-xl text-sm font-medium text-zinc-600 hover:bg-zinc-50">
+            <Download className="h-4 w-4" /> Export CSV
           </button>
           {canManage && tab === 'receivables' && (
             <button onClick={() => setShowAdd(true)} className="flex items-center gap-2 px-4 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 transition-colors shadow-sm">
@@ -252,6 +335,11 @@ export default function Billing() {
               <Plus className="h-4 w-4" /> Record Bill
             </button>
           )}
+          {canManage && tab === 'compliance' && (
+            <button onClick={() => setShowAddFiling(true)} className="flex items-center gap-2 px-4 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 transition-colors shadow-sm">
+              <Plus className="h-4 w-4" /> Track Filing
+            </button>
+          )}
         </div>
       </div>
 
@@ -264,6 +352,9 @@ export default function Billing() {
             className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-sm font-medium whitespace-nowrap transition-all ${tab === t.id ? 'bg-indigo-600 text-white shadow-sm' : 'text-zinc-500 hover:text-zinc-800'}`}
           >
             <t.icon className="h-4 w-4" /> {t.label}
+            {t.id === 'compliance' && filingsDue > 0 && (
+              <span className={`text-[10px] font-bold px-1.5 rounded-full ${tab === 'compliance' ? 'bg-white/20' : 'bg-red-100 text-red-600'}`}>{filingsDue}</span>
+            )}
           </button>
         ))}
       </div>
@@ -547,6 +638,111 @@ export default function Billing() {
           )}
         </div>
         </>)
+      )}
+
+      {/* ── Compliance ── */}
+      {tab === 'compliance' && (
+        <div className="bg-white rounded-2xl border border-zinc-200/60 overflow-hidden">
+          <div className="px-5 py-4 border-b border-zinc-100">
+            <h3 className="font-semibold text-zinc-900">Statutory Filings & Deadlines</h3>
+            <p className="text-xs text-zinc-500 mt-0.5">GST, RERA, TDS, PF/ESI — marking a recurring filing as filed automatically tracks the next period.</p>
+          </div>
+          {filings.length === 0 ? (
+            <div className="py-16 text-center">
+              <ShieldCheck className="h-10 w-10 text-zinc-300 mx-auto mb-2" />
+              <p className="text-sm text-zinc-400">No filings tracked yet. Add your recurring returns once — deadlines then surface on the dashboard.</p>
+            </div>
+          ) : (
+            <div className="divide-y divide-zinc-50">
+              {filings.map(f => {
+                const overdueF = isFilingOverdue(f);
+                const daysLeft = Math.ceil((new Date(f.dueDate).getTime() - Date.now()) / 86400000);
+                return (
+                  <div key={f.id} className="flex items-center gap-3 px-5 py-3 flex-wrap">
+                    <div className={`h-9 w-9 rounded-xl flex items-center justify-center shrink-0 ${f.status === 'filed' ? 'bg-emerald-50' : overdueF ? 'bg-red-50' : 'bg-indigo-50'}`}>
+                      <ShieldCheck className={`h-5 w-5 ${f.status === 'filed' ? 'text-emerald-500' : overdueF ? 'text-red-500' : 'text-indigo-500'}`} />
+                    </div>
+                    <div className="flex-1 min-w-[220px]">
+                      <p className="text-sm font-medium text-zinc-900">{f.title}</p>
+                      <p className="text-[11px] text-zinc-500">
+                        {f.authority}{f.projectId ? ` · ${projectName(f.projectId)}` : ''} · {f.frequency.replace('_', '-')}
+                        {f.status === 'filed' && f.filedAt ? ` · filed ${fmtDate(f.filedAt)}` : ''}
+                      </p>
+                    </div>
+                    {f.status === 'pending' && (
+                      <span className={`text-[11px] font-semibold px-2.5 py-1 rounded-full ${overdueF ? 'bg-red-50 text-red-600' : daysLeft <= 14 ? 'bg-amber-50 text-amber-700' : 'bg-zinc-100 text-zinc-600'}`}>
+                        {overdueF ? `overdue since ${fmtDate(f.dueDate)}` : `due ${fmtDate(f.dueDate)}`}
+                      </span>
+                    )}
+                    {f.status === 'filed' && <span className="text-[11px] font-semibold px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-700">filed</span>}
+                    {canManage && f.status === 'pending' && (
+                      <button onClick={() => handleMarkFiled(f)} className="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-emerald-50 text-emerald-700 hover:bg-emerald-100 transition-colors">Mark Filed</button>
+                    )}
+                    {canManage && (
+                      <button onClick={() => deleteFiling(f)} className="p-1.5 rounded-lg hover:bg-red-50 text-zinc-300 hover:text-red-500 transition-colors">
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Track filing modal */}
+      {showAddFiling && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => setShowAddFiling(false)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 animate-fade-in" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold text-zinc-900">Track a Filing</h3>
+              <button onClick={() => setShowAddFiling(false)} className="p-1.5 rounded-lg hover:bg-zinc-100"><X className="h-4 w-4 text-zinc-500" /></button>
+            </div>
+            <form onSubmit={handleAddFiling} className="space-y-3">
+              <div>
+                <label className={labelCls}>Filing *</label>
+                <input name="title" required placeholder="GSTR-3B monthly return" className={inputCls} />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>Authority</label>
+                  <select name="authority" className={inputCls}>
+                    {FILING_AUTHORITIES.map(a => <option key={a}>{a}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className={labelCls}>Frequency</label>
+                  <select name="frequency" className={inputCls}>
+                    <option value="one_time">One-time</option>
+                    <option value="monthly">Monthly</option>
+                    <option value="quarterly">Quarterly</option>
+                    <option value="annual">Annual</option>
+                  </select>
+                </div>
+                <div>
+                  <label className={labelCls}>Next Due Date *</label>
+                  <input name="dueDate" type="date" required className={inputCls} />
+                </div>
+                <div>
+                  <label className={labelCls}>Project</label>
+                  <select name="projectId" className={inputCls}>
+                    <option value="">Company-wide</option>
+                    {projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                  </select>
+                </div>
+              </div>
+              <div>
+                <label className={labelCls}>Notes</label>
+                <input name="notes" placeholder="Portal link, CA contact…" className={inputCls} />
+              </div>
+              <div className="flex gap-3 pt-3">
+                <button type="button" onClick={() => setShowAddFiling(false)} className="flex-1 px-4 py-2.5 border border-zinc-200 rounded-xl text-sm font-medium text-zinc-600 hover:bg-zinc-50">Cancel</button>
+                <button type="submit" className="flex-1 px-4 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 shadow-sm">Track Filing</button>
+              </div>
+            </form>
+          </div>
+        </div>
       )}
 
       {/* Create invoice modal */}

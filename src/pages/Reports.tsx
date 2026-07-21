@@ -1,6 +1,8 @@
 import { useState, useMemo, useEffect } from 'react';
-import { BarChart3, TrendingUp, Calendar, Users, IndianRupee } from 'lucide-react';
+import { BarChart3, TrendingUp, Users, IndianRupee, Download, Printer } from 'lucide-react';
 import { formatCurrencyFull } from '../utils/format';
+import { downloadCsv } from '../utils/csv';
+import toast from 'react-hot-toast';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, AreaChart, Area } from 'recharts';
 import { useAuth } from '../context/AuthContext';
 import { getByTenant } from '../services/db';
@@ -109,16 +111,60 @@ export default function Reports() {
 
   const maxPipelineCount = Math.max(...pipelineStages.map(s => s.count), 1);
 
+  /** Export whichever report is on screen as an Excel-safe CSV. */
+  const handleExport = () => {
+    const today = new Date().toISOString().slice(0, 10);
+    if (reportType === 'conversion') {
+      if (conversionData.length === 0) { toast.error('No data to export yet'); return; }
+      downloadCsv(`conversion-trend-${today}.csv`, [
+        ['Month', 'Leads', 'Conversions', 'Conversion Rate %'],
+        ...conversionData.map(d => [d.month, d.leads, d.conversions, d.rate]),
+      ]);
+    } else if (reportType === 'source') {
+      if (sourceData.length === 0) { toast.error('No data to export yet'); return; }
+      downloadCsv(`lead-sources-${today}.csv`, [
+        ['Source', 'Leads'],
+        ...sourceData.map(s => [s.name, s.value]),
+      ]);
+    } else if (reportType === 'performance') {
+      if (salesPerformance.length === 0) { toast.error('No data to export yet'); return; }
+      downloadCsv(`team-performance-${today}.csv`, [
+        ['Rep', 'Leads', 'Bookings', 'Revenue'],
+        ...salesPerformance.map(r => [r.name, r.leads, r.bookings, r.revenue]),
+      ]);
+    } else {
+      const bySource = leads.reduce((acc, l) => {
+        if (!acc[l.source]) acc[l.source] = { leads: 0, bookings: 0, revenue: 0 };
+        acc[l.source].leads++;
+        if (l.stage === 'booked') { acc[l.source].bookings++; acc[l.source].revenue += l.budget; }
+        return acc;
+      }, {} as Record<string, { leads: number; bookings: number; revenue: number }>);
+      const rows = Object.entries(bySource);
+      if (rows.length === 0) { toast.error('No data to export yet'); return; }
+      downloadCsv(`marketing-roi-${today}.csv`, [
+        ['Source', 'Spend', 'Leads', 'Bookings', 'Revenue', 'ROI %'],
+        ...rows.map(([source, d]) => {
+          const spend = spendBySource[source] || 0;
+          return [source, spend, d.leads, d.bookings, d.revenue, spend > 0 ? (((d.revenue - spend) / spend) * 100).toFixed(0) : ''];
+        }),
+      ]);
+    }
+    toast.success('Exported as CSV (opens in Excel)');
+  };
+
   return (
     <div className="space-y-6 max-w-[1400px]">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h2 className="text-2xl font-bold text-zinc-900">Reports & Analytics</h2>
           <p className="text-sm text-zinc-500 mt-0.5">Track performance across leads, sales, and inventory.</p>
         </div>
         <div className="flex items-center gap-2">
-          <button className="flex items-center gap-2 px-3 py-2 bg-white border border-zinc-200 rounded-xl text-sm font-medium text-zinc-600 hover:bg-zinc-50 transition-colors">
-            <Calendar className="h-4 w-4" /> Jan 2026
+          <button onClick={handleExport} className="flex items-center gap-2 px-3 py-2 bg-white border border-zinc-200 rounded-xl text-sm font-medium text-zinc-600 hover:bg-zinc-50 transition-colors">
+            <Download className="h-4 w-4" /> Export CSV
+          </button>
+          <button onClick={() => window.print()} className="flex items-center gap-2 px-3 py-2 bg-white border border-zinc-200 rounded-xl text-sm font-medium text-zinc-600 hover:bg-zinc-50 transition-colors">
+            <Printer className="h-4 w-4" /> Print / PDF
           </button>
         </div>
       </div>

@@ -4,7 +4,7 @@ import {
   Users, TrendingUp, IndianRupee, Building2, CheckCircle, BarChart3,
   ArrowUpRight, ArrowDownRight, Clock, Phone, MessageCircle, Calendar,
   AlertTriangle, Eye, MoreHorizontal, HardHat, Flag, FileQuestion, Package,
-  ShoppingCart, CalendarClock, Landmark, ClipboardCheck,
+  ShoppingCart, CalendarClock, Landmark, ClipboardCheck, CalendarDays, ShieldCheck,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { getByTenant, update, logAudit } from '../services/db';
@@ -13,6 +13,8 @@ import { getLeadStages } from '../services/metaService';
 import { isModuleEnabled } from '../services/planService';
 import { projectProgress, projectHealth, nextMilestone, HEALTH_META } from '../services/executionService';
 import { lowStockMaterials, machinesDueForService, isBillOverdue } from '../services/procurementService';
+import { pendingLeaves } from '../services/hrService';
+import { filingsDueSoon, isFilingOverdue } from '../services/complianceService';
 import { formatCurrency } from '../utils/format';
 import type { Lead, Task, Unit, Activity, User as UserType, Project, SiteTask, Rfi, Inspection, PurchaseOrder, VendorBill, Invoice } from '../types';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
@@ -89,6 +91,16 @@ export default function Dashboard() {
     () => showFinance ? getByTenant<VendorBill>('vendorBills', tenantId).filter(isBillOverdue) : [],
     [tenantId, refreshKey, showFinance]
   );
+  // Leave approvals go to whoever can decide them; filings to finance eyes
+  const leaveQueue = useMemo(
+    () => hasPermission('manage_hr') && moduleOn('hr') ? pendingLeaves(tenantId) : [],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [tenantId, refreshKey, tenant]
+  );
+  const dueFilings = useMemo(
+    () => showFinance ? filingsDueSoon(tenantId) : [],
+    [tenantId, refreshKey, showFinance]
+  );
   // Collections this month + overdue receivables — the CFO half of the KPI spec
   const invoices = useMemo(
     () => showFinance ? getByTenant<Invoice>('invoices', tenantId) : [],
@@ -110,6 +122,13 @@ export default function Dashboard() {
     ...(pendingPos.length ? [{ icon: ShoppingCart, color: 'text-amber-500', label: `${pendingPos.length} purchase order${pendingPos.length === 1 ? '' : 's'} awaiting your approval`, link: '/procurement' }] : []),
     ...(serviceDue.length ? [{ icon: CalendarClock, color: 'text-amber-500', label: `${serviceDue.length} machine${serviceDue.length === 1 ? '' : 's'} due for service`, link: '/procurement' }] : []),
     ...(overdueBills.length ? [{ icon: Landmark, color: 'text-red-500', label: `${overdueBills.length} vendor bill${overdueBills.length === 1 ? '' : 's'} overdue`, link: '/billing' }] : []),
+    ...(leaveQueue.length ? [{ icon: CalendarDays, color: 'text-amber-500', label: `${leaveQueue.length} leave request${leaveQueue.length === 1 ? '' : 's'} awaiting your decision`, link: '/hr' }] : []),
+    ...(dueFilings.length ? [{
+      icon: ShieldCheck,
+      color: dueFilings.some(isFilingOverdue) ? 'text-red-500' : 'text-amber-500',
+      label: `${dueFilings.length} statutory filing${dueFilings.length === 1 ? '' : 's'} due soon — ${dueFilings.slice(0, 2).map(f => f.title).join(', ')}${dueFilings.length > 2 ? '…' : ''}`,
+      link: '/billing',
+    }] : []),
   ];
 
   // Performance: Create lookup maps for O(1) access

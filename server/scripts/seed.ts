@@ -43,6 +43,9 @@ const PERMISSIONS = [
   // so the person raising a PO / change order can't approve their own)
   'view_execution', 'manage_execution', 'approve_change_orders',
   'view_procurement', 'manage_procurement', 'approve_purchase_orders',
+  // ERP: HR & workforce ('manage_attendance' lets field staff run the daily
+  // register without payroll/leave authority)
+  'view_hr', 'manage_hr', 'manage_attendance',
 ];
 
 /**
@@ -69,6 +72,7 @@ export const ROLE_PERMS: Record<string, string[]> = {
     'view_dashboard', 'view_projects',
     'view_execution', 'manage_execution',
     'view_procurement', 'manage_procurement',
+    'view_hr', 'manage_attendance',
     'view_documents', 'view_calendar', 'view_messages', 'send_messages',
   ],
 };

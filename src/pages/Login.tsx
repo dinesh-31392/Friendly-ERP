@@ -1,8 +1,9 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { Building2, Mail, Lock, User, Phone, ArrowRight, Eye, EyeOff, Shield, Globe, Home, KeyRound, CheckCircle2, X, Clock, AlertCircle } from 'lucide-react';
+import { Building2, Mail, Lock, User, Phone, ArrowRight, Eye, EyeOff, Shield, Globe, Home, KeyRound, CheckCircle2, X, Clock, AlertCircle, Hash } from 'lucide-react';
 import { COUNTRIES } from '../utils/format';
+import { getRecentAccounts, forgetRecentAccount, type RecentAccount } from '../services/authService';
 import InstallAppButton from '../components/InstallAppButton';
 import toast from 'react-hot-toast';
 
@@ -27,6 +28,40 @@ export default function Login() {
   // Login fields
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  // Optional workspace code (tenant slug) — spec §4 company-code entry
+  const [workspaceCode, setWorkspaceCode] = useState('');
+
+  // Account chooser (spec §4): accounts previously signed in on this device.
+  const [recentAccounts, setRecentAccounts] = useState<RecentAccount[]>(getRecentAccounts());
+  const [accountPicked, setAccountPicked] = useState(false);
+  const [useAnother, setUseAnother] = useState(false);
+
+  const isPlatformAccount = (a: RecentAccount) => a.role === 'super_admin' || a.role === 'tech_team';
+  const tabAccounts = recentAccounts.filter(a => tab === 'platform' ? isPlatformAccount(a) : !isPlatformAccount(a));
+
+  const pickAccount = (a: RecentAccount) => {
+    setEmail(a.email);
+    setWorkspaceCode(a.workspaceCode || '');
+    setAccountPicked(true);
+    setLoginError('');
+  };
+
+  const forgetAccount = (a: RecentAccount) => {
+    forgetRecentAccount(a.userId);
+    setRecentAccounts(getRecentAccounts());
+  };
+
+  const startFresh = () => {
+    setUseAnother(true);
+    setEmail(''); setPassword(''); setWorkspaceCode('');
+    setLoginError('');
+  };
+
+  const backToChooser = () => {
+    setUseAnother(false); setAccountPicked(false);
+    setEmail(''); setPassword(''); setWorkspaceCode('');
+    setLoginError('');
+  };
 
   // Register fields
   const [regName, setRegName] = useState('');
@@ -53,7 +88,7 @@ export default function Login() {
       return;
     }
     setLoading(true);
-    const result = await login(email, password);
+    const result = await login(email, password, tab === 'builder' ? workspaceCode : undefined);
     setLoading(false);
     if (!result.success) {
       setLoginError(result.error || 'Login failed. Please try again.');
@@ -65,6 +100,7 @@ export default function Login() {
 
   const switchTab = (t: LoginTab) => {
     setTab(t); setIsRegistering(false); setLoginError(''); setShowPassword(false);
+    setAccountPicked(false); setUseAnother(false);
   };
 
   const toggleRegister = () => {
@@ -345,6 +381,46 @@ export default function Login() {
               </div>
             )}
 
+            {!isRegistering && tabAccounts.length > 0 && !accountPicked && !useAnother ? (
+              /* ── Account chooser: accounts that previously signed in on this
+                 device. Picking one prefills email + workspace; the password is
+                 always asked for — this is a convenience, not an auth bypass. */
+              <div>
+                <p className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-2">Choose an account</p>
+                <div className="space-y-2 mb-4">
+                  {tabAccounts.map(a => (
+                    <div key={a.userId} className="group flex items-center gap-3 w-full rounded-xl border border-zinc-200 hover:border-indigo-300 hover:bg-indigo-50/40 transition-colors">
+                      <button type="button" onClick={() => pickAccount(a)} className="flex items-center gap-3 flex-1 min-w-0 p-3 text-left">
+                        <div className="h-9 w-9 rounded-full bg-gradient-to-br from-indigo-400 to-violet-500 flex items-center justify-center text-white text-xs font-bold shrink-0">
+                          {a.name.split(' ').map(n => n[0]).join('').slice(0, 2).toUpperCase()}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-semibold text-zinc-900 truncate">{a.name}</p>
+                          <p className="text-[11px] text-zinc-500 truncate">{a.email} · {a.tenantName}</p>
+                        </div>
+                        <ArrowRight className="h-4 w-4 text-zinc-300 group-hover:text-indigo-500 shrink-0" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => forgetAccount(a)}
+                        aria-label={`Remove ${a.email} from this device`}
+                        className="p-2 mr-1 rounded-lg text-zinc-300 hover:text-red-500 hover:bg-red-50 transition-colors shrink-0"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  onClick={startFresh}
+                  className="w-full flex items-center justify-center gap-2 py-2.5 border border-zinc-200 rounded-xl text-sm font-medium text-zinc-600 hover:bg-zinc-50 transition-colors"
+                >
+                  <User className="h-4 w-4" /> Use another account
+                </button>
+              </div>
+            ) : (
+            <>
             <form onSubmit={isRegistering ? handleRegister : handleLogin} className="space-y-4">
               {isRegistering && (
                 <>
@@ -395,6 +471,28 @@ export default function Login() {
                     <p className="text-[11px] text-zinc-400 mt-1">Sets your workspace currency. 14-day free trial, no card required.</p>
                   </div>
                 </>
+              )}
+
+              {/* Workspace code (spec §4 company-code entry) — optional in the
+                  demo store where emails are unique; REQUIRED by the API when
+                  one email exists in several workspaces. */}
+              {!isRegistering && tab === 'builder' && (
+                <div>
+                  <label className="block text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-1.5">
+                    Workspace Code <span className="normal-case font-normal text-zinc-400">(optional)</span>
+                  </label>
+                  <div className="relative">
+                    <Hash className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-zinc-400" />
+                    <input
+                      value={workspaceCode}
+                      onChange={e => setWorkspaceCode(e.target.value)}
+                      placeholder="skyline-constructions"
+                      autoCapitalize="none" autoCorrect="off" spellCheck={false}
+                      className="w-full pl-9 pr-4 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-400 transition-all"
+                    />
+                  </div>
+                  <p className="text-[11px] text-zinc-400 mt-1">Your company's code — in Settings → Branding, or in your invite.</p>
+                </div>
               )}
 
               <div>
@@ -456,6 +554,18 @@ export default function Login() {
                 )}
               </button>
             </form>
+
+            {!isRegistering && tabAccounts.length > 0 && (
+              <button
+                type="button"
+                onClick={backToChooser}
+                className="w-full mt-3 text-xs font-medium text-indigo-600 hover:text-indigo-700 text-center"
+              >
+                ← Choose a saved account
+              </button>
+            )}
+            </>
+            )}
 
             {/* Self-signup is a builder action only */}
             {tab === 'builder' && (

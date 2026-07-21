@@ -37,3 +37,14 @@ export function csvCell(value: unknown): string {
 export function toCsv(rows: unknown[][]): string {
   return rows.map(r => r.map(csvCell).join(',')).join('\r\n') + '\r\n';
 }
+
+/** Serialize rows and hand the file to the browser as a download. */
+export function downloadCsv(filename: string, rows: unknown[][]): void {
+  const blob = new Blob([toCsv(rows)], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}

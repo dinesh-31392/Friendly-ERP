@@ -4,12 +4,14 @@ import {
   Settings as SettingsIcon, Users, User, Shield, Building2, Palette, Bell,
   Link2, ChevronRight, Check, CreditCard, UserPlus, Trash2, X, RefreshCw, AlertTriangle,
   ScrollText, Sparkles, Download, FileText, Search, GitMerge, Send, Plus, Clock, Database,
+  Monitor,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import IntegrationsPanel from '../components/IntegrationsPanel';
 import PipelineSettings from '../components/PipelineSettings';
 import { PLANS, getPlanForTenant, getEffectiveLimits, withinLimit, planPriceLabel } from '../services/planService';
 import { portalUrl, portalPath, isPremium, slugify, isSlugAvailable } from '../services/portalService';
+import { getTenantSessions, revokeDeviceSession, currentSessionToken } from '../services/authService';
 import { getByTenant, update, create, remove, clearDatabase, logAudit } from '../services/db';
 import { useTenantUsers } from '../hooks/useTenantUsers';
 import type { User as UserType, Tenant, Role, AuditLog } from '../types';
@@ -585,6 +587,71 @@ export default function Settings() {
                 </div>
               ))}
             </div>
+
+            {/* Signed-in devices (spec §4 session management). Revoking signs
+                that browser out on its next page load. */}
+            {canManageUsers && (
+              <div className="pt-4 border-t border-zinc-100">
+                <div className="flex items-center justify-between mb-1">
+                  <h3 className="text-sm font-semibold text-zinc-900 flex items-center gap-2">
+                    <Monitor className="h-4 w-4 text-zinc-400" /> Signed-in Devices
+                  </h3>
+                  <button onClick={refresh} className="p-1.5 rounded-lg hover:bg-zinc-100 text-zinc-400" title="Refresh">
+                    <RefreshCw className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+                <p className="text-xs text-zinc-500 mb-3">Every browser currently signed in to this workspace. Revoke to sign a device out.</p>
+                {(() => {
+                  const sessions = getTenantSessions(tenantId);
+                  const myToken = currentSessionToken();
+                  if (sessions.length === 0) {
+                    return <p className="text-sm text-zinc-400 py-3">No active sessions recorded.</p>;
+                  }
+                  return (
+                    <div className="space-y-2">
+                      {sessions.map(s => {
+                        const owner = tenantUsers.find(u => u.id === s.userId);
+                        const isThisDevice = s.token === myToken;
+                        return (
+                          <div key={s.id} className="flex items-center gap-3 p-3 rounded-xl border border-zinc-100">
+                            <div className="h-8 w-8 rounded-lg bg-zinc-100 flex items-center justify-center shrink-0">
+                              <Monitor className="h-4 w-4 text-zinc-500" />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm font-medium text-zinc-900 truncate">
+                                {owner?.name || 'Unknown user'} · {s.device}
+                                {isThisDevice && <span className="ml-1.5 text-[10px] text-indigo-500 font-normal bg-indigo-50 px-1.5 py-0.5 rounded">This device</span>}
+                              </p>
+                              <p className="text-[11px] text-zinc-500">
+                                Last seen {new Date(s.lastSeenAt).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}
+                                {' · '}signed in {new Date(s.createdAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}
+                              </p>
+                            </div>
+                            <button
+                              onClick={() => {
+                                if (isThisDevice) {
+                                  if (!confirm('This is your current session — revoking it signs you out. Continue?')) return;
+                                  if (user) revokeDeviceSession(s.id, { id: user.id, name: user.name });
+                                  logout();
+                                  navigate('/login');
+                                  return;
+                                }
+                                if (user) revokeDeviceSession(s.id, { id: user.id, name: user.name });
+                                refresh();
+                                toast.success('Session revoked — that device is signed out');
+                              }}
+                              className="text-xs font-semibold px-2.5 py-1.5 rounded-lg text-red-600 bg-red-50 hover:bg-red-100 transition-colors shrink-0"
+                            >
+                              Revoke
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })()}
+              </div>
+            )}
           </div>
         )}
 

@@ -77,6 +77,7 @@ export const CONTROLLABLE_MODULES: { key: string; label: string }[] = [
   { key: 'projects', label: 'Projects' },
   { key: 'execution', label: 'Site Execution' },
   { key: 'procurement', label: 'Procurement' },
+  { key: 'hr', label: 'HR & Workforce' },
   { key: 'inventory', label: 'Inventory' },
   { key: 'bookings', label: 'Bookings' },
   { key: 'sales-performance', label: 'Sales Performance' },

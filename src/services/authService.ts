@@ -1,10 +1,11 @@
-import { getAll, getByField, create, getById, update, logAudit } from './db';
+import { getAll, getByField, create, getById, update, remove, logAudit } from './db';
 import { getLegacyBranch } from './branchService';
 import { uniqueSlug } from './portalService';
 import { isTrialExpired } from './planService';
-import type { User, Tenant, Role } from '../types';
+import type { User, Tenant, Role, DeviceSession } from '../types';
 
 const AUTH_KEY = 'friendly_crm_auth';
+const RECENT_KEY = 'friendly_crm_recent_accounts';
 
 export interface AuthSession {
   userId: string;
@@ -45,10 +46,115 @@ export function updateSessionUser(userId: string): void {
   saveSession({ ...session, userId });
 }
 
-export function login(email: string, password: string): { user: User; tenant: Tenant } | null {
+// ── Device sessions (spec §4: admins can see & revoke signed-in devices) ─────
+
+/** Short human label from the user agent: "Chrome · Windows". */
+function deviceLabel(): string {
+  const ua = navigator.userAgent;
+  const browser =
+    /Edg\//.test(ua) ? 'Edge' :
+    /OPR\//.test(ua) ? 'Opera' :
+    /Chrome\//.test(ua) ? 'Chrome' :
+    /Firefox\//.test(ua) ? 'Firefox' :
+    /Safari\//.test(ua) ? 'Safari' : 'Browser';
+  const os =
+    /Windows/.test(ua) ? 'Windows' :
+    /Android/.test(ua) ? 'Android' :
+    /iPhone|iPad/.test(ua) ? 'iOS' :
+    /Mac OS/.test(ua) ? 'macOS' :
+    /Linux/.test(ua) ? 'Linux' : 'Device';
+  return `${browser} · ${os}`;
+}
+
+function recordDeviceSession(user: User, token: string): void {
+  const now = new Date().toISOString();
+  create<DeviceSession>('sessions', {
+    id: '', tenantId: user.tenantId, userId: user.id, token,
+    device: deviceLabel(), createdAt: now, lastSeenAt: now,
+  });
+}
+
+export function getTenantSessions(tenantId: string): DeviceSession[] {
+  return getByField<DeviceSession>('sessions', 'tenantId', tenantId)
+    .filter(s => !s.revokedAt)
+    .sort((a, b) => new Date(b.lastSeenAt).getTime() - new Date(a.lastSeenAt).getTime());
+}
+
+/** The current browser's session token — lets the UI badge "this device". */
+export function currentSessionToken(): string | null {
+  return getSession()?.token ?? null;
+}
+
+/** Admin action: sign that device out. Takes effect on its next session
+ *  restore (page load / navigation), when getCurrentUser sees the flag. */
+export function revokeDeviceSession(sessionId: string, actor: { id: string; name: string }): void {
+  const dev = getById<DeviceSession>('sessions', sessionId);
+  if (!dev) return;
+  update<DeviceSession>('sessions', sessionId, { revokedAt: new Date().toISOString() });
+  const target = getById<User>('users', dev.userId);
+  logAudit({
+    tenantId: dev.tenantId, userId: actor.id, userName: actor.name,
+    action: 'update', entity: 'session', entityId: sessionId,
+    details: `Revoked a signed-in session (${dev.device}) for ${target?.email || 'unknown user'}`,
+  });
+}
+
+// ── Remembered accounts (spec §4: account chooser on this device) ────────────
+
+export interface RecentAccount {
+  userId: string;
+  name: string;
+  email: string;
+  tenantName: string;
+  /** Builder workspace code (tenant slug); platform staff have none */
+  workspaceCode?: string;
+  role: Role;
+  lastUsedAt: string;
+}
+
+export function getRecentAccounts(): RecentAccount[] {
+  try {
+    const raw = localStorage.getItem(RECENT_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch { return []; }
+}
+
+export function rememberAccount(user: User, tenant: Tenant): void {
+  const isPlatformStaff = user.role === 'super_admin' || user.role === 'tech_team';
+  const entry: RecentAccount = {
+    userId: user.id, name: user.name, email: user.email,
+    tenantName: tenant.name,
+    workspaceCode: isPlatformStaff ? undefined : tenant.slug,
+    role: user.role, lastUsedAt: new Date().toISOString(),
+  };
+  const rest = getRecentAccounts().filter(a => a.userId !== user.id);
+  localStorage.setItem(RECENT_KEY, JSON.stringify([entry, ...rest].slice(0, 5)));
+}
+
+export function forgetRecentAccount(userId: string): void {
+  localStorage.setItem(RECENT_KEY, JSON.stringify(getRecentAccounts().filter(a => a.userId !== userId)));
+}
+
+/**
+ * Demo-store sign-in. `workspaceCode` (the tenant slug shown throughout the
+ * product) is optional: when given, it must exist AND the account must belong
+ * to it — a mismatch reports plain invalid credentials, so the field never
+ * confirms that an email exists in some other workspace.
+ */
+export function login(
+  email: string, password: string, workspaceCode?: string,
+): { user: User; tenant: Tenant } | { error: string } | null {
+  let codeTenant: Tenant | undefined;
+  if (workspaceCode?.trim()) {
+    const slug = workspaceCode.trim().toLowerCase();
+    codeTenant = getAll<Tenant>('tenants').find(t => t.slug === slug);
+    if (!codeTenant) return { error: `No workspace found with code "${workspaceCode.trim()}".` };
+  }
+
   const users = getAll<User>('users');
   const user = users.find(u => u.email.toLowerCase() === email.toLowerCase() && u.password === password && u.active);
   if (!user) return null;
+  if (codeTenant && user.tenantId !== codeTenant.id) return null;
 
   const tenant = getById<Tenant>('tenants', user.tenantId);
   if (!tenant) return null;
@@ -60,6 +166,8 @@ export function login(email: string, password: string): { user: User; tenant: Te
     expiresAt: Date.now() + 24 * 60 * 60 * 1000, // 24 hours
   };
   saveSession(session);
+  recordDeviceSession(user, session.token);
+  rememberAccount(user, tenant);
   return { user, tenant };
 }
 
@@ -235,6 +343,13 @@ export function createPlatformAdmin(
 }
 
 export function logout(): void {
+  // Drop this device's row from the session list — a signed-out browser must
+  // not linger in the admin's "active sessions" view.
+  const session = getSession();
+  if (session) {
+    const dev = getAll<DeviceSession>('sessions').find(s => s.token === session.token);
+    if (dev) remove('sessions', dev.id);
+  }
   clearSession();
 }
 
@@ -244,6 +359,21 @@ export function getCurrentUser(): { user: User; tenant: Tenant } | null {
   const user = getById<User>('users', session.userId);
   const tenant = getById<Tenant>('tenants', session.tenantId);
   if (!user || !tenant) { clearSession(); return null; }
+
+  // Device-session enforcement: a revoked row signs this browser out on its
+  // next restore. Pre-feature sessions get a row lazily; live ones bump
+  // lastSeenAt (throttled — a timestamp isn't worth a write per navigation).
+  const dev = getAll<DeviceSession>('sessions').find(s => s.token === session.token);
+  if (dev?.revokedAt) {
+    remove('sessions', dev.id);
+    clearSession();
+    return null;
+  }
+  if (!dev) {
+    recordDeviceSession(user, session.token);
+  } else if (Date.now() - new Date(dev.lastSeenAt).getTime() > 5 * 60_000) {
+    update<DeviceSession>('sessions', dev.id, { lastSeenAt: new Date().toISOString() });
+  }
   // Re-enforce lifecycle on every restore (page reload), not just fresh login:
   // suspension or approval revocation must cut off an existing session too.
   // Platform staff (super_admin / tech_team) are never gated; legacy
@@ -291,6 +421,7 @@ export function hasPermission(user: User, action: string): boolean {
       'view_brokers', 'manage_brokers',
       'view_execution', 'manage_execution', 'approve_change_orders',
       'view_procurement', 'manage_procurement', 'approve_purchase_orders',
+      'view_hr', 'manage_hr', 'manage_attendance',
     ],
     sales_manager: [
       'view_dashboard', 'view_leads', 'manage_leads', 'assign_leads', 'add_notes', 'manage_team',
@@ -313,6 +444,8 @@ export function hasPermission(user: User, action: string): boolean {
       'view_dashboard', 'view_projects',
       'view_execution', 'manage_execution',
       'view_procurement', 'manage_procurement',
+      // Runs the site crew's daily register, but not payroll/leave decisions
+      'view_hr', 'manage_attendance',
       'view_documents', 'view_calendar', 'view_messages', 'send_messages',
     ],
   };

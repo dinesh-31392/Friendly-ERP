@@ -625,6 +625,132 @@ export interface ProjectBudget {
   createdAt: string;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ERP: HR & Workforce (employees, attendance, leave, payroll) and statutory
+// compliance filings. An Employee is an HR record, distinct from `User` (a
+// login) — most site crew never sign in; link via userId when they do.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type EmployeeType = 'staff' | 'contract_worker';
+
+export interface Employee {
+  id: string;
+  tenantId: string;
+  name: string;
+  phone: string;
+  email?: string;
+  designation: string;       // 'Site Supervisor', 'Accountant', 'Mason'…
+  department: string;
+  type: EmployeeType;
+  projectId?: string;        // default site for field staff / crew
+  monthlySalary?: number;    // staff
+  dailyWage?: number;        // contract workers — payroll = wage × days present
+  joinDate: string;
+  active: boolean;
+  userId?: string;           // optional link to a login account
+  createdAt: string;
+}
+
+/** One row per employee per day. Check-in/out are timestamps; lat/lng is the
+ *  geo stamp captured on site (method 'geo') or absent for manual marking. */
+export interface AttendanceRecord {
+  id: string;
+  tenantId: string;
+  employeeId: string;
+  date: string;              // YYYY-MM-DD
+  checkIn: string;
+  checkOut?: string;
+  projectId?: string;
+  lat?: number;
+  lng?: number;
+  method: 'geo' | 'manual';
+  createdAt: string;
+}
+
+export type LeaveType = 'casual' | 'sick' | 'earned' | 'unpaid';
+export type LeaveStatus = 'pending' | 'approved' | 'rejected';
+
+export interface LeaveRequest {
+  id: string;
+  tenantId: string;
+  employeeId: string;
+  type: LeaveType;
+  from: string;
+  to: string;
+  days: number;
+  reason?: string;
+  status: LeaveStatus;
+  decidedBy?: string;        // userId
+  decidedAt?: string;
+  createdAt: string;
+}
+
+export interface PayrollItem {
+  employeeId: string;
+  name: string;
+  designation: string;
+  empType: EmployeeType;
+  /** 'Monthly salary' or '18 days × ₹800' — how gross was arrived at */
+  basis: string;
+  daysPresent?: number;
+  gross: number;
+}
+
+export interface PayrollRun {
+  id: string;
+  tenantId: string;
+  month: string;             // YYYY-MM
+  status: 'draft' | 'processed';
+  items: PayrollItem[];
+  processedBy?: string;
+  processedAt?: string;
+  createdAt: string;
+}
+
+export type FilingFrequency = 'one_time' | 'monthly' | 'quarterly' | 'annual';
+
+/** A statutory/compliance deadline (GST return, RERA QPR, TDS, PF/ESI…).
+ *  Marking a recurring filing as filed auto-creates the next occurrence. */
+export interface ComplianceItem {
+  id: string;
+  tenantId: string;
+  title: string;
+  authority: string;         // 'GST', 'RERA', 'Income Tax', 'EPFO/ESIC', …
+  dueDate: string;
+  frequency: FilingFrequency;
+  projectId?: string;        // RERA filings are per-project
+  notes?: string;
+  status: 'pending' | 'filed';
+  filedAt?: string;
+  filedBy?: string;
+  createdAt: string;
+}
+
+/** A signed-in device/browser. Written at login, checked on every session
+ *  restore — revoking a row signs that device out (spec §4: admins can see
+ *  and revoke active sessions per user). */
+export interface DeviceSession {
+  id: string;
+  tenantId: string;
+  userId: string;
+  token: string;
+  device: string;            // short human label parsed from the user agent
+  createdAt: string;
+  lastSeenAt: string;
+  revokedAt?: string;
+}
+
+export const DEPARTMENTS = ['Engineering', 'Sales', 'Accounts', 'Procurement', 'Admin & HR', 'Labour', 'Other'];
+
+export const LEAVE_TYPES: { id: LeaveType; label: string }[] = [
+  { id: 'casual', label: 'Casual' },
+  { id: 'sick', label: 'Sick' },
+  { id: 'earned', label: 'Earned' },
+  { id: 'unpaid', label: 'Unpaid' },
+];
+
+export const FILING_AUTHORITIES = ['GST', 'RERA', 'Income Tax / TDS', 'EPFO / ESIC', 'Labour Dept', 'Municipal', 'Other'];
+
 export const SITE_TASK_STATUSES: { id: SiteTaskStatus; label: string; color: string }[] = [
   { id: 'not_started', label: 'Not Started', color: 'bg-zinc-400' },
   { id: 'in_progress', label: 'In Progress', color: 'bg-blue-500' },

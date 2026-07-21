@@ -16,7 +16,7 @@ import { lowStockMaterials, machinesDueForService, isBillOverdue } from '../serv
 import { pendingLeaves } from '../services/hrService';
 import { filingsDueSoon, isFilingOverdue } from '../services/complianceService';
 import { formatCurrency } from '../utils/format';
-import type { Lead, Task, Unit, Activity, User as UserType, Project, SiteTask, Rfi, Inspection, PurchaseOrder, VendorBill, Invoice } from '../types';
+import type { Lead, Task, Unit, Activity, User as UserType, Project, SiteTask, Rfi, Inspection, PurchaseOrder, VendorBill, Invoice, RaBill, Quotation } from '../types';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
 const iconMap: Record<string, React.ElementType> = {
@@ -101,6 +101,26 @@ export default function Dashboard() {
     () => showFinance ? filingsDueSoon(tenantId) : [],
     [tenantId, refreshKey, showFinance]
   );
+  // Approval queues from the accounts/CRM addendum: RA bills at my stage,
+  // quotations parked on a discount
+  const raAwaitingSite = useMemo(
+    () => hasPermission('signoff_ra_bills') && moduleOn('accounts')
+      ? getByTenant<RaBill>('raBills', tenantId).filter(r => r.status === 'submitted') : [],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [tenantId, refreshKey, tenant]
+  );
+  const raAwaitingFinance = useMemo(
+    () => hasPermission('approve_vendor_bills') && moduleOn('accounts')
+      ? getByTenant<RaBill>('raBills', tenantId).filter(r => r.status === 'site_approved') : [],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [tenantId, refreshKey, tenant]
+  );
+  const quotesAwaitingDiscount = useMemo(
+    () => hasPermission('approve_discounts') && moduleOn('bookings')
+      ? getByTenant<Quotation>('quotations', tenantId).filter(q => q.status === 'pending_approval') : [],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [tenantId, refreshKey, tenant]
+  );
   // Collections this month + overdue receivables — the CFO half of the KPI spec
   const invoices = useMemo(
     () => showFinance ? getByTenant<Invoice>('invoices', tenantId) : [],
@@ -123,6 +143,9 @@ export default function Dashboard() {
     ...(serviceDue.length ? [{ icon: CalendarClock, color: 'text-amber-500', label: `${serviceDue.length} machine${serviceDue.length === 1 ? '' : 's'} due for service`, link: '/procurement' }] : []),
     ...(overdueBills.length ? [{ icon: Landmark, color: 'text-red-500', label: `${overdueBills.length} vendor bill${overdueBills.length === 1 ? '' : 's'} overdue`, link: '/billing' }] : []),
     ...(leaveQueue.length ? [{ icon: CalendarDays, color: 'text-amber-500', label: `${leaveQueue.length} leave request${leaveQueue.length === 1 ? '' : 's'} awaiting your decision`, link: '/hr' }] : []),
+    ...(raAwaitingSite.length ? [{ icon: HardHat, color: 'text-amber-500', label: `${raAwaitingSite.length} RA bill${raAwaitingSite.length === 1 ? '' : 's'} awaiting site sign-off`, link: '/accounts' }] : []),
+    ...(raAwaitingFinance.length ? [{ icon: Landmark, color: 'text-amber-500', label: `${raAwaitingFinance.length} RA bill${raAwaitingFinance.length === 1 ? '' : 's'} awaiting finance approval`, link: '/accounts' }] : []),
+    ...(quotesAwaitingDiscount.length ? [{ icon: FileQuestion, color: 'text-amber-500', label: `${quotesAwaitingDiscount.length} quotation discount${quotesAwaitingDiscount.length === 1 ? '' : 's'} awaiting your approval`, link: '/bookings' }] : []),
     ...(dueFilings.length ? [{
       icon: ShieldCheck,
       color: dueFilings.some(isFilingOverdue) ? 'text-red-500' : 'text-amber-500',

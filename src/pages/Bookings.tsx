@@ -4,10 +4,12 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { getByTenant, create, update, remove, logAudit } from '../services/db';
-import type { Booking, BookingStage, Lead, Unit, Invoice, Tower } from '../types';
+import type { Booking, BookingStage, Lead, Unit, Invoice, Tower, Quotation, QuotationCharge } from '../types';
 import { BOOKING_STAGES } from '../types';
 import { formatCurrency, formatCurrencyFull } from '../utils/format';
 import { generatePaymentSchedule, getScheduleForBooking, setInstallmentStatus, isOverdue } from '../services/paymentService';
+import { needsApproval } from '../services/approvalService';
+import { postCustomerPayment } from '../services/accountsService';
 import toast from 'react-hot-toast';
 
 const stageColors: Record<BookingStage, string> = {
@@ -32,6 +34,12 @@ export default function Bookings() {
   const [showAdd, setShowAdd] = useState(false);
   const [selected, setSelected] = useState<Booking | null>(null);
   const [preSelectedLeadId, setPreSelectedLeadId] = useState<string>('');
+  const [preSelectedUnitId, setPreSelectedUnitId] = useState<string>('');
+  const [view, setView] = useState<'bookings' | 'quotes'>('bookings');
+  const [showAddQuote, setShowAddQuote] = useState(false);
+  const canQuote = hasPermission('create_quotations');
+  const canApproveDiscount = hasPermission('approve_discounts');
+  const actor = user ? { id: user.id, name: user.name } : { id: '', name: 'System' };
 
   // Check if lead pre-selected from leads drawer
   useEffect(() => {
@@ -184,6 +192,7 @@ export default function Bookings() {
     audit('book', created.id, `Booked unit ${unit.number} for ${lead.name} (token ${formatCurrencyFull(tokenAmount, currency)})`);
     setShowAdd(false);
     setPreSelectedLeadId('');
+    setPreSelectedUnitId('');
     refresh();
     toast.success(`Unit ${unit.number} booked for ${lead.name}`);
   };
@@ -218,18 +227,110 @@ export default function Bookings() {
   const bookableLeads = leads.filter(l => l.stage !== 'lost' && !bookings.some(b => b.leadId === l.id));
   const availableUnits = units.filter(u => u.status === 'available' || u.status === 'reserved');
 
+  // ── Quotations ─────────────────────────────────────────────────────────────
+  const quotations = useMemo(
+    () => getByTenant<Quotation>('quotations', tenantId)
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
+    [tenantId, refreshKey]
+  );
+  const isExpired = (q: Quotation) => q.status === 'sent' && new Date(q.validUntil).getTime() < Date.now();
+  const [quoteCharges, setQuoteCharges] = useState<QuotationCharge[]>([]);
+  const [quoteUnitId, setQuoteUnitId] = useState('');
+  const [quoteDiscount, setQuoteDiscount] = useState('');
+  const quoteUnit = units.find(u => u.id === quoteUnitId);
+  const quoteBase = quoteUnit?.price || 0;
+  const quoteChargesTotal = quoteCharges.reduce((s, c) => s + c.amount, 0);
+  const quoteDiscountNum = Number(quoteDiscount) || 0;
+  const quoteTotal = quoteBase + quoteChargesTotal - quoteDiscountNum;
+  const discountNeedsApproval = quoteDiscountNum > 0 && needsApproval(tenantId, 'discount', quoteDiscountNum);
+
+  const handleAddQuote = (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    const fd = new FormData(e.currentTarget);
+    const leadId = fd.get('leadId') as string;
+    if (!leadId || !quoteUnit) { toast.error('Pick a lead and a unit'); return; }
+    if (quoteTotal <= 0) { toast.error('Quote total must be positive'); return; }
+    // Discount routing: above the configured threshold the quote parks in
+    // pending_approval unless the creator holds approve_discounts themselves.
+    const parked = discountNeedsApproval && !canApproveDiscount;
+    const created = create<Quotation>('quotations', {
+      id: '', tenantId, leadId, unitId: quoteUnit.id,
+      baseAmount: quoteBase,
+      charges: quoteCharges.filter(c => c.label.trim() && c.amount > 0),
+      discountAmount: quoteDiscountNum,
+      discountApprovedBy: discountNeedsApproval && canApproveDiscount ? actor.id : undefined,
+      totalAmount: quoteTotal,
+      validUntil: (fd.get('validUntil') as string) || new Date(Date.now() + 15 * 86400000).toISOString().slice(0, 10),
+      status: parked ? 'pending_approval' : 'draft',
+      createdBy: actor.id, createdAt: new Date().toISOString(),
+    });
+    audit('create', created.id, `Quotation for ${getLead(leadId)?.name} — unit ${quoteUnit.number} at ${formatCurrency(quoteTotal, currency)}${parked ? ' (discount awaiting approval)' : ''}`);
+    setShowAddQuote(false);
+    setQuoteCharges([]); setQuoteUnitId(''); setQuoteDiscount('');
+    refresh();
+    toast.success(parked ? 'Quotation created — discount needs approval before sending' : 'Quotation created');
+  };
+
+  const approveQuoteDiscount = (q: Quotation) => {
+    update<Quotation>('quotations', q.id, { status: 'draft', discountApprovedBy: actor.id });
+    audit('update', q.id, `Approved ${formatCurrency(q.discountAmount, currency)} discount on quotation for ${getLead(q.leadId)?.name}`);
+    refresh();
+    toast.success('Discount approved — quote can be sent');
+  };
+
+  const setQuoteStatus = (q: Quotation, status: Quotation['status'], msg: string) => {
+    update<Quotation>('quotations', q.id, { status });
+    audit('update', q.id, `Quotation for ${getLead(q.leadId)?.name} → ${status}`);
+    refresh();
+    toast.success(msg);
+  };
+
+  const acceptQuote = (q: Quotation) => {
+    const unit = getUnit(q.unitId);
+    if (!unit || unit.status === 'booked' || unit.status === 'sold') {
+      toast.error('That unit is no longer available — re-quote on another unit');
+      return;
+    }
+    setQuoteStatus(q, 'accepted', 'Quotation accepted — complete the booking');
+    setPreSelectedLeadId(q.leadId);
+    setPreSelectedUnitId(q.unitId);
+    setView('bookings');
+    setShowAdd(true);
+  };
+
   return (
     <div className="space-y-6 max-w-[1200px]">
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h2 className="text-2xl font-bold text-zinc-900">Bookings & Collections</h2>
-          <p className="text-sm text-zinc-500 mt-0.5">Reservation → token → agreement → payments → handover.</p>
+          <p className="text-sm text-zinc-500 mt-0.5">Quotation → reservation → token → agreement → payments → handover.</p>
         </div>
-        {canCreate && (
-          <button onClick={() => setShowAdd(true)} className="flex items-center gap-2 px-4 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 transition-colors shadow-sm">
-            <Plus className="h-4 w-4" /> New Booking
-          </button>
-        )}
+        <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1 bg-white border border-zinc-200 rounded-xl p-1">
+            <button onClick={() => setView('bookings')} className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all ${view === 'bookings' ? 'bg-indigo-600 text-white shadow-sm' : 'text-zinc-500 hover:text-zinc-800'}`}>Bookings</button>
+            <button onClick={() => setView('quotes')} className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all ${view === 'quotes' ? 'bg-indigo-600 text-white shadow-sm' : 'text-zinc-500 hover:text-zinc-800'}`}>
+              Quotations
+              {quotations.some(q => q.status === 'pending_approval') && <span className="ml-1.5 text-[9px] font-bold px-1.5 rounded-full bg-amber-100 text-amber-700">!</span>}
+            </button>
+          </div>
+          {view === 'bookings' && canCreate && (
+            <button onClick={() => setShowAdd(true)} className="flex items-center gap-2 px-4 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 transition-colors shadow-sm">
+              <Plus className="h-4 w-4" /> New Booking
+            </button>
+          )}
+          {view === 'quotes' && canQuote && (
+            <button
+              onClick={() => {
+                if (availableUnits.length === 0) { toast.error('No available units to quote on'); return; }
+                setQuoteCharges([]); setQuoteUnitId(''); setQuoteDiscount('');
+                setShowAddQuote(true);
+              }}
+              className="flex items-center gap-2 px-4 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 transition-colors shadow-sm"
+            >
+              <Plus className="h-4 w-4" /> New Quotation
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Collections summary */}
@@ -250,7 +351,62 @@ export default function Bookings() {
         ))}
       </div>
 
+      {/* Quotations list */}
+      {view === 'quotes' && (
+        <div className="bg-white rounded-2xl border border-zinc-200/60 overflow-hidden">
+          {quotations.length === 0 ? (
+            <div className="py-16 text-center">
+              <FileText className="h-12 w-12 text-zinc-300 mx-auto mb-3" />
+              <h3 className="text-sm font-semibold text-zinc-700">No quotations yet</h3>
+              <p className="text-xs text-zinc-500 mt-1">Price a unit for a lead — big discounts route for approval automatically.</p>
+            </div>
+          ) : (
+            <div className="divide-y divide-zinc-50">
+              {quotations.map(q => {
+                const lead = getLead(q.leadId);
+                const unit = getUnit(q.unitId);
+                const expired = isExpired(q);
+                const status = expired ? 'expired' : q.status;
+                const statusCls: Record<string, string> = {
+                  draft: 'bg-zinc-100 text-zinc-600', pending_approval: 'bg-amber-50 text-amber-700',
+                  sent: 'bg-blue-50 text-blue-700', accepted: 'bg-emerald-50 text-emerald-700',
+                  rejected: 'bg-red-50 text-red-600', expired: 'bg-zinc-100 text-zinc-400',
+                };
+                return (
+                  <div key={q.id} className="px-5 py-3.5 flex items-center gap-3 flex-wrap">
+                    <div className="flex-1 min-w-[220px]">
+                      <p className="text-sm font-semibold text-zinc-900">{lead?.name || 'Lead'} · {getTowerName(unit)} / {unit?.number || '—'}</p>
+                      <p className="text-[11px] text-zinc-500">
+                        Base {formatCurrency(q.baseAmount, currency)}
+                        {q.charges.length > 0 && ` + ${formatCurrency(q.charges.reduce((s, c) => s + c.amount, 0), currency)} charges`}
+                        {q.discountAmount > 0 && <span className="text-amber-600"> − {formatCurrency(q.discountAmount, currency)} discount{q.discountApprovedBy ? ' ✓' : ''}</span>}
+                        {' · valid till '}{new Date(q.validUntil).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}
+                      </p>
+                    </div>
+                    <p className="text-sm font-bold text-zinc-900">{formatCurrency(q.totalAmount, currency)}</p>
+                    <span className={`text-[11px] font-semibold px-2.5 py-1 rounded-full capitalize ${statusCls[status]}`}>{status.replace('_', ' ')}</span>
+                    {q.status === 'pending_approval' && canApproveDiscount && (
+                      <button onClick={() => approveQuoteDiscount(q)} className="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-emerald-50 text-emerald-700 hover:bg-emerald-100">Approve Discount</button>
+                    )}
+                    {q.status === 'draft' && canQuote && (
+                      <button onClick={() => setQuoteStatus(q, 'sent', 'Quotation sent to the buyer')} className="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-indigo-50 text-indigo-700 hover:bg-indigo-100">Send</button>
+                    )}
+                    {q.status === 'sent' && !expired && canQuote && (
+                      <>
+                        <button onClick={() => acceptQuote(q)} className="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-emerald-600 text-white hover:bg-emerald-700">Accepted → Book</button>
+                        <button onClick={() => setQuoteStatus(q, 'rejected', 'Marked rejected')} className="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-red-50 text-red-600 hover:bg-red-100">Rejected</button>
+                      </>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Booking list */}
+      {view === 'bookings' && (
       <div className="bg-white rounded-2xl border border-zinc-200/60 overflow-hidden">
         {bookings.length === 0 ? (
           <div className="py-16 text-center">
@@ -287,6 +443,7 @@ export default function Bookings() {
           </div>
         )}
       </div>
+      )}
 
       {/* Booking detail modal with stage stepper */}
       {selected && (() => {
@@ -365,6 +522,12 @@ export default function Bookings() {
                           <button
                             onClick={() => {
                               setInstallmentStatus(schedule, inst.id, 'paid', user ? { id: user.id, name: user.name } : undefined);
+                              // Cash in → ledger (cash-basis income recognition)
+                              postCustomerPayment({
+                                tenantId, amount: inst.amount,
+                                narration: `Collection — installment #${inst.number} from ${lead?.name || 'customer'} (${lead?.project || 'booking'})`,
+                                sourceId: selected.id, actor,
+                              });
                               refresh();
                               toast.success(`Installment #${inst.number} marked paid`);
                             }}
@@ -410,6 +573,81 @@ export default function Bookings() {
         );
       })()}
 
+      {/* New quotation modal */}
+      {showAddQuote && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => setShowAddQuote(false)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[85vh] overflow-y-auto p-6 animate-fade-in" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold text-zinc-900">New Quotation</h3>
+              <button onClick={() => setShowAddQuote(false)} className="p-1.5 rounded-lg hover:bg-zinc-100"><X className="h-4 w-4 text-zinc-500" /></button>
+            </div>
+            <form onSubmit={handleAddQuote} className="space-y-3">
+              <div>
+                <label className="block text-xs font-semibold text-zinc-500 uppercase mb-1">Lead *</label>
+                <select name="leadId" required className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20">
+                  <option value="">Select lead...</option>
+                  {leads.filter(l => l.stage !== 'lost').map(l => (
+                    <option key={l.id} value={l.id}>{l.name} — {l.project}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-zinc-500 uppercase mb-1">Unit *</label>
+                <select value={quoteUnitId} onChange={e => setQuoteUnitId(e.target.value)} required className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20">
+                  <option value="">Select unit...</option>
+                  {availableUnits.slice(0, 80).map(u => (
+                    <option key={u.id} value={u.id}>{getTowerName(u)} / {u.number} · {u.configuration} · {formatCurrency(u.price, currency)}</option>
+                  ))}
+                </select>
+                {quoteUnit && <p className="text-[11px] text-zinc-400 mt-1">Base price: {formatCurrencyFull(quoteBase, currency)}</p>}
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-zinc-500 uppercase mb-1">Additional Charges</label>
+                <div className="space-y-2">
+                  {quoteCharges.map((c, i) => (
+                    <div key={i} className="flex gap-2">
+                      <input value={c.label} onChange={e => setQuoteCharges(cs => cs.map((x, xi) => xi === i ? { ...x, label: e.target.value } : x))} placeholder="Floor rise / parking / club" className="flex-1 px-3 py-2 bg-zinc-50 border border-zinc-200 rounded-lg text-sm" />
+                      <input value={c.amount || ''} type="number" min="0" onChange={e => setQuoteCharges(cs => cs.map((x, xi) => xi === i ? { ...x, amount: Number(e.target.value) || 0 } : x))} placeholder="Amount" className="w-32 px-3 py-2 bg-zinc-50 border border-zinc-200 rounded-lg text-sm text-right" />
+                      <button type="button" onClick={() => setQuoteCharges(cs => cs.filter((_, xi) => xi !== i))} className="p-2 rounded-lg hover:bg-red-50 text-zinc-400 hover:text-red-500 shrink-0"><Trash2 className="h-4 w-4" /></button>
+                    </div>
+                  ))}
+                  <button type="button" onClick={() => setQuoteCharges(cs => [...cs, { label: '', amount: 0 }])} className="flex items-center gap-1.5 text-xs font-semibold text-indigo-600 hover:text-indigo-700 px-1 py-1">
+                    <Plus className="h-3.5 w-3.5" /> Add charge
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-zinc-500 uppercase mb-1">Discount ({currency})</label>
+                  <input value={quoteDiscount} onChange={e => setQuoteDiscount(e.target.value)} type="number" min="0" placeholder="0" className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm" />
+                  {discountNeedsApproval && (
+                    <p className={`text-[11px] mt-1 font-medium ${canApproveDiscount ? 'text-emerald-600' : 'text-amber-600'}`}>
+                      {canApproveDiscount ? 'Above threshold — auto-approved by you' : 'Above threshold — will route for approval'}
+                    </p>
+                  )}
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-zinc-500 uppercase mb-1">Valid Until</label>
+                  <input name="validUntil" type="date" defaultValue={new Date(Date.now() + 15 * 86400000).toISOString().slice(0, 10)} className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm" />
+                </div>
+              </div>
+
+              <div className="bg-zinc-50 rounded-xl p-3 text-sm flex items-center justify-between">
+                <span className="text-zinc-500">Quote total</span>
+                <span className={`font-bold ${quoteTotal <= 0 ? 'text-red-600' : 'text-zinc-900'}`}>{formatCurrencyFull(quoteTotal, currency)}</span>
+              </div>
+
+              <div className="flex gap-3 pt-2">
+                <button type="button" onClick={() => setShowAddQuote(false)} className="flex-1 px-4 py-2.5 border border-zinc-200 rounded-xl text-sm font-medium text-zinc-600 hover:bg-zinc-50">Cancel</button>
+                <button type="submit" className="flex-1 px-4 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 shadow-sm">Create Quotation</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       {/* New booking modal */}
       {showAdd && (
         <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => setShowAdd(false)}>
@@ -436,7 +674,7 @@ export default function Bookings() {
               </div>
               <div>
                 <label className="block text-xs font-semibold text-zinc-500 uppercase mb-1">Unit * <span className="normal-case font-normal text-zinc-400">(only available/reserved units listed)</span></label>
-                <select name="unitId" required className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20">
+                <select name="unitId" required defaultValue={preSelectedUnitId} className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20">
                   <option value="">Select unit...</option>
                   {availableUnits.slice(0, 80).map(u => (
                     <option key={u.id} value={u.id}>{getTowerName(u)} / {u.number} · {u.configuration} · {formatCurrency(u.price, currency)} ({u.status})</option>

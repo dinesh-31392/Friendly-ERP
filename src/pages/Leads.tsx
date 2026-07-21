@@ -9,7 +9,7 @@ import {
 import { useAuth } from '../context/AuthContext';
 import { getByTenant, create, update, logAudit } from '../services/db';
 import type { Lead, LeadStage, Note, Activity, Task, Priority, User as UserType } from '../types';
-import { leadScoreBand, explainLeadScore } from '../types';
+import { leadScoreBand, explainLeadScore, LOST_REASONS } from '../types';
 import { getLeadStages, getLeadSources, getConfigurations, type StageDef } from '../services/metaService';
 import { formatCurrency, currencySymbol } from '../utils/format';
 import { telHref, whatsappHref, mailtoHref } from '../utils/contact';
@@ -136,7 +136,8 @@ export default function Leads() {
 
 
 
-  const isExecutive = user?.role === 'sales_executive';
+  // Telecallers work the same personally-scoped view as sales executives
+  const isExecutive = user?.role === 'sales_executive' || user?.role === 'telecaller';
 
   // Feature flag: with an API URL configured, leads are read from the Fastify
   // backend (RLS-scoped). Falls back to localStorage on any API failure so
@@ -160,13 +161,22 @@ export default function Leads() {
     () => apiLeads ?? getByTenant<Lead>('leads', tenantId),
     [apiLeads, tenantId, refreshKey]
   );
-  // Sales executives only see leads assigned to them
-  const leads = useMemo(
-    () => isExecutive ? allLeadsData.filter(l => l.assignedTo === userId) : allLeadsData,
-    [allLeadsData, isExecutive, userId]
-  );
   const allUsers = useTenantUsers(tenantId, refreshKey);
   const tenantProjects = useMemo(() => getByTenant<{ tenantId: string; id: string; name: string }>('projects', tenantId), [tenantId, refreshKey]);
+  // Front-line staff see leads assigned to them, PLUS (when the admin has
+  // scoped them to projects) every lead in their assigned projects — the
+  // user_project_assignments model from the CRM spec.
+  const leads = useMemo(() => {
+    if (!isExecutive) return allLeadsData;
+    const assignedProjects = user?.projectIds || [];
+    const projectNames = new Set(
+      tenantProjects.filter(p => assignedProjects.includes(p.id)).map(p => p.name)
+    );
+    return allLeadsData.filter(l =>
+      l.assignedTo === userId ||
+      (l.projectId ? assignedProjects.includes(l.projectId) : projectNames.has(l.project))
+    );
+  }, [allLeadsData, isExecutive, userId, user?.projectIds, tenantProjects]);
   const notes = useMemo(() => getByTenant<Note>('notes', tenantId), [tenantId, refreshKey]);
   const activities = useMemo(() => getByTenant<Activity>('activities', tenantId), [tenantId, refreshKey]);
 
@@ -282,7 +292,11 @@ export default function Leads() {
     toast.success('Leads merged successfully');
   };
 
-  const handleStageChange = async (leadId: string, newStage: LeadStage) => {
+  // Marking a lead lost requires a reason (spec: lost_reason mandatory when
+  // stage = lost) — the stage change parks here until the modal supplies one.
+  const [lostPromptLeadId, setLostPromptLeadId] = useState<string | null>(null);
+
+  const handleStageChange = async (leadId: string, newStage: LeadStage, lostReason?: string) => {
     // "Booked" is an outcome, not a label: it requires a unit + payment
     // schedule, which only the booking flow creates
     if (newStage === 'booked') {
@@ -292,9 +306,13 @@ export default function Leads() {
         return;
       }
     }
+    if (newStage === 'lost' && !lostReason) {
+      setLostPromptLeadId(leadId);
+      return;
+    }
     const now = new Date().toISOString();
     try {
-      await patchLead(leadId, { stage: newStage, lastContact: now });
+      await patchLead(leadId, { stage: newStage, lastContact: now, ...(lostReason ? { lostReason } : {}) });
     } catch (err) {
       // Surface the server's reason (e.g. a stage not in this tenant's
       // pipeline, or no permission) instead of leaving the board looking moved.
@@ -303,10 +321,10 @@ export default function Leads() {
     }
     create<Activity>('activities', {
       id: '', tenantId, leadId, userId, type: 'status_change',
-      description: `Stage changed to ${leadStages.find(s => s.id === newStage)?.label}`,
+      description: `Stage changed to ${leadStages.find(s => s.id === newStage)?.label}${lostReason ? ` — reason: ${lostReason}` : ''}`,
       createdAt: now,
     });
-    audit('stage_change', leadId, `Stage changed to ${leadStages.find(s => s.id === newStage)?.label}`);
+    audit('stage_change', leadId, `Stage changed to ${leadStages.find(s => s.id === newStage)?.label}${lostReason ? ` (${lostReason})` : ''}`);
     refresh();
     if (selectedLead?.id === leadId) {
       setSelectedLead(prev => prev ? { ...prev, stage: newStage, lastContact: now } : null);
@@ -363,6 +381,8 @@ export default function Leads() {
         budget: Number(formData.get('budget')) || 0,
         configuration: (formData.get('configuration') as string) || '2 BHK',
         stage: 'new', priority: 'warm', assignedTo: (formData.get('assignedTo') as string) || userId,
+        // Knowingly-created duplicate stays traceable to the original
+        ...(existing ? { duplicateOf: existing.id } : {}),
         lastContact: new Date().toISOString(), createdAt: new Date().toISOString(),
       });
     } catch (err) {
@@ -1651,6 +1671,34 @@ export default function Leads() {
               {duplicateGroups.length === 0 && (
                 <p className="text-sm text-zinc-400 text-center py-8">No duplicates found 🎉</p>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Lost-reason prompt — a lead can only be marked lost WITH a reason */}
+      {lostPromptLeadId && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => setLostPromptLeadId(null)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 animate-fade-in" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-1">
+              <h3 className="text-lg font-semibold text-zinc-900">Why was this lead lost?</h3>
+              <button onClick={() => setLostPromptLeadId(null)} className="p-1.5 rounded-lg hover:bg-zinc-100"><X className="h-4 w-4 text-zinc-500" /></button>
+            </div>
+            <p className="text-xs text-zinc-500 mb-4">The reason feeds your loss analysis — it's required to close a lead.</p>
+            <div className="space-y-1.5">
+              {LOST_REASONS.map(reason => (
+                <button
+                  key={reason}
+                  onClick={() => {
+                    const id = lostPromptLeadId;
+                    setLostPromptLeadId(null);
+                    handleStageChange(id, 'lost', reason);
+                  }}
+                  className="w-full text-left px-4 py-2.5 rounded-xl border border-zinc-200 text-sm text-zinc-700 hover:border-red-300 hover:bg-red-50/50 transition-colors"
+                >
+                  {reason}
+                </button>
+              ))}
             </div>
           </div>
         </div>

@@ -88,6 +88,7 @@ export const CONTROLLABLE_MODULES: { key: string; label: string }[] = [
   { key: 'messages', label: 'Messages' },
   { key: 'documents', label: 'Documents' },
   { key: 'billing', label: 'Billing' },
+  { key: 'accounts', label: 'Accounts & Ledger' },
   { key: 'service', label: 'Service' },
   { key: 'brokers', label: 'Partners' },
 ];

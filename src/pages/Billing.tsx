@@ -7,8 +7,10 @@ import { useAuth } from '../context/AuthContext';
 import { getByTenant, create, update, remove, logAudit } from '../services/db';
 import { isBillOverdue, projectActuals, formatPoNumber } from '../services/procurementService';
 import { isFilingOverdue, markFiled } from '../services/complianceService';
-import type { Invoice, InvoiceStatus, Lead, Vendor, VendorBill, VendorBillStatus, Project, ProjectBudget, PurchaseOrder, ComplianceItem, FilingFrequency } from '../types';
-import { BUDGET_CATEGORIES, FILING_AUTHORITIES } from '../types';
+import { needsApproval } from '../services/approvalService';
+import { postVendorBillApproved, postApPayment, postCustomerPayment } from '../services/accountsService';
+import type { Invoice, InvoiceStatus, Lead, Vendor, VendorBill, VendorBillStatus, Project, ProjectBudget, PurchaseOrder, ComplianceItem, FilingFrequency, PaymentMade, PaymentMode } from '../types';
+import { BUDGET_CATEGORIES, FILING_AUTHORITIES, PAYMENT_MODES } from '../types';
 import { formatCurrency } from '../utils/format';
 import { downloadCsv } from '../utils/csv';
 import toast from 'react-hot-toast';
@@ -44,7 +46,10 @@ export default function Billing() {
   const [showAdd, setShowAdd] = useState(false);
   const [showAddBill, setShowAddBill] = useState(false);
   const [showAddFiling, setShowAddFiling] = useState(false);
+  const [payingBill, setPayingBill] = useState<VendorBill | null>(null);
   const [budgetProjectId, setBudgetProjectId] = useState('');
+  const canApproveBills = hasPermission('approve_vendor_bills');
+  const actor = user ? { id: user.id, name: user.name } : { id: '', name: 'System' };
 
   const invoices = useMemo(
     () => getByTenant<Invoice>('invoices', tenantId).sort((a, b) =>
@@ -138,7 +143,16 @@ export default function Billing() {
 
   const handleStatusChange = (id: string, status: InvoiceStatus) => {
     if (!canManage) { toast.error('You do not have permission to update invoices'); return; }
+    const inv = invoices.find(i => i.id === id);
     update<Invoice>('invoices', id, { status });
+    // Cash landing → ledger. Only on the transition INTO Paid, never twice.
+    if (status === 'Paid' && inv && inv.status !== 'Paid') {
+      postCustomerPayment({
+        tenantId, amount: inv.amount,
+        narration: `Collection — ${inv.type} from ${inv.leadName} (${inv.project})`,
+        sourceId: inv.id, actor,
+      });
+    }
     refresh();
     toast.success(`Marked as ${status}`);
   };
@@ -179,15 +193,39 @@ export default function Billing() {
     toast.success('Vendor bill recorded');
   };
 
-  const setBillStatus = (bill: VendorBill, status: VendorBillStatus) => {
+  const approveBill = (bill: VendorBill) => {
     if (!canManage) { toast.error('You do not have permission to update bills'); return; }
-    update<VendorBill>('vendorBills', bill.id, {
-      status,
-      paidAt: status === 'paid' ? new Date().toISOString() : undefined,
-    });
-    audit(status === 'paid' ? 'payment' : 'update', 'vendor_bill', bill.id, `Bill ${bill.billNumber || bill.id.slice(0, 6)} → ${status}`);
+    // Configurable threshold (Settings → Approvals): big bills need the
+    // approve_vendor_bills grant, small ones the maker can clear alone.
+    if (needsApproval(tenantId, 'vendor_bill', bill.amount) && !canApproveBills) {
+      toast.error('This bill is above the approval threshold — only a vendor-bill approver can approve it.');
+      return;
+    }
+    update<VendorBill>('vendorBills', bill.id, { status: 'approved' });
+    postVendorBillApproved(bill, actor);
+    audit('update', 'vendor_bill', bill.id, `Approved bill ${bill.billNumber || bill.id.slice(0, 6)} — posted to ledger`);
     refresh();
-    toast.success(`Bill marked ${status}`);
+    toast.success('Bill approved and posted');
+  };
+
+  const handlePayBill = (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    if (!payingBill) return;
+    const fd = new FormData(e.currentTarget);
+    const payment = create<PaymentMade>('paymentsMade', {
+      id: '', tenantId, vendorId: payingBill.vendorId, vendorBillId: payingBill.id,
+      amount: payingBill.amount,
+      date: (fd.get('date') as string) || new Date().toISOString().slice(0, 10),
+      mode: (fd.get('mode') as PaymentMode) || 'bank_transfer',
+      reference: (fd.get('reference') as string) || '',
+      paidBy: actor.id, createdAt: new Date().toISOString(),
+    });
+    update<VendorBill>('vendorBills', payingBill.id, { status: 'paid', paidAt: new Date().toISOString() });
+    postApPayment(payment, `Paid vendor bill ${payingBill.billNumber || payingBill.id.slice(0, 6)} to ${vendorName(payingBill.vendorId)}`, payingBill.projectId, actor);
+    audit('payment', 'vendor_bill', payingBill.id, `Paid ${formatCurrency(payingBill.amount, currency)} (${payment.mode}${payment.reference ? ` · ${payment.reference}` : ''})`);
+    setPayingBill(null);
+    refresh();
+    toast.success('Payment recorded and posted');
   };
 
   const deleteBill = (bill: VendorBill) => {
@@ -513,19 +551,13 @@ export default function Billing() {
                       <td className={`px-4 py-3 text-sm ${isOver ? 'text-red-600 font-semibold' : 'text-zinc-500'}`}>
                         {fmtDate(bill.dueDate)}{isOver ? ' ⚠' : ''}
                       </td>
-                      <td className="px-4 py-3 text-center">
-                        {canManage ? (
-                          <select
-                            value={bill.status}
-                            onChange={e => setBillStatus(bill, e.target.value as VendorBillStatus)}
-                            className={`text-[11px] font-semibold px-2.5 py-1 rounded-full border-0 cursor-pointer ${billStatusColors[bill.status]}`}
-                          >
-                            <option value="pending">Pending</option>
-                            <option value="approved">Approved</option>
-                            <option value="paid">Paid</option>
-                          </select>
-                        ) : (
-                          <span className={`text-[11px] font-semibold px-2.5 py-1 rounded-full ${billStatusColors[bill.status]}`}>{bill.status}</span>
+                      <td className="px-4 py-3 text-center whitespace-nowrap">
+                        <span className={`text-[11px] font-semibold px-2.5 py-1 rounded-full ${billStatusColors[bill.status]}`}>{bill.status}</span>
+                        {canManage && bill.status === 'pending' && (
+                          <button onClick={() => approveBill(bill)} className="ml-1.5 text-[11px] font-semibold px-2 py-1 rounded-lg bg-emerald-50 text-emerald-700 hover:bg-emerald-100">Approve</button>
+                        )}
+                        {canManage && bill.status === 'approved' && (
+                          <button onClick={() => setPayingBill(bill)} className="ml-1.5 text-[11px] font-semibold px-2 py-1 rounded-lg bg-indigo-50 text-indigo-700 hover:bg-indigo-100">Pay</button>
                         )}
                       </td>
                       <td className="px-4 py-3 text-right">
@@ -688,6 +720,42 @@ export default function Billing() {
               })}
             </div>
           )}
+        </div>
+      )}
+
+      {/* Pay vendor bill modal — records the payment (mode + reference) and
+          posts the AP → cash journal entry */}
+      {payingBill && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => setPayingBill(null)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 animate-fade-in" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-xs font-semibold text-indigo-600">{payingBill.billNumber || `#${payingBill.id.slice(0, 6).toUpperCase()}`}</span>
+              <button onClick={() => setPayingBill(null)} className="p-1.5 rounded-lg hover:bg-zinc-100"><X className="h-4 w-4 text-zinc-500" /></button>
+            </div>
+            <h3 className="text-lg font-semibold text-zinc-900 mb-1">Record Payment</h3>
+            <p className="text-[11px] text-zinc-500 mb-4">{vendorName(payingBill.vendorId)} · {formatCurrency(payingBill.amount, currency)}</p>
+            <form onSubmit={handlePayBill} className="space-y-3">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>Mode</label>
+                  <select name="mode" className={inputCls}>
+                    {PAYMENT_MODES.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className={labelCls}>Date</label>
+                  <input name="date" type="date" defaultValue={new Date().toISOString().slice(0, 10)} className={inputCls} />
+                </div>
+                <div className="col-span-2">
+                  <label className={labelCls}>Reference (UTR / cheque no.)</label>
+                  <input name="reference" placeholder="UTR2026072100123" className={inputCls} />
+                </div>
+              </div>
+              <button type="submit" className="w-full px-4 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 shadow-sm">
+                Pay {formatCurrency(payingBill.amount, currency)}
+              </button>
+            </form>
+          </div>
         </div>
       )}
 

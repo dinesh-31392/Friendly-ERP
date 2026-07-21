@@ -15,7 +15,10 @@ type TableName = 'tenants' | 'users' | 'projects' | 'towers' | 'units' | 'leads'
   'vendorBills' | 'projectBudgets' |
   // ERP: HR & workforce, statutory compliance, signed-in device sessions
   'employees' | 'attendance' | 'leaveRequests' | 'payrollRuns' |
-  'complianceItems' | 'sessions';
+  'complianceItems' | 'sessions' |
+  // ERP: double-entry ledger, RA billing, AP payments, quotations, approvals
+  'accounts' | 'journalEntries' | 'raBills' | 'paymentsMade' |
+  'quotations' | 'approvalRules';
 
 function readTable<T>(table: TableName): T[] {
   try {

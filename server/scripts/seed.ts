@@ -46,6 +46,9 @@ const PERMISSIONS = [
   // ERP: HR & workforce ('manage_attendance' lets field staff run the daily
   // register without payroll/leave authority)
   'view_hr', 'manage_hr', 'manage_attendance',
+  // ERP: ledger, RA billing, quotations, configurable approvals
+  'view_accounts', 'manage_accounts', 'approve_vendor_bills', 'signoff_ra_bills',
+  'create_quotations', 'approve_discounts', 'manage_approval_rules',
 ];
 
 /**
@@ -61,12 +64,13 @@ export const ROLE_PERMS: Record<string, string[]> = {
     'view_messages', 'send_messages', 'view_documents', 'view_service', 'manage_service',
     'view_calendar', 'schedule_visits', 'use_ai_studio', 'create_bookings', 'approve_reminders',
     'view_campaigns', 'manage_campaigns', 'view_bookings', 'manage_bookings', 'view_brokers',
-    'view_execution',
+    'view_execution', 'create_quotations', 'approve_discounts',
   ],
   sales_executive: [
     'view_dashboard', 'view_leads', 'manage_own_leads', 'add_notes', 'view_inventory',
     'view_projects', 'view_messages', 'send_messages', 'view_documents', 'view_calendar',
     'schedule_visits', 'use_ai_studio', 'create_bookings', 'view_bookings',
+    'create_quotations',
   ],
   site_engineer: [
     'view_dashboard', 'view_projects',
@@ -74,6 +78,25 @@ export const ROLE_PERMS: Record<string, string[]> = {
     'view_procurement', 'manage_procurement',
     'view_hr', 'manage_attendance',
     'view_documents', 'view_calendar', 'view_messages', 'send_messages',
+    'signoff_ra_bills',
+  ],
+  telecaller: [
+    'view_dashboard', 'view_leads', 'manage_own_leads', 'add_notes',
+    'view_projects', 'view_calendar', 'schedule_visits',
+    'view_messages', 'send_messages',
+  ],
+  accountant: [
+    'view_dashboard', 'view_projects', 'view_reports',
+    'view_accounts', 'manage_accounts',
+    'view_finance', 'manage_finance',
+    'view_procurement', 'view_bookings', 'view_documents',
+  ],
+  auditor: [
+    'view_dashboard', 'view_leads', 'view_projects', 'view_inventory',
+    'view_bookings', 'view_sales_performance', 'view_campaigns', 'view_calendar',
+    'view_reports', 'view_messages', 'view_documents', 'view_finance',
+    'view_service', 'view_brokers', 'view_execution', 'view_procurement',
+    'view_hr', 'view_accounts', 'view_audit_log',
   ],
 };
 

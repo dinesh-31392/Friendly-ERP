@@ -4,7 +4,7 @@ import {
   Settings, Calendar, ChevronDown, Bell, Search, Megaphone,
   MessageSquare, FileText, CreditCard, Wrench, Shield, LogOut,
   X, AlertCircle, CheckCircle2, Clock, Menu, BookOpenCheck, Handshake, Globe, ShieldAlert,
-  HardHat, Truck, Package, UserCheck,
+  HardHat, Truck, Package, UserCheck, Scale,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useState, useEffect, useMemo, useRef } from 'react';
@@ -37,6 +37,7 @@ const secondaryNav = [
   { to: '/messages', icon: MessageSquare, label: 'Messages', permission: 'view_messages' },
   { to: '/documents', icon: FileText, label: 'Documents', permission: 'view_documents' },
   { to: '/billing', icon: CreditCard, label: 'Billing', permission: 'view_finance' },
+  { to: '/accounts', icon: Scale, label: 'Accounts & Ledger', permission: 'view_accounts' },
   { to: '/service', icon: Wrench, label: 'Service', permission: 'view_service' },
   { to: '/brokers', icon: Handshake, label: 'Partners', permission: 'view_brokers' },
   { to: '/settings', icon: Settings, label: 'Settings', permission: 'manage_settings' },
@@ -56,6 +57,9 @@ const roles = [
   { role: 'sales_manager' as const, label: 'Sales Manager' },
   { role: 'sales_executive' as const, label: 'Sales Executive' },
   { role: 'site_engineer' as const, label: 'Site Engineer' },
+  { role: 'telecaller' as const, label: 'Telecaller' },
+  { role: 'accountant' as const, label: 'Accountant' },
+  { role: 'auditor' as const, label: 'Auditor' },
 ];
 
 export default function DashboardLayout() {

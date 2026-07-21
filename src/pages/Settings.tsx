@@ -12,6 +12,7 @@ import PipelineSettings from '../components/PipelineSettings';
 import { PLANS, getPlanForTenant, getEffectiveLimits, withinLimit, planPriceLabel } from '../services/planService';
 import { portalUrl, portalPath, isPremium, slugify, isSlugAvailable } from '../services/portalService';
 import { getTenantSessions, revokeDeviceSession, currentSessionToken } from '../services/authService';
+import { getApprovalRules, setApprovalThreshold } from '../services/approvalService';
 import { getByTenant, update, create, remove, clearDatabase, logAudit } from '../services/db';
 import { useTenantUsers } from '../hooks/useTenantUsers';
 import type { User as UserType, Tenant, Role, AuditLog } from '../types';
@@ -49,6 +50,11 @@ export default function Settings() {
       : [],
     [tenant, refreshKey]
   );
+  const tenantProjectsList = useMemo(
+    () => getByTenant<{ id: string; tenantId: string; name: string }>('projects', tenantId),
+    [tenantId, refreshKey]
+  );
+  const approvalRules = useMemo(() => getApprovalRules(tenantId), [tenantId, refreshKey]);
   
   // Form state
   const [company, setCompany] = useState(tenant?.company || '');
@@ -191,9 +197,13 @@ export default function Settings() {
     const existing = tenantUsers.find(u => u.email.toLowerCase() === email.toLowerCase());
     if (existing) { toast.error('User with this email already exists'); return; }
 
+    // Project-level scoping (user_project_assignments): front-line staff can
+    // be limited to specific projects at invite time
+    const projectIds = (formData.getAll('projectIds') as string[]).filter(Boolean);
     const createdUser = create<UserType>('users', {
       id: '', tenantId: tenant.id, name, email: email.toLowerCase(), password,
       role, avatar: '', phone: (formData.get('phone') as string) || '',
+      ...(projectIds.length > 0 ? { projectIds } : {}),
       active: true, createdAt: new Date().toISOString(),
     });
     if (user) logAudit({ tenantId: tenant.id, userId: user.id, userName: user.name, action: 'create', entity: 'user', entityId: createdUser.id, details: `Added team member "${name}" as ${role.replace('_', ' ')}` });
@@ -815,6 +825,43 @@ export default function Settings() {
                 </tbody>
               </table>
             </div>
+
+            {/* Configurable approval thresholds (spec: expose the approval
+                matrix as config). Amounts at/above a threshold need the
+                corresponding approver permission. */}
+            {hasPermission('manage_approval_rules') && (
+              <div className="pt-5 border-t border-zinc-100">
+                <h3 className="text-sm font-semibold text-zinc-900">Approval Thresholds</h3>
+                <p className="text-xs text-zinc-500 mt-0.5 mb-3">
+                  Amounts at or above a threshold route for approval — quotation discounts to a discount approver, vendor bills to a bill approver. Set 0 to require approval always.
+                </p>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  {([
+                    ['discount', 'Quotation discount', 'Discounts this size need approval before the quote can be sent'],
+                    ['vendor_bill', 'Vendor bill', 'Bills this size need a vendor-bill approver'],
+                    ['ra_bill', 'RA bill', 'RA bills always run the two-stage flow; threshold reserved'],
+                  ] as const).map(([action, label, hint]) => (
+                    <div key={action} className="border border-zinc-200 rounded-xl p-3">
+                      <p className="text-xs font-semibold text-zinc-700">{label}</p>
+                      <input
+                        type="number" min="0"
+                        defaultValue={approvalRules[action]}
+                        onBlur={e => {
+                          const v = Number(e.target.value) || 0;
+                          if (v !== approvalRules[action]) {
+                            setApprovalThreshold(tenantId, action, v);
+                            refresh();
+                            toast.success(`${label} threshold updated`);
+                          }
+                        }}
+                        className="w-full mt-1.5 px-3 py-2 bg-zinc-50 border border-zinc-200 rounded-lg text-sm text-right font-semibold"
+                      />
+                      <p className="text-[10px] text-zinc-400 mt-1">{hint}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -1539,9 +1586,28 @@ export default function Settings() {
                   <select name="role" required defaultValue="sales_executive" className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20">
                     <option value="sales_executive">Sales Executive</option>
                     <option value="sales_manager">Sales Manager</option>
+                    <option value="telecaller">Telecaller (Pre-Sales)</option>
                     <option value="site_engineer">Site Engineer</option>
+                    <option value="accountant">Accountant</option>
+                    <option value="auditor">Auditor (read-only)</option>
                     <option value="builder_admin">Builder Admin</option>
                   </select>
+                  {tenantProjectsList.length > 0 && (
+                    <div className="mt-3">
+                      <label className="block text-xs font-semibold text-zinc-500 uppercase mb-1">
+                        Limit To Projects <span className="normal-case font-normal text-zinc-400">(optional — sales exec / telecaller scoping)</span>
+                      </label>
+                      <div className="max-h-28 overflow-y-auto border border-zinc-200 rounded-xl p-2 space-y-1">
+                        {tenantProjectsList.map(p => (
+                          <label key={p.id} className="flex items-center gap-2 text-sm text-zinc-700 px-2 py-1 rounded-lg hover:bg-zinc-50 cursor-pointer">
+                            <input type="checkbox" name="projectIds" value={p.id} className="rounded" />
+                            <span className="truncate">{p.name}</span>
+                          </label>
+                        ))}
+                      </div>
+                      <p className="text-[11px] text-zinc-400 mt-1">Unchecked = access follows role only, no project restriction.</p>
+                    </div>
+                  )}
                 </div>
               </div>
               <div className="flex gap-3 pt-3">

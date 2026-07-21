@@ -422,6 +422,8 @@ export function hasPermission(user: User, action: string): boolean {
       'view_execution', 'manage_execution', 'approve_change_orders',
       'view_procurement', 'manage_procurement', 'approve_purchase_orders',
       'view_hr', 'manage_hr', 'manage_attendance',
+      'view_accounts', 'manage_accounts', 'approve_vendor_bills', 'signoff_ra_bills',
+      'create_quotations', 'approve_discounts', 'manage_approval_rules',
     ],
     sales_manager: [
       'view_dashboard', 'view_leads', 'manage_leads', 'assign_leads', 'add_notes', 'manage_team',
@@ -431,12 +433,35 @@ export function hasPermission(user: User, action: string): boolean {
       'view_bookings', 'manage_bookings', 'view_brokers',
       // Read-only construction visibility so sales can answer "how far along is my flat?"
       'view_execution',
+      // Sales head quotes and approves discounts above the executive threshold
+      'create_quotations', 'approve_discounts',
     ],
     sales_executive: [
       'view_dashboard', 'view_leads', 'manage_own_leads', 'add_notes',
       'view_inventory', 'view_projects', 'view_messages', 'send_messages', 'view_documents',
       'view_calendar', 'schedule_visits', 'use_ai_studio', 'create_bookings',
-      'view_bookings',
+      'view_bookings', 'create_quotations',
+    ],
+    // Pre-sales: qualifies inbound enquiries and hands off — no quoting/booking
+    telecaller: [
+      'view_dashboard', 'view_leads', 'manage_own_leads', 'add_notes',
+      'view_projects', 'view_calendar', 'schedule_visits',
+      'view_messages', 'send_messages',
+    ],
+    // Finance staff: full ledger and bill work, but final approvals stay above
+    accountant: [
+      'view_dashboard', 'view_projects', 'view_reports',
+      'view_accounts', 'manage_accounts',
+      'view_finance', 'manage_finance',
+      'view_procurement', 'view_bookings', 'view_documents',
+    ],
+    // Read-only everywhere + the audit trail — exists to verify others' work
+    auditor: [
+      'view_dashboard', 'view_leads', 'view_projects', 'view_inventory',
+      'view_bookings', 'view_sales_performance', 'view_campaigns', 'view_calendar',
+      'view_reports', 'view_messages', 'view_documents', 'view_finance',
+      'view_service', 'view_brokers', 'view_execution', 'view_procurement',
+      'view_hr', 'view_accounts', 'view_audit_log',
     ],
     // Field staff: everything on the construction side, nothing on the sales
     // pipeline or finance. Raises POs / change orders but cannot approve them.
@@ -447,6 +472,8 @@ export function hasPermission(user: User, action: string): boolean {
       // Runs the site crew's daily register, but not payroll/leave decisions
       'view_hr', 'manage_attendance',
       'view_documents', 'view_calendar', 'view_messages', 'send_messages',
+      // First stage of RA-bill approval: verifies claimed progress on site
+      'signoff_ra_bills',
     ],
   };
   const perms = permissions[user.role];

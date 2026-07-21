@@ -224,6 +224,24 @@ export default function Bookings() {
     toast.success('Booking cancelled, unit released');
   };
 
+  // Spec matrix: a sales executive cancels by REQUEST only — a booking
+  // manager confirms (which releases the unit) or dismisses.
+  const requestCancel = (b: Booking) => {
+    update<Booking>('bookings', b.id, { cancelRequested: true });
+    audit('update', b.id, `Cancellation requested for ${getLead(b.leadId)?.name || 'lead'}'s booking — awaiting manager approval`);
+    setSelected(prev => prev && prev.id === b.id ? { ...prev, cancelRequested: true } : prev);
+    refresh();
+    toast.success('Cancellation requested — a booking manager must approve it');
+  };
+
+  const dismissCancelRequest = (b: Booking) => {
+    update<Booking>('bookings', b.id, { cancelRequested: false });
+    audit('update', b.id, 'Cancellation request dismissed — booking stands');
+    setSelected(prev => prev && prev.id === b.id ? { ...prev, cancelRequested: false } : prev);
+    refresh();
+    toast.success('Request dismissed — booking stands');
+  };
+
   const bookableLeads = leads.filter(l => l.stage !== 'lost' && !bookings.some(b => b.leadId === l.id));
   const availableUnits = units.filter(u => u.status === 'available' || u.status === 'reserved');
 
@@ -433,6 +451,9 @@ export default function Bookings() {
                       <span>· Token {formatCurrency(b.amount, currency)}</span>
                     </div>
                   </div>
+                  {b.cancelRequested && (
+                    <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-red-50 text-red-600">cancel requested</span>
+                  )}
                   <span className={`text-[11px] font-semibold px-2.5 py-1 rounded-full capitalize ${stageColors[b.stage]}`}>
                     {BOOKING_STAGES.find(s => s.id === b.stage)?.label}
                   </span>
@@ -526,7 +547,7 @@ export default function Bookings() {
                               postCustomerPayment({
                                 tenantId, amount: inst.amount,
                                 narration: `Collection — installment #${inst.number} from ${lead?.name || 'customer'} (${lead?.project || 'booking'})`,
-                                sourceId: selected.id, actor,
+                                sourceId: selected.id, projectId: lead?.projectId, actor,
                               });
                               refresh();
                               toast.success(`Installment #${inst.number} marked paid`);
@@ -567,7 +588,22 @@ export default function Bookings() {
                     <Trash2 className="h-4 w-4" />
                   </button>
                 )}
+                {!canManage && canCreate && selected.stage !== 'completed' && !selected.cancelRequested && (
+                  <button onClick={() => requestCancel(selected)} className="px-3 py-2.5 border border-red-200 text-red-500 rounded-xl hover:bg-red-50 text-xs font-semibold" title="Request cancellation — a manager approves">
+                    Request Cancel
+                  </button>
+                )}
               </div>
+
+              {selected.cancelRequested && (
+                <div className="mt-4 flex items-center gap-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2.5 flex-wrap">
+                  <p className="text-xs font-medium text-red-700 flex-1 min-w-[180px]">Cancellation requested — a booking manager must approve.</p>
+                  {canManage && (<>
+                    <button onClick={() => handleCancel(selected)} className="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-red-600 text-white hover:bg-red-700">Approve & Cancel</button>
+                    <button onClick={() => dismissCancelRequest(selected)} className="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-white border border-zinc-200 text-zinc-600 hover:bg-zinc-50">Dismiss</button>
+                  </>)}
+                </div>
+              )}
             </div>
           </div>
         );

@@ -15,8 +15,9 @@ import { projectProgress, projectHealth, nextMilestone, HEALTH_META } from '../s
 import { lowStockMaterials, machinesDueForService, isBillOverdue } from '../services/procurementService';
 import { pendingLeaves } from '../services/hrService';
 import { filingsDueSoon, isFilingOverdue } from '../services/complianceService';
+import { loansDueSoon } from '../services/accountsService';
 import { formatCurrency } from '../utils/format';
-import type { Lead, Task, Unit, Activity, User as UserType, Project, SiteTask, Rfi, Inspection, PurchaseOrder, VendorBill, Invoice, RaBill, Quotation } from '../types';
+import type { Lead, Task, Unit, Activity, User as UserType, Project, SiteTask, Rfi, Inspection, PurchaseOrder, VendorBill, Invoice, RaBill, Quotation, Booking } from '../types';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
 const iconMap: Record<string, React.ElementType> = {
@@ -121,6 +122,17 @@ export default function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [tenantId, refreshKey, tenant]
   );
+  const emisDue = useMemo(
+    () => hasPermission('manage_finance') && moduleOn('accounts') ? loansDueSoon(tenantId) : [],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [tenantId, refreshKey, tenant]
+  );
+  const cancelRequests = useMemo(
+    () => hasPermission('manage_bookings') && moduleOn('bookings')
+      ? getByTenant<Booking>('bookings', tenantId).filter(b => b.cancelRequested) : [],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [tenantId, refreshKey, tenant]
+  );
   // Collections this month + overdue receivables — the CFO half of the KPI spec
   const invoices = useMemo(
     () => showFinance ? getByTenant<Invoice>('invoices', tenantId) : [],
@@ -146,6 +158,8 @@ export default function Dashboard() {
     ...(raAwaitingSite.length ? [{ icon: HardHat, color: 'text-amber-500', label: `${raAwaitingSite.length} RA bill${raAwaitingSite.length === 1 ? '' : 's'} awaiting site sign-off`, link: '/accounts' }] : []),
     ...(raAwaitingFinance.length ? [{ icon: Landmark, color: 'text-amber-500', label: `${raAwaitingFinance.length} RA bill${raAwaitingFinance.length === 1 ? '' : 's'} awaiting finance approval`, link: '/accounts' }] : []),
     ...(quotesAwaitingDiscount.length ? [{ icon: FileQuestion, color: 'text-amber-500', label: `${quotesAwaitingDiscount.length} quotation discount${quotesAwaitingDiscount.length === 1 ? '' : 's'} awaiting your approval`, link: '/bookings' }] : []),
+    ...(emisDue.length ? [{ icon: Landmark, color: 'text-amber-500', label: `${emisDue.length} loan EMI${emisDue.length === 1 ? '' : 's'} due within a week — ${emisDue.map(e => e.loan.lenderName).slice(0, 2).join(', ')}`, link: '/accounts' }] : []),
+    ...(cancelRequests.length ? [{ icon: AlertTriangle, color: 'text-red-500', label: `${cancelRequests.length} booking cancellation request${cancelRequests.length === 1 ? '' : 's'} awaiting your decision`, link: '/bookings' }] : []),
     ...(dueFilings.length ? [{
       icon: ShieldCheck,
       color: dueFilings.some(isFilingOverdue) ? 'text-red-500' : 'text-amber-500',

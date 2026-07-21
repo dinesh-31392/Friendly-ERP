@@ -18,7 +18,9 @@ type TableName = 'tenants' | 'users' | 'projects' | 'towers' | 'units' | 'leads'
   'complianceItems' | 'sessions' |
   // ERP: double-entry ledger, RA billing, AP payments, quotations, approvals
   'accounts' | 'journalEntries' | 'raBills' | 'paymentsMade' |
-  'quotations' | 'approvalRules';
+  'quotations' | 'approvalRules' |
+  // ERP: banking & reconciliation, loans
+  'bankAccounts' | 'bankTransactions' | 'loans';
 
 function readTable<T>(table: TableName): T[] {
   try {

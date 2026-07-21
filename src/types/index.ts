@@ -224,6 +224,9 @@ export interface Booking {
   amount: number;
   paymentPlan: string;
   stage: BookingStage;
+  /** Set when a non-approver asks to cancel — a booking manager must confirm
+   *  (spec matrix: sales exec cancels by request only). */
+  cancelRequested?: boolean;
   createdAt: string;
 }
 
@@ -727,7 +730,9 @@ export interface PayrollRun {
 export type FilingFrequency = 'one_time' | 'monthly' | 'quarterly' | 'annual';
 
 /** A statutory/compliance deadline (GST return, RERA QPR, TDS, PF/ESI…).
- *  Marking a recurring filing as filed auto-creates the next occurrence. */
+ *  Marking a recurring filing as filed auto-creates the next occurrence.
+ *  When a tax amount is known, a filed item can be marked paid — remitting
+ *  it posts against the statutory-liability ledger account. */
 export interface ComplianceItem {
   id: string;
   tenantId: string;
@@ -736,10 +741,12 @@ export interface ComplianceItem {
   dueDate: string;
   frequency: FilingFrequency;
   projectId?: string;        // RERA filings are per-project
+  amount?: number;           // tax/fee due this period (tax_postings.amount)
   notes?: string;
-  status: 'pending' | 'filed';
+  status: 'pending' | 'filed' | 'paid';
   filedAt?: string;
   filedBy?: string;
+  paidAt?: string;
   createdAt: string;
 }
 
@@ -892,6 +899,72 @@ export interface ApprovalRule {
   thresholdAmount: number;   // 0 = always requires approval
   updatedAt: string;
 }
+
+// ── Banking & reconciliation ─────────────────────────────────────────────────
+
+export interface BankAccount {
+  id: string;
+  tenantId: string;
+  name: string;              // 'HDFC Current A/c'
+  bankName?: string;
+  accountNumber?: string;    // masked/short form is fine — display only
+  openingBalance: number;
+  createdAt: string;
+}
+
+/** One bank-statement line. `debit` = money OUT of the bank account,
+ *  `credit` = money IN (bank-statement convention). */
+export interface BankTransaction {
+  id: string;
+  tenantId: string;
+  bankAccountId: string;
+  date: string;              // YYYY-MM-DD
+  description: string;
+  amount: number;
+  type: 'debit' | 'credit';
+  reconciled: boolean;
+  matchedJournalEntryId?: string;
+  createdAt: string;
+}
+
+// ── Loans ────────────────────────────────────────────────────────────────────
+
+export type LoanType = 'term_loan' | 'overdraft' | 'mortgage' | 'inter_company';
+
+export interface LoanInstallment {
+  number: number;
+  dueDate: string;
+  principal: number;
+  interest: number;
+  tds: number;               // TDS deducted from the interest portion
+  status: 'pending' | 'paid';
+  paidAt?: string;
+}
+
+/** Borrowing with an annuity (EMI) repayment schedule generated at creation.
+ *  Disbursement and each repayment post to the ledger. */
+export interface Loan {
+  id: string;
+  tenantId: string;
+  projectId?: string;
+  lenderName: string;
+  loanType: LoanType;
+  principal: number;
+  interestRatePct: number;   // annual
+  tenureMonths: number;
+  tdsPct: number;            // on interest; 0 = no TDS
+  startDate: string;
+  schedule: LoanInstallment[];
+  status: 'active' | 'closed';
+  createdAt: string;
+}
+
+export const LOAN_TYPES: { id: LoanType; label: string }[] = [
+  { id: 'term_loan', label: 'Term Loan' },
+  { id: 'overdraft', label: 'Overdraft' },
+  { id: 'mortgage', label: 'Mortgage' },
+  { id: 'inter_company', label: 'Inter-company' },
+];
 
 export const ACCOUNT_TYPES: { id: AccountType; label: string }[] = [
   { id: 'asset', label: 'Assets' },

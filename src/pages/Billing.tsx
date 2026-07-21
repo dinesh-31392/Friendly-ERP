@@ -8,7 +8,7 @@ import { getByTenant, create, update, remove, logAudit } from '../services/db';
 import { isBillOverdue, projectActuals, formatPoNumber } from '../services/procurementService';
 import { isFilingOverdue, markFiled } from '../services/complianceService';
 import { needsApproval } from '../services/approvalService';
-import { postVendorBillApproved, postApPayment, postCustomerPayment } from '../services/accountsService';
+import { postVendorBillApproved, postApPayment, postCustomerPayment, postTaxRemitted, statutoryLiability } from '../services/accountsService';
 import type { Invoice, InvoiceStatus, Lead, Vendor, VendorBill, VendorBillStatus, Project, ProjectBudget, PurchaseOrder, ComplianceItem, FilingFrequency, PaymentMade, PaymentMode } from '../types';
 import { BUDGET_CATEGORIES, FILING_AUTHORITIES, PAYMENT_MODES } from '../types';
 import { formatCurrency } from '../utils/format';
@@ -150,7 +150,9 @@ export default function Billing() {
       postCustomerPayment({
         tenantId, amount: inv.amount,
         narration: `Collection — ${inv.type} from ${inv.leadName} (${inv.project})`,
-        sourceId: inv.id, actor,
+        sourceId: inv.id,
+        projectId: leads.find(l => l.id === inv.leadId)?.projectId,
+        actor,
       });
     }
     refresh();
@@ -273,12 +275,14 @@ export default function Billing() {
     const title = (fd.get('title') as string)?.trim();
     const dueDate = fd.get('dueDate') as string;
     if (!title || !dueDate) { toast.error('Title and due date are required'); return; }
+    const amount = Number(fd.get('amount'));
     const created = create<ComplianceItem>('complianceItems', {
       id: '', tenantId, title,
       authority: (fd.get('authority') as string) || 'Other',
       dueDate,
       frequency: (fd.get('frequency') as FilingFrequency) || 'one_time',
       projectId: (fd.get('projectId') as string) || undefined,
+      ...(amount > 0 ? { amount } : {}),
       notes: (fd.get('notes') as string) || '',
       status: 'pending',
       createdAt: new Date().toISOString(),
@@ -301,6 +305,20 @@ export default function Billing() {
     remove('complianceItems', item.id);
     refresh();
     toast.success('Filing removed');
+  };
+
+  /** Remitting a filed tax amount clears the statutory-liability account. */
+  const handlePayFiling = (item: ComplianceItem) => {
+    if (!user || !item.amount) return;
+    update<ComplianceItem>('complianceItems', item.id, { status: 'paid', paidAt: new Date().toISOString() });
+    postTaxRemitted({
+      tenantId, amount: item.amount,
+      narration: `Tax remitted — ${item.title} (${item.authority})`,
+      sourceId: item.id, actor,
+    });
+    audit('payment', 'compliance_item', item.id, `Remitted ${formatCurrency(item.amount, currency)} for "${item.title}"`);
+    refresh();
+    toast.success('Tax payment posted to the ledger');
   };
 
   /** Real export of whichever tab is on screen — Excel-safe CSV. */
@@ -327,8 +345,8 @@ export default function Billing() {
     } else {
       if (filings.length === 0) { toast.error('Nothing to export yet'); return; }
       downloadCsv(`compliance-filings-${today}.csv`, [
-        ['Filing', 'Authority', 'Project', 'Due Date', 'Frequency', 'Status', 'Filed At'],
-        ...filings.map(f => [f.title, f.authority, f.projectId ? projectName(f.projectId) : '', f.dueDate, f.frequency.replace('_', ' '), isFilingOverdue(f) ? 'OVERDUE' : f.status, f.filedAt?.slice(0, 10) ?? '']),
+        ['Filing', 'Authority', 'Project', 'Due Date', 'Frequency', 'Amount', 'Status', 'Filed At', 'Paid At'],
+        ...filings.map(f => [f.title, f.authority, f.projectId ? projectName(f.projectId) : '', f.dueDate, f.frequency.replace('_', ' '), f.amount ?? '', isFilingOverdue(f) ? 'OVERDUE' : f.status, f.filedAt?.slice(0, 10) ?? '', f.paidAt?.slice(0, 10) ?? '']),
       ]);
     }
     toast.success('Exported as CSV (opens in Excel)');
@@ -675,9 +693,19 @@ export default function Billing() {
       {/* ── Compliance ── */}
       {tab === 'compliance' && (
         <div className="bg-white rounded-2xl border border-zinc-200/60 overflow-hidden">
-          <div className="px-5 py-4 border-b border-zinc-100">
-            <h3 className="font-semibold text-zinc-900">Statutory Filings & Deadlines</h3>
-            <p className="text-xs text-zinc-500 mt-0.5">GST, RERA, TDS, PF/ESI — marking a recurring filing as filed automatically tracks the next period.</p>
+          <div className="px-5 py-4 border-b border-zinc-100 flex items-center justify-between gap-3 flex-wrap">
+            <div>
+              <h3 className="font-semibold text-zinc-900">Statutory Filings & Deadlines</h3>
+              <p className="text-xs text-zinc-500 mt-0.5">GST, RERA, TDS, PF/ESI — marking a recurring filing as filed automatically tracks the next period.</p>
+            </div>
+            {(() => {
+              const accrued = statutoryLiability(tenantId);
+              return accrued > 0 ? (
+                <span className="text-[11px] font-semibold px-3 py-1.5 rounded-full bg-amber-50 text-amber-700" title="Balance of the Statutory Deductions Payable ledger account (TDS withheld on RA bills, loan interest, …)">
+                  Accrued statutory liability: {formatCurrency(accrued, currency)}
+                </span>
+              ) : null;
+            })()}
           </div>
           {filings.length === 0 ? (
             <div className="py-16 text-center">
@@ -698,7 +726,9 @@ export default function Billing() {
                       <p className="text-sm font-medium text-zinc-900">{f.title}</p>
                       <p className="text-[11px] text-zinc-500">
                         {f.authority}{f.projectId ? ` · ${projectName(f.projectId)}` : ''} · {f.frequency.replace('_', '-')}
-                        {f.status === 'filed' && f.filedAt ? ` · filed ${fmtDate(f.filedAt)}` : ''}
+                        {f.amount ? ` · ${formatCurrency(f.amount, currency)}` : ''}
+                        {f.status !== 'pending' && f.filedAt ? ` · filed ${fmtDate(f.filedAt)}` : ''}
+                        {f.status === 'paid' && f.paidAt ? ` · paid ${fmtDate(f.paidAt)}` : ''}
                       </p>
                     </div>
                     {f.status === 'pending' && (
@@ -706,9 +736,13 @@ export default function Billing() {
                         {overdueF ? `overdue since ${fmtDate(f.dueDate)}` : `due ${fmtDate(f.dueDate)}`}
                       </span>
                     )}
-                    {f.status === 'filed' && <span className="text-[11px] font-semibold px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-700">filed</span>}
+                    {f.status === 'filed' && <span className="text-[11px] font-semibold px-2.5 py-1 rounded-full bg-blue-50 text-blue-700">filed</span>}
+                    {f.status === 'paid' && <span className="text-[11px] font-semibold px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-700">paid</span>}
                     {canManage && f.status === 'pending' && (
                       <button onClick={() => handleMarkFiled(f)} className="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-emerald-50 text-emerald-700 hover:bg-emerald-100 transition-colors">Mark Filed</button>
+                    )}
+                    {canManage && f.status === 'filed' && !!f.amount && (
+                      <button onClick={() => handlePayFiling(f)} className="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-indigo-50 text-indigo-700 hover:bg-indigo-100 transition-colors">Record Payment</button>
                     )}
                     {canManage && (
                       <button onClick={() => deleteFiling(f)} className="p-1.5 rounded-lg hover:bg-red-50 text-zinc-300 hover:text-red-500 transition-colors">
@@ -798,6 +832,10 @@ export default function Billing() {
                     <option value="">Company-wide</option>
                     {projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
                   </select>
+                </div>
+                <div>
+                  <label className={labelCls}>Amount Due ({currency})</label>
+                  <input name="amount" type="number" min="0" step="any" placeholder="Optional" className={inputCls} />
                 </div>
               </div>
               <div>

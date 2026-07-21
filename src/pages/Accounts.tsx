@@ -8,26 +8,49 @@ import { getByTenant, create, update, logAudit } from '../services/db';
 import {
   ensureCoa, postEntry, postDraft, postRaApproved, postApPayment,
   trialBalance, profitAndLoss, balanceSheet, nextRaNumber, contractorLedger,
+  buildLoanSchedule, postLoanDisbursed, postLoanRepayment,
+  fundFlow, projectPnl, cashBalance, COA,
 } from '../services/accountsService';
 import { projectProgress } from '../services/executionService';
 import { formatCurrency, formatCurrencyFull } from '../utils/format';
 import { downloadCsv } from '../utils/csv';
 import type {
   Account, AccountType, JournalEntry, Project, Vendor, RaBill, RaDeduction,
-  PaymentMade, PaymentMode,
+  PaymentMade, PaymentMode, BankAccount, BankTransaction, Loan, LoanType,
 } from '../types';
-import { ACCOUNT_TYPES, PAYMENT_MODES } from '../types';
+import { ACCOUNT_TYPES, PAYMENT_MODES, LOAN_TYPES } from '../types';
 import { v4 as uuid } from 'uuid';
 import toast from 'react-hot-toast';
 
-type Tab = 'ledger' | 'journal' | 'statements' | 'ra';
+type Tab = 'ledger' | 'journal' | 'statements' | 'ra' | 'banking' | 'loans';
 
 const TABS: { id: Tab; label: string; icon: React.ElementType }[] = [
   { id: 'ledger', label: 'Chart of Accounts', icon: BookOpen },
   { id: 'journal', label: 'Journal', icon: FileText },
   { id: 'statements', label: 'Statements', icon: Scale },
   { id: 'ra', label: 'RA Bills', icon: HardHat },
+  { id: 'banking', label: 'Banking', icon: Landmark },
+  { id: 'loans', label: 'Loans', icon: Banknote },
 ];
+
+/** Minimal RFC-4180-ish line parser (quoted cells, doubled quotes). */
+function parseCsvLine(line: string): string[] {
+  const out: string[] = [];
+  let cur = '';
+  let inQ = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQ) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') { cur += '"'; i++; } else inQ = false;
+      } else cur += ch;
+    } else if (ch === '"') inQ = true;
+    else if (ch === ',') { out.push(cur); cur = ''; }
+    else cur += ch;
+  }
+  out.push(cur);
+  return out.map(s => s.trim());
+}
 
 const SOURCE_LABELS: Record<JournalEntry['sourceType'], string> = {
   manual: 'Manual', vendor_bill: 'Vendor Bill', ra_bill: 'RA Bill',
@@ -49,13 +72,19 @@ export default function Accounts() {
   const refresh = () => setRefreshKey(k => k + 1);
 
   const [tab, setTab] = useState<Tab>('ledger');
-  const [statement, setStatement] = useState<'tb' | 'pl' | 'bs'>('tb');
+  const [statement, setStatement] = useState<'tb' | 'pl' | 'bs' | 'ff' | 'pp'>('tb');
   const [showAddAccount, setShowAddAccount] = useState(false);
   const [showAddJe, setShowAddJe] = useState(false);
   const [showAddRa, setShowAddRa] = useState(false);
   const [payingRa, setPayingRa] = useState<RaBill | null>(null);
   const [journalFilter, setJournalFilter] = useState('all');
   const [jeLines, setJeLines] = useState<DraftLine[]>([emptyLine(), emptyLine()]);
+  const [showAddBank, setShowAddBank] = useState(false);
+  const [showAddTxn, setShowAddTxn] = useState(false);
+  const [bankId, setBankId] = useState('');
+  const [matchingTxn, setMatchingTxn] = useState<BankTransaction | null>(null);
+  const [showAddLoan, setShowAddLoan] = useState(false);
+  const [openLoanId, setOpenLoanId] = useState<string | null>(null);
 
   const accounts = useMemo(() => ensureCoa(tenantId), [tenantId, refreshKey]);
   const entries = useMemo(
@@ -74,6 +103,26 @@ export default function Accounts() {
   const tb = useMemo(() => trialBalance(tenantId), [tenantId, refreshKey]);
   const pl = useMemo(() => profitAndLoss(tenantId), [tenantId, refreshKey]);
   const bs = useMemo(() => balanceSheet(tenantId), [tenantId, refreshKey]);
+  const ff = useMemo(() => fundFlow(tenantId), [tenantId, refreshKey]);
+  const pp = useMemo(() => projectPnl(tenantId), [tenantId, refreshKey]);
+
+  const bankAccounts = useMemo(
+    () => getByTenant<BankAccount>('bankAccounts', tenantId).sort((a, b) => a.name.localeCompare(b.name)),
+    [tenantId, refreshKey]
+  );
+  const activeBank = bankAccounts.find(b => b.id === bankId) || bankAccounts[0];
+  const bankTxns = useMemo(
+    () => activeBank
+      ? getByTenant<BankTransaction>('bankTransactions', tenantId)
+          .filter(t => t.bankAccountId === activeBank.id)
+          .sort((a, b) => b.date.localeCompare(a.date))
+      : [],
+    [tenantId, refreshKey, activeBank?.id]
+  );
+  const loans = useMemo(
+    () => getByTenant<Loan>('loans', tenantId).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
+    [tenantId, refreshKey]
+  );
 
   const accountName = (id: string) => accounts.find(a => a.id === id);
   const vendorName = (id: string) => vendors.find(v => v.id === id)?.name || '—';
@@ -239,6 +288,166 @@ export default function Accounts() {
     toast.success('Payment recorded and posted');
   };
 
+  // ── Banking & reconciliation ───────────────────────────────────────────────
+  const handleAddBank = (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    const fd = new FormData(e.currentTarget);
+    const name = (fd.get('name') as string)?.trim();
+    if (!name) { toast.error('Account name is required'); return; }
+    const created = create<BankAccount>('bankAccounts', {
+      id: '', tenantId, name,
+      bankName: (fd.get('bankName') as string) || '',
+      accountNumber: (fd.get('accountNumber') as string) || '',
+      openingBalance: Number(fd.get('openingBalance')) || 0,
+      createdAt: new Date().toISOString(),
+    });
+    audit('create', 'bank_account', created.id, `Added bank account "${name}"`);
+    setBankId(created.id);
+    setShowAddBank(false);
+    refresh();
+    toast.success('Bank account added');
+  };
+
+  const handleAddTxn = (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    if (!activeBank) return;
+    const fd = new FormData(e.currentTarget);
+    const amount = Number(fd.get('amount'));
+    if (!(amount > 0)) { toast.error('Amount is required'); return; }
+    create<BankTransaction>('bankTransactions', {
+      id: '', tenantId, bankAccountId: activeBank.id,
+      date: (fd.get('date') as string) || new Date().toISOString().slice(0, 10),
+      description: (fd.get('description') as string) || 'Manual entry',
+      amount,
+      type: (fd.get('type') as 'debit' | 'credit') || 'debit',
+      reconciled: false,
+      createdAt: new Date().toISOString(),
+    });
+    setShowAddTxn(false);
+    refresh();
+    toast.success('Statement line added');
+  };
+
+  const importStatement = (file: File) => {
+    if (!activeBank) return;
+    file.text().then(text => {
+      const lines = text.split(/\r?\n/).filter(l => l.trim());
+      if (lines.length < 2) { toast.error('CSV needs a header row and at least one line'); return; }
+      const header = parseCsvLine(lines[0]).map(h => h.toLowerCase());
+      const col = (n: string) => header.indexOf(n);
+      if (col('date') < 0 || col('amount') < 0 || col('type') < 0) {
+        toast.error('CSV must have date, description, amount, type columns — download the template');
+        return;
+      }
+      let imported = 0, skipped = 0;
+      lines.slice(1).forEach(line => {
+        const cells = parseCsvLine(line);
+        const amount = Number(cells[col('amount')]);
+        const type = cells[col('type')].toLowerCase();
+        if (!(amount > 0) || (type !== 'debit' && type !== 'credit')) { skipped++; return; }
+        create<BankTransaction>('bankTransactions', {
+          id: '', tenantId, bankAccountId: activeBank.id,
+          date: cells[col('date')] || new Date().toISOString().slice(0, 10),
+          description: col('description') >= 0 ? cells[col('description')] : '',
+          amount, type: type as 'debit' | 'credit',
+          reconciled: false, createdAt: new Date().toISOString(),
+        });
+        imported++;
+      });
+      audit('create', 'bank_statement', activeBank.id, `Imported ${imported} statement line(s) into ${activeBank.name}`);
+      refresh();
+      toast.success(`${imported} line${imported === 1 ? '' : 's'} imported${skipped ? `, ${skipped} skipped` : ''}`);
+    }).catch(() => toast.error('Could not read that file'));
+  };
+
+  const downloadBankTemplate = () => {
+    downloadCsv('bank-statement-template.csv', [
+      ['date', 'description', 'amount', 'type'],
+      ['2026-07-15', 'NEFT UTR2026071512345 BuildRight', 250000, 'debit'],
+      ['2026-07-18', 'IMPS collection Rohan Verma', 750000, 'credit'],
+    ]);
+  };
+
+  /** Candidate JEs for a bank line: posted entries whose cash movement equals
+   *  the amount on the matching side and that no other line has claimed. */
+  const matchCandidates = (txn: BankTransaction): JournalEntry[] => {
+    const cashAcc = accounts.find(a => a.code === COA.CASH);
+    if (!cashAcc) return [];
+    const claimed = new Set(
+      getByTenant<BankTransaction>('bankTransactions', tenantId)
+        .filter(t => t.matchedJournalEntryId)
+        .map(t => t.matchedJournalEntryId as string)
+    );
+    return entries.filter(e =>
+      e.status === 'posted' && !claimed.has(e.id) &&
+      e.lines.some(l => l.accountId === cashAcc.id &&
+        // bank debit = money out = ledger credits cash; bank credit = the reverse
+        (txn.type === 'debit' ? l.credit === txn.amount : l.debit === txn.amount))
+    ).slice(0, 8);
+  };
+
+  const confirmMatch = (txn: BankTransaction, je: JournalEntry) => {
+    update<BankTransaction>('bankTransactions', txn.id, { reconciled: true, matchedJournalEntryId: je.id });
+    audit('update', 'bank_transaction', txn.id, `Reconciled "${txn.description.slice(0, 40)}" against JE: ${je.narration.slice(0, 40)}`);
+    setMatchingTxn(null);
+    refresh();
+    toast.success('Matched and reconciled');
+  };
+
+  const bankBalance = activeBank
+    ? activeBank.openingBalance
+      + bankTxns.filter(t => t.type === 'credit').reduce((s, t) => s + t.amount, 0)
+      - bankTxns.filter(t => t.type === 'debit').reduce((s, t) => s + t.amount, 0)
+    : 0;
+  const unreconciledCount = bankTxns.filter(t => !t.reconciled).length;
+
+  // ── Loans ──────────────────────────────────────────────────────────────────
+  const handleAddLoan = (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    const fd = new FormData(e.currentTarget);
+    const lenderName = (fd.get('lenderName') as string)?.trim();
+    const principal = Number(fd.get('principal'));
+    const rate = Number(fd.get('rate'));
+    const tenure = Number(fd.get('tenure'));
+    if (!lenderName || !(principal > 0) || !(tenure > 0)) { toast.error('Lender, principal and tenure are required'); return; }
+    const startDate = (fd.get('startDate') as string) || new Date().toISOString().slice(0, 10);
+    const created = create<Loan>('loans', {
+      id: '', tenantId,
+      projectId: (fd.get('projectId') as string) || undefined,
+      lenderName,
+      loanType: (fd.get('loanType') as LoanType) || 'term_loan',
+      principal, interestRatePct: rate, tenureMonths: tenure,
+      tdsPct: Number(fd.get('tdsPct')) || 0,
+      startDate,
+      schedule: buildLoanSchedule(principal, rate, tenure, Number(fd.get('tdsPct')) || 0, startDate),
+      status: 'active',
+      createdAt: new Date().toISOString(),
+    });
+    postLoanDisbursed(created, actor);
+    audit('create', 'loan', created.id, `Loan from ${lenderName} — ${formatCurrency(principal, currency)} at ${rate}% for ${tenure} months`);
+    setShowAddLoan(false);
+    setOpenLoanId(created.id);
+    refresh();
+    toast.success('Loan recorded — disbursement posted to the ledger');
+  };
+
+  const payInstallment = (loan: Loan, number: number) => {
+    const inst = loan.schedule.find(i => i.number === number);
+    if (!inst || inst.status === 'paid') return;
+    const firstPending = loan.schedule.find(i => i.status === 'pending');
+    if (firstPending && firstPending.number !== number) {
+      toast.error(`EMI #${firstPending.number} is due first — repayments post in order`);
+      return;
+    }
+    const schedule = loan.schedule.map(i => i.number === number ? { ...i, status: 'paid' as const, paidAt: new Date().toISOString() } : i);
+    const allPaid = schedule.every(i => i.status === 'paid');
+    update<Loan>('loans', loan.id, { schedule, status: allPaid ? 'closed' : 'active' });
+    postLoanRepayment(loan, inst, actor);
+    audit('payment', 'loan', loan.id, `Paid EMI #${inst.number} to ${loan.lenderName} — ${formatCurrency(inst.principal + inst.interest - inst.tds, currency)} net`);
+    refresh();
+    toast.success(allPaid ? 'Final EMI paid — loan closed' : `EMI #${inst.number} paid and posted`);
+  };
+
   const exportStatement = () => {
     const today = new Date().toISOString().slice(0, 10);
     if (statement === 'tb') {
@@ -254,13 +463,26 @@ export default function Accounts() {
         ...pl.expense.map(r => ['Expense', r.account.name, r.net]),
         ['', 'Net Profit', pl.netProfit],
       ]);
-    } else {
+    } else if (statement === 'bs') {
       downloadCsv(`balance-sheet-${today}.csv`, [
         ['Section', 'Account', 'Amount'],
         ...bs.assets.map(r => ['Assets', r.account.name, r.net]),
         ...bs.liabilities.map(r => ['Liabilities', r.account.name, r.net]),
         ...bs.equity.map(r => ['Equity', r.account.name, r.net]),
         ['Equity', 'Retained Earnings (P&L)', bs.retainedEarnings],
+      ]);
+    } else if (statement === 'ff') {
+      downloadCsv(`fund-flow-${today}.csv`, [
+        ['Direction', 'Item', 'Due', 'Amount'],
+        ...ff.inflows.map(l => ['Inflow', l.label, l.due.slice(0, 10), l.amount]),
+        ...ff.outflows.map(l => ['Outflow', l.label, l.due.slice(0, 10), l.amount]),
+        ['', 'Cash today', '', ff.cash],
+        ['', 'Projected (30d)', '', ff.projected],
+      ]);
+    } else {
+      downloadCsv(`project-pnl-${today}.csv`, [
+        ['Project', 'Income', 'Expense', 'Net'],
+        ...pp.map(r => [r.projectId ? projectName(r.projectId) : 'Head office / unallocated', r.income, r.expense, r.net]),
       ]);
     }
     toast.success('Exported as CSV');
@@ -464,9 +686,9 @@ export default function Accounts() {
       {tab === 'statements' && (
         <div className="space-y-4">
           <div className="flex items-center justify-between flex-wrap gap-3">
-            <div className="flex items-center gap-1 bg-white border border-zinc-200 rounded-xl p-1">
-              {([['tb', 'Trial Balance'], ['pl', 'Profit & Loss'], ['bs', 'Balance Sheet']] as const).map(([id, label]) => (
-                <button key={id} onClick={() => setStatement(id)} className={`px-3.5 py-2 rounded-lg text-sm font-medium transition-all ${statement === id ? 'bg-indigo-600 text-white shadow-sm' : 'text-zinc-500 hover:text-zinc-800'}`}>{label}</button>
+            <div className="flex items-center gap-1 bg-white border border-zinc-200 rounded-xl p-1 overflow-x-auto">
+              {([['tb', 'Trial Balance'], ['pl', 'Profit & Loss'], ['bs', 'Balance Sheet'], ['ff', 'Fund Flow'], ['pp', 'Project P&L']] as const).map(([id, label]) => (
+                <button key={id} onClick={() => setStatement(id)} className={`px-3.5 py-2 rounded-lg text-sm font-medium whitespace-nowrap transition-all ${statement === id ? 'bg-indigo-600 text-white shadow-sm' : 'text-zinc-500 hover:text-zinc-800'}`}>{label}</button>
               ))}
             </div>
             <button onClick={exportStatement} className="flex items-center gap-2 px-3 py-2 bg-white border border-zinc-200 rounded-xl text-xs font-medium text-zinc-600 hover:bg-zinc-50">
@@ -538,7 +760,208 @@ export default function Accounts() {
                 </div>
               </div>
             )}
+
+            {statement === 'ff' && (
+              <div className="divide-y divide-zinc-100">
+                <div className="px-5 py-4 flex items-center justify-between">
+                  <p className="text-sm font-semibold text-zinc-700">Cash today (ledger)</p>
+                  <p className="text-sm font-bold text-zinc-900">{formatCurrencyFull(ff.cash, currency)}</p>
+                </div>
+                <StatementSection title="Expected In (next 30 days)" rows={ff.inflows.map(l => ({ label: `${l.label} · due ${new Date(l.due).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}`, amount: l.amount }))} total={ff.totalIn} currency={currency} />
+                <StatementSection title="Committed Out" rows={ff.outflows.map(l => ({ label: `${l.label} · due ${new Date(l.due).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}`, amount: l.amount }))} total={ff.totalOut} currency={currency} />
+                <div className="px-5 py-4 flex items-center justify-between">
+                  <p className="text-sm font-bold text-zinc-900">Projected position</p>
+                  <p className={`text-sm font-bold ${ff.projected < 0 ? 'text-red-600' : 'text-emerald-600'}`}>{formatCurrencyFull(ff.projected, currency)}</p>
+                </div>
+              </div>
+            )}
+
+            {statement === 'pp' && (
+              pp.length === 0 ? <div className="py-16 text-center text-sm text-zinc-400">No project-tagged postings yet.</div> : (
+                <table className="w-full">
+                  <thead>
+                    <tr className="bg-zinc-50/30 border-b border-zinc-100">
+                      <th className="text-left px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">Cost Center</th>
+                      <th className="text-right px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">Income</th>
+                      <th className="text-right px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">Expense</th>
+                      <th className="text-right px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">Net</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {pp.map(r => (
+                      <tr key={r.projectId ?? 'ho'} className="border-b border-zinc-50">
+                        <td className="px-4 py-2.5 text-sm text-zinc-800">{r.projectId ? projectName(r.projectId) : 'Head office / unallocated'}</td>
+                        <td className="px-4 py-2.5 text-sm text-zinc-700 text-right">{formatCurrencyFull(r.income, currency)}</td>
+                        <td className="px-4 py-2.5 text-sm text-zinc-700 text-right">{formatCurrencyFull(r.expense, currency)}</td>
+                        <td className={`px-4 py-2.5 text-sm font-semibold text-right ${r.net < 0 ? 'text-red-600' : 'text-emerald-600'}`}>{formatCurrencyFull(r.net, currency)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )
+            )}
           </div>
+        </div>
+      )}
+
+      {/* ── Banking & Reconciliation ── */}
+      {tab === 'banking' && (
+        bankAccounts.length === 0 ? (
+          <div className="bg-white rounded-2xl border border-zinc-200/60 py-16 text-center">
+            <Landmark className="h-10 w-10 text-zinc-300 mx-auto mb-2" />
+            <p className="text-sm text-zinc-500 mb-4">Add your bank account, import the statement, and reconcile it line-by-line against the ledger.</p>
+            {canManage && (
+              <button onClick={() => setShowAddBank(true)} className="px-4 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700">
+                Add Bank Account
+              </button>
+            )}
+          </div>
+        ) : (
+        <div className="space-y-4">
+          <div className="flex items-center gap-2 flex-wrap">
+            <select value={activeBank?.id || ''} onChange={e => setBankId(e.target.value)} className="px-4 py-2.5 bg-white border border-zinc-200 rounded-xl text-sm font-medium">
+              {bankAccounts.map(b => <option key={b.id} value={b.id}>{b.name}{b.bankName ? ` — ${b.bankName}` : ''}</option>)}
+            </select>
+            <div className="flex-1" />
+            {canManage && (<>
+              <button onClick={downloadBankTemplate} className="px-3 py-2 bg-white border border-zinc-200 rounded-xl text-xs font-medium text-zinc-600 hover:bg-zinc-50">CSV Template</button>
+              <label className="px-3 py-2 bg-emerald-50 text-emerald-700 rounded-xl text-xs font-semibold hover:bg-emerald-100 cursor-pointer">
+                Import Statement
+                <input type="file" accept=".csv,text/csv" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) importStatement(f); e.target.value = ''; }} />
+              </label>
+              <button onClick={() => setShowAddTxn(true)} className="px-3 py-2 bg-white border border-zinc-200 rounded-xl text-xs font-medium text-zinc-600 hover:bg-zinc-50">Add Line</button>
+              <button onClick={() => setShowAddBank(true)} className="flex items-center gap-1.5 px-3 py-2 bg-indigo-600 text-white rounded-xl text-xs font-semibold hover:bg-indigo-700">
+                <Plus className="h-3.5 w-3.5" /> Bank Account
+              </button>
+            </>)}
+          </div>
+
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+            <div className="bg-white rounded-2xl border border-zinc-200/60 p-4">
+              <p className="text-xs font-medium text-zinc-500 mb-1">Bank Balance (statement)</p>
+              <p className="text-xl font-bold text-zinc-900">{formatCurrency(bankBalance, currency)}</p>
+            </div>
+            <div className="bg-white rounded-2xl border border-zinc-200/60 p-4">
+              <p className="text-xs font-medium text-zinc-500 mb-1">Books — Cash & Bank</p>
+              <p className="text-xl font-bold text-zinc-900">{formatCurrency(cashBalance(tenantId), currency)}</p>
+            </div>
+            <div className={`rounded-2xl border p-4 ${unreconciledCount > 0 ? 'bg-amber-50/60 border-amber-200' : 'bg-white border-zinc-200/60'}`}>
+              <p className={`text-xs font-medium mb-1 ${unreconciledCount > 0 ? 'text-amber-600' : 'text-zinc-500'}`}>Unreconciled Lines</p>
+              <p className={`text-xl font-bold ${unreconciledCount > 0 ? 'text-amber-600' : 'text-zinc-900'}`}>{unreconciledCount}</p>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-2xl border border-zinc-200/60 overflow-hidden">
+            {bankTxns.length === 0 ? (
+              <div className="py-14 text-center text-sm text-zinc-400">No statement lines yet — import a CSV or add lines manually.</div>
+            ) : (
+              <div className="divide-y divide-zinc-50">
+                {bankTxns.map(t => (
+                  <div key={t.id} className="px-5 py-3 flex items-center gap-3 flex-wrap">
+                    <span className={`h-7 w-7 rounded-lg flex items-center justify-center text-[10px] font-bold shrink-0 ${t.type === 'credit' ? 'bg-emerald-50 text-emerald-600' : 'bg-amber-50 text-amber-600'}`}>
+                      {t.type === 'credit' ? 'IN' : 'OUT'}
+                    </span>
+                    <div className="flex-1 min-w-[200px]">
+                      <p className="text-sm text-zinc-800">{t.description || '—'}</p>
+                      <p className="text-[11px] text-zinc-400">{fmtDate(t.date)}</p>
+                    </div>
+                    <p className="text-sm font-semibold text-zinc-900">{formatCurrency(t.amount, currency)}</p>
+                    {t.reconciled ? (
+                      <span className="text-[11px] font-semibold px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-700">reconciled</span>
+                    ) : canManage ? (
+                      <button onClick={() => setMatchingTxn(t)} className="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-indigo-50 text-indigo-700 hover:bg-indigo-100">Match</button>
+                    ) : (
+                      <span className="text-[11px] font-semibold px-2.5 py-1 rounded-full bg-amber-50 text-amber-700">open</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+        )
+      )}
+
+      {/* ── Loans ── */}
+      {tab === 'loans' && (
+        <div className="space-y-4">
+          <div className="flex items-center justify-between">
+            <p className="text-sm text-zinc-500">{loans.filter(l => l.status === 'active').length} active loan{loans.filter(l => l.status === 'active').length === 1 ? '' : 's'}</p>
+            {canManage && (
+              <button onClick={() => setShowAddLoan(true)} className="flex items-center gap-2 px-3.5 py-2 bg-indigo-600 text-white rounded-xl text-xs font-semibold hover:bg-indigo-700 transition-colors">
+                <Plus className="h-3.5 w-3.5" /> Record Loan
+              </button>
+            )}
+          </div>
+          {loans.length === 0 ? (
+            <div className="bg-white rounded-2xl border border-zinc-200/60 py-16 text-center">
+              <Banknote className="h-10 w-10 text-zinc-300 mx-auto mb-2" />
+              <p className="text-sm text-zinc-500">No borrowings recorded. A loan posts its disbursement and every EMI to the ledger, TDS included.</p>
+            </div>
+          ) : (
+            loans.map(loan => {
+              const outstanding = loan.schedule.filter(i => i.status === 'pending').reduce((s, i) => s + i.principal, 0);
+              const nextDue = loan.schedule.find(i => i.status === 'pending');
+              const isOpen = openLoanId === loan.id;
+              return (
+                <div key={loan.id} className="bg-white rounded-2xl border border-zinc-200/60 overflow-hidden">
+                  <button onClick={() => setOpenLoanId(isOpen ? null : loan.id)} className="w-full px-5 py-4 flex items-center gap-3 flex-wrap text-left hover:bg-zinc-50/40">
+                    <div className="flex-1 min-w-[220px]">
+                      <p className="text-sm font-semibold text-zinc-900">{loan.lenderName} <span className="text-[10px] font-medium text-zinc-400 uppercase">{LOAN_TYPES.find(t => t.id === loan.loanType)?.label}</span></p>
+                      <p className="text-[11px] text-zinc-500">
+                        {formatCurrency(loan.principal, currency)} at {loan.interestRatePct}% · {loan.tenureMonths} months
+                        {loan.projectId ? ` · ${projectName(loan.projectId)}` : ''}
+                        {nextDue ? ` · next EMI ${fmtDate(nextDue.dueDate)}` : ''}
+                      </p>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-sm font-bold text-zinc-900">{formatCurrency(outstanding, currency)}</p>
+                      <p className="text-[10px] text-zinc-400">principal outstanding</p>
+                    </div>
+                    <span className={`text-[11px] font-semibold px-2.5 py-1 rounded-full ${loan.status === 'active' ? 'bg-blue-50 text-blue-700' : 'bg-emerald-50 text-emerald-700'}`}>{loan.status}</span>
+                  </button>
+                  {isOpen && (
+                    <div className="border-t border-zinc-100 max-h-72 overflow-y-auto">
+                      <table className="w-full">
+                        <thead>
+                          <tr className="bg-zinc-50/30 border-b border-zinc-100">
+                            <th className="text-left px-4 py-2 text-[10px] font-semibold text-zinc-500 uppercase">#</th>
+                            <th className="text-left px-4 py-2 text-[10px] font-semibold text-zinc-500 uppercase">Due</th>
+                            <th className="text-right px-4 py-2 text-[10px] font-semibold text-zinc-500 uppercase">Principal</th>
+                            <th className="text-right px-4 py-2 text-[10px] font-semibold text-zinc-500 uppercase">Interest</th>
+                            <th className="text-right px-4 py-2 text-[10px] font-semibold text-zinc-500 uppercase">TDS</th>
+                            <th className="text-right px-4 py-2 text-[10px] font-semibold text-zinc-500 uppercase">Net EMI</th>
+                            <th className="px-4 py-2" />
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {loan.schedule.map(inst => (
+                            <tr key={inst.number} className="border-b border-zinc-50">
+                              <td className="px-4 py-2 text-xs text-zinc-500">{inst.number}</td>
+                              <td className="px-4 py-2 text-xs text-zinc-700">{fmtDate(inst.dueDate)}</td>
+                              <td className="px-4 py-2 text-xs text-zinc-700 text-right">{formatCurrencyFull(inst.principal, currency)}</td>
+                              <td className="px-4 py-2 text-xs text-zinc-700 text-right">{formatCurrencyFull(inst.interest, currency)}</td>
+                              <td className="px-4 py-2 text-xs text-zinc-700 text-right">{inst.tds ? formatCurrencyFull(inst.tds, currency) : '—'}</td>
+                              <td className="px-4 py-2 text-xs font-semibold text-zinc-900 text-right">{formatCurrencyFull(inst.principal + inst.interest - inst.tds, currency)}</td>
+                              <td className="px-4 py-2 text-right">
+                                {inst.status === 'paid' ? (
+                                  <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700">paid</span>
+                                ) : canPay ? (
+                                  <button onClick={() => payInstallment(loan, inst.number)} className="text-[10px] font-semibold px-2 py-1 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700">Pay</button>
+                                ) : (
+                                  <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-amber-50 text-amber-700">pending</span>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              );
+            })
+          )}
         </div>
       )}
 
@@ -806,6 +1229,170 @@ export default function Accounts() {
               <div className="flex gap-3 pt-3">
                 <button type="button" onClick={() => setShowAddRa(false)} className="flex-1 px-4 py-2.5 border border-zinc-200 rounded-xl text-sm font-medium text-zinc-600 hover:bg-zinc-50">Cancel</button>
                 <button type="submit" className="flex-1 px-4 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 shadow-sm">Submit for Sign-off</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {showAddBank && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => setShowAddBank(false)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold text-zinc-900">Add Bank Account</h3>
+              <button onClick={() => setShowAddBank(false)} className="p-1.5 rounded-lg hover:bg-zinc-100"><X className="h-4 w-4 text-zinc-500" /></button>
+            </div>
+            <form onSubmit={handleAddBank} className="space-y-3">
+              <div className="grid grid-cols-2 gap-3">
+                <div className="col-span-2">
+                  <label className={labelCls}>Account Name *</label>
+                  <input name="name" required placeholder="HDFC Current A/c" className={inputCls} />
+                </div>
+                <div>
+                  <label className={labelCls}>Bank</label>
+                  <input name="bankName" placeholder="HDFC Bank" className={inputCls} />
+                </div>
+                <div>
+                  <label className={labelCls}>Account No. (last digits)</label>
+                  <input name="accountNumber" placeholder="…4821" className={inputCls} />
+                </div>
+                <div className="col-span-2">
+                  <label className={labelCls}>Opening Balance ({currency})</label>
+                  <input name="openingBalance" type="number" step="any" placeholder="0" className={inputCls} />
+                </div>
+              </div>
+              <div className="flex gap-3 pt-3">
+                <button type="button" onClick={() => setShowAddBank(false)} className="flex-1 px-4 py-2.5 border border-zinc-200 rounded-xl text-sm font-medium text-zinc-600 hover:bg-zinc-50">Cancel</button>
+                <button type="submit" className="flex-1 px-4 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 shadow-sm">Add Account</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {showAddTxn && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => setShowAddTxn(false)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold text-zinc-900">Add Statement Line</h3>
+              <button onClick={() => setShowAddTxn(false)} className="p-1.5 rounded-lg hover:bg-zinc-100"><X className="h-4 w-4 text-zinc-500" /></button>
+            </div>
+            <form onSubmit={handleAddTxn} className="space-y-3">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>Type</label>
+                  <select name="type" className={inputCls}>
+                    <option value="debit">Debit (money out)</option>
+                    <option value="credit">Credit (money in)</option>
+                  </select>
+                </div>
+                <div>
+                  <label className={labelCls}>Amount *</label>
+                  <input name="amount" type="number" min="0" step="any" required className={inputCls} />
+                </div>
+                <div>
+                  <label className={labelCls}>Date</label>
+                  <input name="date" type="date" defaultValue={new Date().toISOString().slice(0, 10)} className={inputCls} />
+                </div>
+                <div>
+                  <label className={labelCls}>Description</label>
+                  <input name="description" placeholder="NEFT UTR…" className={inputCls} />
+                </div>
+              </div>
+              <div className="flex gap-3 pt-3">
+                <button type="button" onClick={() => setShowAddTxn(false)} className="flex-1 px-4 py-2.5 border border-zinc-200 rounded-xl text-sm font-medium text-zinc-600 hover:bg-zinc-50">Cancel</button>
+                <button type="submit" className="flex-1 px-4 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 shadow-sm">Add Line</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {matchingTxn && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => setMatchingTxn(null)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[85vh] overflow-y-auto p-6" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-1">
+              <h3 className="text-lg font-bold text-zinc-900">Match Statement Line</h3>
+              <button onClick={() => setMatchingTxn(null)} className="p-1.5 rounded-lg hover:bg-zinc-100"><X className="h-4 w-4 text-zinc-500" /></button>
+            </div>
+            <p className="text-[11px] text-zinc-500 mb-4">
+              {matchingTxn.type === 'credit' ? 'Money in' : 'Money out'} · {formatCurrencyFull(matchingTxn.amount, currency)} · {fmtDate(matchingTxn.date)} — pick the ledger entry this line settles.
+            </p>
+            {(() => {
+              const candidates = matchCandidates(matchingTxn);
+              if (candidates.length === 0) {
+                return <p className="text-sm text-zinc-400 bg-zinc-50 rounded-xl p-4">No unmatched ledger entry moves cash by exactly this amount. Post the missing entry in the Journal first, then match.</p>;
+              }
+              return (
+                <div className="space-y-2">
+                  {candidates.map(je => (
+                    <button
+                      key={je.id}
+                      onClick={() => confirmMatch(matchingTxn, je)}
+                      className="w-full text-left px-4 py-3 rounded-xl border border-zinc-200 hover:border-indigo-300 hover:bg-indigo-50/40 transition-colors"
+                    >
+                      <p className="text-sm font-medium text-zinc-900">{je.narration}</p>
+                      <p className="text-[11px] text-zinc-500">{SOURCE_LABELS[je.sourceType]} · {fmtDate(je.date)}{je.reference ? ` · ${je.reference}` : ''}</p>
+                    </button>
+                  ))}
+                </div>
+              );
+            })()}
+          </div>
+        </div>
+      )}
+
+      {showAddLoan && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => setShowAddLoan(false)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg p-6" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold text-zinc-900">Record Loan</h3>
+              <button onClick={() => setShowAddLoan(false)} className="p-1.5 rounded-lg hover:bg-zinc-100"><X className="h-4 w-4 text-zinc-500" /></button>
+            </div>
+            <form onSubmit={handleAddLoan} className="space-y-3">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>Lender *</label>
+                  <input name="lenderName" required placeholder="HDFC Bank" className={inputCls} />
+                </div>
+                <div>
+                  <label className={labelCls}>Type</label>
+                  <select name="loanType" className={inputCls}>
+                    {LOAN_TYPES.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className={labelCls}>Principal ({currency}) *</label>
+                  <input name="principal" type="number" min="1" step="any" required placeholder="10000000" className={inputCls} />
+                </div>
+                <div>
+                  <label className={labelCls}>Interest % p.a. *</label>
+                  <input name="rate" type="number" min="0" step="any" required placeholder="11.5" className={inputCls} />
+                </div>
+                <div>
+                  <label className={labelCls}>Tenure (months) *</label>
+                  <input name="tenure" type="number" min="1" required placeholder="24" className={inputCls} />
+                </div>
+                <div>
+                  <label className={labelCls}>TDS on Interest %</label>
+                  <input name="tdsPct" type="number" min="0" step="any" placeholder="10" className={inputCls} />
+                </div>
+                <div>
+                  <label className={labelCls}>Disbursed On</label>
+                  <input name="startDate" type="date" defaultValue={new Date().toISOString().slice(0, 10)} className={inputCls} />
+                </div>
+                <div>
+                  <label className={labelCls}>Project (Cost Center)</label>
+                  <select name="projectId" className={inputCls}>
+                    <option value="">Company-level</option>
+                    {projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                  </select>
+                </div>
+              </div>
+              <p className="text-[11px] text-zinc-400">The EMI schedule is generated on save; disbursement posts Dr Cash / Cr Loans Payable.</p>
+              <div className="flex gap-3 pt-2">
+                <button type="button" onClick={() => setShowAddLoan(false)} className="flex-1 px-4 py-2.5 border border-zinc-200 rounded-xl text-sm font-medium text-zinc-600 hover:bg-zinc-50">Cancel</button>
+                <button type="submit" className="flex-1 px-4 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 shadow-sm">Record Loan</button>
               </div>
             </form>
           </div>

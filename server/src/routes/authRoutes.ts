@@ -11,6 +11,51 @@ import { signToken, verifyPassword, hashPassword, requireAuth } from '../auth.js
  */
 const DUMMY_HASH_PROMISE = hashPassword(randomUUID());
 
+/**
+ * Per-account failed-login throttle. The route's per-IP cap (5/min) does not
+ * stop DISTRIBUTED credential stuffing — a botnet gets 5 tries per IP against
+ * one known admin email. This adds an account-level brake: after
+ * MAX_FAILS failed attempts for an email within WINDOW_MS, further attempts
+ * are refused until the window rolls off, independent of source IP.
+ *
+ * Tradeoff (accepted, standard): an attacker can briefly lock a victim out by
+ * burning failures against their email. The window is short and self-healing,
+ * a correct login clears the counter immediately, and the threshold is set
+ * well above normal fat-finger retries. In-memory + size-capped so a flood of
+ * distinct emails can't exhaust the heap; good enough for a single node, and
+ * the honest place for this state at scale is Redis.
+ */
+const WINDOW_MS = 15 * 60 * 1000;
+const MAX_FAILS = 15;
+const MAX_TRACKED = 20_000;
+const failByEmail = new Map<string, { count: number; first: number }>();
+
+function throttleState(email: string): { blocked: boolean } {
+  const rec = failByEmail.get(email);
+  if (!rec) return { blocked: false };
+  if (Date.now() - rec.first > WINDOW_MS) { failByEmail.delete(email); return { blocked: false }; }
+  return { blocked: rec.count >= MAX_FAILS };
+}
+
+function recordFail(email: string): void {
+  const now = Date.now();
+  const rec = failByEmail.get(email);
+  if (!rec || now - rec.first > WINDOW_MS) {
+    // Opportunistic prune before growing the map, so distinct-email floods
+    // can't grow it without bound.
+    if (failByEmail.size >= MAX_TRACKED) {
+      for (const [k, v] of failByEmail) if (now - v.first > WINDOW_MS) failByEmail.delete(k);
+    }
+    if (failByEmail.size < MAX_TRACKED) failByEmail.set(email, { count: 1, first: now });
+    return;
+  }
+  rec.count += 1;
+}
+
+function clearFails(email: string): void {
+  failByEmail.delete(email);
+}
+
 interface LoginBody {
   email?: string;
   password?: string;
@@ -43,6 +88,12 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     if (!email || !password) {
       return reply.code(400).send({ error: 'email and password are required' });
     }
+    const emailKey = email.toLowerCase();
+
+    // Account-level brake against distributed stuffing (see failByEmail above).
+    if (throttleState(emailKey).blocked) {
+      return reply.code(429).send({ error: 'Too many failed attempts for this account. Try again later.' });
+    }
 
     const { rows } = await platformPool.query(
       `SELECT u.id, u.tenant_id, u.name, u.email, u.password_hash, u.active,
@@ -60,8 +111,12 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     );
 
     // Constant-shape failure: same message for unknown email / bad password /
-    // suspended workspace, to avoid account enumeration.
-    const fail = () => reply.code(401).send({ error: 'Invalid email or password' });
+    // suspended workspace, to avoid account enumeration. Each failure also
+    // feeds the per-account throttle.
+    const fail = () => {
+      recordFail(emailKey);
+      return reply.code(401).send({ error: 'Invalid email or password' });
+    };
 
     const user = rows[0];
     // Always spend one argon2 verify — against the user's hash when we have one,
@@ -81,6 +136,9 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(403).send({ error: 'This workspace has been suspended. Contact support.' });
     }
 
+    // Genuine success clears the account's failed-attempt counter at once, so
+    // a real user who mistyped a few times is never left throttled.
+    clearFails(emailKey);
     await platformPool.query('UPDATE users SET last_login_at = now() WHERE id = $1', [user.id]);
 
     const token = signToken({ sub: user.id, tid: user.tenant_id, rol: user.role_name });

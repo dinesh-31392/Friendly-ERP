@@ -13,6 +13,7 @@ import { PLANS, getPlanForTenant, getEffectiveLimits, withinLimit, planPriceLabe
 import { portalUrl, portalPath, isPremium, slugify, isSlugAvailable } from '../services/portalService';
 import { getTenantSessions, revokeDeviceSession, currentSessionToken } from '../services/authService';
 import { getApprovalRules, setApprovalThreshold } from '../services/approvalService';
+import { downloadCsv } from '../utils/csv';
 import { getByTenant, update, create, remove, clearDatabase, logAudit } from '../services/db';
 import { useTenantUsers } from '../hooks/useTenantUsers';
 import type { User as UserType, Tenant, Role, AuditLog } from '../types';
@@ -1181,25 +1182,24 @@ export default function Settings() {
                 <p className="text-sm text-zinc-500 mt-0.5">Record of sensitive actions across your workspace ({auditLogs.length} entries).</p>
               </div>
               <div className="flex items-center gap-2">
-                <button 
+                <button
                   onClick={() => {
-                    const csv = [
+                    // downloadCsv → toCsv neutralises spreadsheet formula
+                    // injection. This export carries attacker-influenced text
+                    // (userName is chosen at self-serve signup; details embeds
+                    // lead/integration names), so a hand-rolled CSV that only
+                    // quoted cells — as this once did — would let a value like
+                    // =HYPERLINK(...) execute when an admin opens it in Excel.
+                    downloadCsv(`audit-log-${new Date().toISOString().split('T')[0]}.csv`, [
                       ['Timestamp', 'User', 'Action', 'Entity', 'Details'],
                       ...auditLogs.map(log => [
                         new Date(log.createdAt).toLocaleString('en-IN'),
                         log.userName,
                         log.action,
                         log.entity,
-                        log.details
-                      ])
-                    ].map(r => r.map(c => `"${String(c).replace(/"/g, '""')}"`).join(',')).join('\n');
-                    const blob = new Blob([csv], { type: 'text/csv' });
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = `audit-log-${new Date().toISOString().split('T')[0]}.csv`;
-                    a.click();
-                    URL.revokeObjectURL(url);
+                        log.details,
+                      ]),
+                    ]);
                     toast.success('Audit log exported');
                   }}
                   className="flex items-center gap-2 px-3 py-1.5 bg-white border border-zinc-200 text-zinc-700 rounded-lg text-xs font-semibold hover:bg-zinc-50"

@@ -411,7 +411,7 @@ export default function DashboardLayout() {
           {roleMenuOpen && (
             <div className={`absolute bottom-full mb-2 bg-white border border-zinc-200 rounded-xl shadow-xl p-1.5 min-w-[200px] z-50 ${sidebarCollapsed ? 'left-16' : 'left-3 right-3'}`}>
               {/* Role switching is a localStorage demo tool — hidden in API mode where identity comes from the JWT */}
-              {!localStorage.getItem('friendly_crm_api_url') && (<>
+              {isDemoMode() && (<>
               <p className="text-[11px] font-medium text-zinc-400 uppercase tracking-wider px-3 py-1.5">Try Role (Demo)</p>
               {roles.map(r => (
                 <button

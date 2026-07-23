@@ -12,9 +12,15 @@ export function whatsappHref(phone: string, text?: string): string {
 }
 
 export function mailtoHref(email: string, subject?: string, body?: string): string {
+  // The recipient is attacker-controllable (a lead's email arrives from the
+  // public microsite), so encode it — a raw value like
+  // `a@b.com?cc=attacker@x.com` would otherwise inject extra mailto headers.
+  // encodeURIComponent turns the `?` into %3F so it can't start a new query;
+  // `@`→%40 stays valid for mail clients.
+  const to = encodeURIComponent(email.trim());
   const params = new URLSearchParams();
   if (subject) params.set('subject', subject);
   if (body) params.set('body', body);
   const q = params.toString();
-  return `mailto:${email}${q ? `?${q}` : ''}`;
+  return `mailto:${to}${q ? `?${q}` : ''}`;
 }

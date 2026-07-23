@@ -23,6 +23,15 @@ const appPassword = process.env.APP_USER_PASSWORD
 const platformPassword = process.env.APP_PLATFORM_PASSWORD
   ?? (() => { throw new Error('APP_PLATFORM_PASSWORD is required'); })();
 
+// CREATE ROLE cannot be parameterized, so the two passwords are interpolated
+// into DDL below with '' doubling under standard_conforming_strings. That is
+// safe for ordinary text but a NUL byte or backslash can still confuse the
+// wire/parse layer — reject those outright so a hostile or fat-fingered
+// secret can never reach the DDL string. (Normal random secrets pass.)
+for (const [name, pw] of [['APP_USER_PASSWORD', appPassword], ['APP_PLATFORM_PASSWORD', platformPassword]] as const) {
+  if (/[\0\\]/.test(pw)) throw new Error(`${name} must not contain NUL or backslash characters`);
+}
+
 const client = new pg.Client({ connectionString: adminUrl });
 await client.connect();
 // CREATE ROLE cannot be parameterized; the '' doubling below is only safe

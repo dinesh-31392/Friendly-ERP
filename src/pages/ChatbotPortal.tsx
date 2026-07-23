@@ -25,7 +25,16 @@ export default function ChatbotPortal() {
 
   const portalUrl = useMemo(() => {
     const state = getIntegrationStates(tenantId)['chatbot_engine'];
-    return state?.connected ? (state.config.portalUrl || '') : '';
+    const raw = state?.connected ? (state.config.portalUrl || '') : '';
+    // Only ever render http(s). The portal URL is tenant-configurable, so a
+    // `javascript:` (or `data:`) value would otherwise execute in the CRM's
+    // own origin the moment the link is clicked or the iframe loads — a
+    // stored-XSS sink. Anything that isn't a valid http(s) URL is dropped.
+    if (!raw) return '';
+    try {
+      const u = new URL(raw);
+      return (u.protocol === 'https:' || u.protocol === 'http:') ? u.href : '';
+    } catch { return ''; }
   }, [tenantId]);
 
   return (

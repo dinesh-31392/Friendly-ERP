@@ -9,7 +9,7 @@ import { getAll, create, update, remove, removeByTenant, logAudit, getByTenant }
 import { PLANS, platformMrrUsd, tenantMrrUsd, CONTROLLABLE_MODULES } from '../services/planService';
 import { getBranches, getLegacyBranch, branchName, visibleTenantsForUser } from '../services/branchService';
 import { uniqueSlug } from '../services/portalService';
-import { setTemporaryPassword } from '../services/authService';
+import { setTemporaryPassword, generateToken } from '../services/authService';
 import type { TenantOverrides, Branch } from '../types';
 import type { Tenant, User as UserType, Lead, AuditLog, Role } from '../types';
 import toast from 'react-hot-toast';
@@ -260,8 +260,10 @@ export default function SuperAdmin() {
     const current = localStorage.getItem('friendly_crm_auth');
     if (current) localStorage.setItem('friendly_crm_auth_admin_backup', current);
     localStorage.setItem('friendly_crm_auth', JSON.stringify({
+      // Crypto-strong token, consistent with login/portal sessions — the old
+      // Math.random() value was predictable and low-entropy.
       userId: target.id, tenantId: t.id,
-      token: Math.random().toString(36).slice(2), expiresAt: Date.now() + 24 * 60 * 60 * 1000,
+      token: generateToken(), expiresAt: Date.now() + 24 * 60 * 60 * 1000,
     }));
     platformAudit('impersonate', t.id, `Accessed "${t.name}" workspace as ${target.name} (support mode)`);
     toast.success(`Opening ${t.name} as ${target.name}…`);

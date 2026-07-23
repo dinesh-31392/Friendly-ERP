@@ -75,6 +75,23 @@ async function roleInTenant(db: pg.PoolClient, roleId: string): Promise<boolean>
   return rows.length > 0;
 }
 
+/**
+ * May the caller ACT ON a user who currently holds this role?
+ *
+ * Same subset test as canAssignRole, applied to the TARGET's existing role.
+ * Without it, `manage_users` was a blanket override: a holder could reset the
+ * password of (and log in as, since the temp password is returned) or
+ * deactivate a MORE-privileged peer — e.g. a custom "office_manager" role with
+ * only manage_users could take over the tenant's builder_admin. Gating every
+ * mutation on "the target grants nothing you lack" closes that escalation
+ * without hardcoding a hierarchy. A user with no role row (should not happen)
+ * is treated as unmanageable — fail closed.
+ */
+async function canManageUserRole(db: pg.PoolClient, targetRoleId: string | null): Promise<boolean> {
+  if (!targetRoleId) return false;
+  return canAssignRole(db, targetRoleId);
+}
+
 function mapWriteError(err: unknown): { error: string } | null {
   switch ((err as { code?: string })?.code) {
     case '23505': return { error: 'A user with that email already exists in this workspace.' };
@@ -103,6 +120,14 @@ export async function usersRoutes(app: FastifyInstance): Promise<void> {
       if (!await isActiveUser(db)) {
         return reply.code(401).send({ error: 'Account is inactive' });
       }
+      // Contact PII (email + phone) is only for people who actually administer
+      // staff. The directory itself is ungated because every role needs to turn
+      // an assigned_to uuid into a NAME — but a telecaller has no business
+      // reading every colleague's email and phone. Callers without
+      // manage_users/manage_team get id/name/role/active only.
+      const { rows: [{ can_see_contacts }] } = await db.query(
+        `SELECT has_permission('manage_users') OR has_permission('manage_team') AS can_see_contacts`,
+      );
       // LEFT JOIN, not INNER: an inner join would silently drop any user whose
       // role row wasn't visible, and a missing user is precisely the
       // "Unassigned" bug this endpoint exists to fix.
@@ -114,7 +139,12 @@ export async function usersRoutes(app: FastifyInstance): Promise<void> {
            LEFT JOIN roles r ON r.id = u.role_id
           ORDER BY u.name`,
       );
-      return { users: rows.map(toApiUser) };
+      const users = rows.map(r => {
+        const u = toApiUser(r);
+        if (!can_see_contacts) { u.email = ''; u.phone = ''; }
+        return u;
+      });
+      return { users };
     }),
   );
 
@@ -255,12 +285,24 @@ export async function usersRoutes(app: FastifyInstance): Promise<void> {
 
           const targetId = req.params.id;
           const { rows: found } = await db.query(
-            'SELECT id, active FROM users WHERE id = $1', [targetId],
+            'SELECT id, active, role_id FROM users WHERE id = $1', [targetId],
           );
           if (found.length === 0) return reply.code(404).send({ error: 'User not found' });
 
           const isSelf = targetId === req.ctx.userId;
           const body = req.body;
+
+          // Privilege ceiling: you may only act on a peer whose CURRENT role
+          // grants nothing you lack. Otherwise manage_users would let a
+          // narrow custom role reset/deactivate a higher-privileged admin and
+          // seize the account (the temp password is returned in the response).
+          // Self is exempt — you can always manage your own name/phone/password
+          // (role and active on self are separately blocked below).
+          if (!isSelf && !await canManageUserRole(db, found[0].role_id)) {
+            return reply.code(403).send({
+              error: 'That user holds permissions you do not, so you cannot modify their account.',
+            });
+          }
 
           // Self-lockout guards. An admin who deactivates or demotes themselves
           // can lock the whole workspace out of user management with no way

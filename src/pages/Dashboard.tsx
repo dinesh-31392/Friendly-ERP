@@ -4,7 +4,7 @@ import {
   Users, TrendingUp, IndianRupee, Building2, CheckCircle, BarChart3,
   ArrowUpRight, ArrowDownRight, Clock, Phone, MessageCircle, Calendar,
   AlertTriangle, Eye, MoreHorizontal, HardHat, Flag, FileQuestion, Package,
-  ShoppingCart, CalendarClock, Landmark, ClipboardCheck, CalendarDays, ShieldCheck, Map as MapIcon,
+  ShoppingCart, CalendarClock, Landmark, ClipboardCheck, CalendarDays, ShieldCheck, Map as MapIcon, Handshake,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { getByTenant, update, logAudit } from '../services/db';
@@ -17,7 +17,7 @@ import { pendingLeaves } from '../services/hrService';
 import { filingsDueSoon, isFilingOverdue } from '../services/complianceService';
 import { loansDueSoon } from '../services/accountsService';
 import { formatCurrency } from '../utils/format';
-import type { Lead, Task, Unit, Activity, User as UserType, Project, SiteTask, Rfi, Inspection, PurchaseOrder, VendorBill, Invoice, RaBill, Quotation, Booking, LandLead } from '../types';
+import type { Lead, Task, Unit, Activity, User as UserType, Project, SiteTask, Rfi, Inspection, PurchaseOrder, VendorBill, Invoice, RaBill, Quotation, Booking, LandLead, BdLead } from '../types';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
 const iconMap: Record<string, React.ElementType> = {
@@ -149,6 +149,12 @@ export default function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [tenantId, refreshKey, tenant]
   );
+  const bdToHandOff = useMemo(
+    () => hasPermission('approve_bd_handoff') && moduleOn('bd')
+      ? getByTenant<BdLead>('bdLeads', tenantId).filter(d => d.stage === 'terms_negotiation') : [],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [tenantId, refreshKey, tenant]
+  );
   // Collections this month + overdue receivables — the CFO half of the KPI spec
   const invoices = useMemo(
     () => showFinance ? getByTenant<Invoice>('invoices', tenantId) : [],
@@ -178,6 +184,7 @@ export default function Dashboard() {
     ...(cancelRequests.length ? [{ icon: AlertTriangle, color: 'text-red-500', label: `${cancelRequests.length} booking cancellation request${cancelRequests.length === 1 ? '' : 's'} awaiting your decision`, link: '/bookings' }] : []),
     ...(landToQualify.length ? [{ icon: MapIcon, color: 'text-amber-500', label: `${landToQualify.length} land parcel${landToQualify.length === 1 ? '' : 's'} scored — awaiting your qualification`, link: '/land' }] : []),
     ...(landToConvert.length ? [{ icon: Building2, color: 'text-amber-500', label: `${landToConvert.length} qualified parcel${landToConvert.length === 1 ? '' : 's'} ready to convert to a project`, link: '/land' }] : []),
+    ...(bdToHandOff.length ? [{ icon: Handshake, color: 'text-amber-500', label: `${bdToHandOff.length} BD deal${bdToHandOff.length === 1 ? '' : 's'} in negotiation — ready to hand off to Land`, link: '/bd' }] : []),
     ...(dueFilings.length ? [{
       icon: ShieldCheck,
       color: dueFilings.some(isFilingOverdue) ? 'text-red-500' : 'text-amber-500',

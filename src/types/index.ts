@@ -1149,6 +1149,75 @@ export function explainLandFeasibility(input: {
   return { score, cappedByRisk, factors, verdict };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ERP: Business Development (deal sourcing → hand-off into Land Acquisition).
+// Distinct from Land's technical feasibility — this is the opportunity/JV
+// pipeline that PRECEDES it. A hand-off cross-links a BD deal to a land parcel.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type BdOpportunityType = 'land_acquisition' | 'jv' | 'redevelopment_society';
+export type BdSource = 'broker' | 'direct_approach' | 'referral' | 'rfp';
+export type BdStage =
+  | 'identified' | 'initial_discussion' | 'terms_negotiation'
+  | 'handed_to_land' | 'closed_lost';
+export type JvStructure = 'revenue_share' | 'area_share' | 'outright_purchase';
+
+export interface BdLead {
+  id: string;
+  tenantId: string;
+  opportunityType: BdOpportunityType;
+  source: BdSource;
+  counterpartyName: string;
+  counterpartyContact: string;
+  city: string;
+  stage: BdStage;
+  estimatedDealValue: number;
+  closedLostReason?: string;
+  ownedBy?: string;             // bd_manager userId
+  // ── JV terms (1:1, inline; only meaningful for opportunityType 'jv') ──
+  jvStructure?: JvStructure;
+  revenueSharePercent?: number;
+  areaSharePercent?: number;
+  jvNotes?: string;
+  // ── Linkage ──
+  landLeadId?: string;          // set on hand-off — the created Land parcel
+  createdBy?: string;
+  createdAt: string;
+}
+
+/** A saved market-analysis snapshot, queryable by area over time so a BD
+ *  manager can see how their own pricing benchmarks evolved before an offer. */
+export interface MarketReport {
+  id: string;
+  tenantId: string;
+  areaName: string;
+  reportType: 'pricing_benchmark' | 'competitor_launch' | 'demand_supply';
+  findings: string;
+  dataSources?: string;
+  createdBy: string;
+  createdAt: string;
+}
+
+export const BD_STAGES: { id: BdStage; label: string; color: string }[] = [
+  { id: 'identified', label: 'Identified', color: 'bg-zinc-400' },
+  { id: 'initial_discussion', label: 'Initial Discussion', color: 'bg-blue-500' },
+  { id: 'terms_negotiation', label: 'Terms Negotiation', color: 'bg-amber-500' },
+  { id: 'handed_to_land', label: 'Handed to Land', color: 'bg-emerald-500' },
+  { id: 'closed_lost', label: 'Closed Lost', color: 'bg-red-400' },
+];
+
+export const BD_OPPORTUNITY_TYPES: { id: BdOpportunityType; label: string }[] = [
+  { id: 'land_acquisition', label: 'Land Acquisition' },
+  { id: 'jv', label: 'Joint Venture' },
+  { id: 'redevelopment_society', label: 'Redevelopment / Society' },
+];
+
+export const MARKET_REPORT_TYPES: { id: MarketReport['reportType']; label: string }[] = [
+  { id: 'pricing_benchmark', label: 'Pricing Benchmark' },
+  { id: 'competitor_launch', label: 'Competitor Launch' },
+  { id: 'demand_supply', label: 'Demand / Supply' },
+];
+
 export const DEPARTMENTS = ['Engineering', 'Sales', 'Accounts', 'Procurement', 'Admin & HR', 'Labour', 'Other'];
 
 export const LEAVE_TYPES: { id: LeaveType; label: string }[] = [

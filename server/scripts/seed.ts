@@ -51,6 +51,8 @@ const PERMISSIONS = [
   'create_quotations', 'approve_discounts', 'manage_approval_rules',
   // ERP: land acquisition (maker manage_land; checkers qualify then convert)
   'view_land', 'manage_land', 'approve_land_qualify', 'approve_land_convert',
+  // ERP: business development (sourcing + hand-off-to-land approval)
+  'view_bd', 'manage_bd', 'approve_bd_handoff',
 ];
 
 /**
@@ -102,11 +104,12 @@ export const ROLE_PERMS: Record<string, string[]> = {
   ],
   land_manager: [
     'view_dashboard', 'view_projects', 'view_documents',
-    'view_land', 'manage_land',
+    'view_land', 'manage_land', 'view_bd',
     'view_calendar', 'view_messages', 'send_messages',
   ],
   bd_manager: [
     'view_dashboard', 'view_projects', 'view_reports',
+    'view_bd', 'manage_bd',
     'view_land', 'approve_land_qualify',
     'view_documents', 'view_calendar', 'view_messages', 'send_messages',
   ],

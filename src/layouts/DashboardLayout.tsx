@@ -19,6 +19,7 @@ import type { Lead, Task, Ticket, Conversation, SiteTask, PurchaseOrder, Vendor,
 
 const navItems = [
   { to: '/', icon: LayoutDashboard, label: 'Dashboard', permission: 'view_dashboard' },
+  { to: '/bd', icon: Handshake, label: 'Business Dev', permission: 'view_bd' },
   { to: '/land', icon: Map, label: 'Land Acquisition', permission: 'view_land' },
   { to: '/leads', icon: Users, label: 'Leads', permission: 'view_leads' },
   { to: '/projects', icon: Building2, label: 'Projects', permission: 'view_projects' },

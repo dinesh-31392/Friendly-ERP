@@ -426,6 +426,8 @@ export function hasPermission(user: User, action: string): boolean {
       'create_quotations', 'approve_discounts', 'manage_approval_rules',
       // Land acquisition: admin holds every gate (maker + both checkers)
       'view_land', 'manage_land', 'approve_land_qualify', 'approve_land_convert',
+      // Business development: sourcing + the hand-off-to-land approval
+      'view_bd', 'manage_bd', 'approve_bd_handoff',
     ],
     sales_manager: [
       'view_dashboard', 'view_leads', 'manage_leads', 'assign_leads', 'add_notes', 'manage_team',
@@ -482,12 +484,16 @@ export function hasPermission(user: User, action: string): boolean {
     land_manager: [
       'view_dashboard', 'view_projects', 'view_documents',
       'view_land', 'manage_land',
+      // Read context on the deal that produced a parcel — no BD write access
+      'view_bd',
       'view_calendar', 'view_messages', 'send_messages',
     ],
-    // Business development — the CHECKER: qualifies parcels into the pipeline
-    // and verifies land documents; conversion to a project stays admin-only.
+    // Business development — the MAKER: sources & works deals to terms, but the
+    // hand-off to Land (where commitment begins) is an admin gate. Also the
+    // CHECKER who qualifies land parcels once feasibility is run.
     bd_manager: [
       'view_dashboard', 'view_projects', 'view_reports',
+      'view_bd', 'manage_bd',
       'view_land', 'approve_land_qualify',
       'view_documents', 'view_calendar', 'view_messages', 'send_messages',
     ],

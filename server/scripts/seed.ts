@@ -49,6 +49,8 @@ const PERMISSIONS = [
   // ERP: ledger, RA billing, quotations, configurable approvals
   'view_accounts', 'manage_accounts', 'approve_vendor_bills', 'signoff_ra_bills',
   'create_quotations', 'approve_discounts', 'manage_approval_rules',
+  // ERP: land acquisition (maker manage_land; checkers qualify then convert)
+  'view_land', 'manage_land', 'approve_land_qualify', 'approve_land_convert',
 ];
 
 /**
@@ -97,6 +99,16 @@ export const ROLE_PERMS: Record<string, string[]> = {
     'view_reports', 'view_messages', 'view_documents', 'view_finance',
     'view_service', 'view_brokers', 'view_execution', 'view_procurement',
     'view_hr', 'view_accounts', 'view_audit_log',
+  ],
+  land_manager: [
+    'view_dashboard', 'view_projects', 'view_documents',
+    'view_land', 'manage_land',
+    'view_calendar', 'view_messages', 'send_messages',
+  ],
+  bd_manager: [
+    'view_dashboard', 'view_projects', 'view_reports',
+    'view_land', 'approve_land_qualify',
+    'view_documents', 'view_calendar', 'view_messages', 'send_messages',
   ],
 };
 

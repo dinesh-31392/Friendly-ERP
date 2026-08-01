@@ -1590,6 +1590,8 @@ export default function Settings() {
                     <option value="site_engineer">Site Engineer</option>
                     <option value="accountant">Accountant</option>
                     <option value="auditor">Auditor (read-only)</option>
+                    <option value="land_manager">Land Manager</option>
+                    <option value="bd_manager">BD Manager</option>
                     <option value="builder_admin">Builder Admin</option>
                   </select>
                   {tenantProjectsList.length > 0 && (

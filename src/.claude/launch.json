@@ -9,6 +9,12 @@
       "autoPort": true
     },
     {
+      "name": "origincorp-revamp",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["C:/Users/Admin/Desktop/soft/origincorp-revamp/server.js"],
+      "port": 4180
+    },
+    {
       "name": "leadrat-crm",
       "runtimeExecutable": "npm",
       "runtimeArgs": ["--prefix", "C:/Users/Admin/Desktop/friendly-crm", "run", "dev"],

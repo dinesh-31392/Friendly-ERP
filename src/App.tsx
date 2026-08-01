@@ -11,6 +11,7 @@ import Execution from './pages/Execution';
 import Procurement from './pages/Procurement';
 import HR from './pages/HR';
 import Accounts from './pages/Accounts';
+import Land from './pages/Land';
 import SalesPerformance from './pages/SalesPerformance';
 import AIStudio from './pages/AIStudio';
 import Campaigns from './pages/Campaigns';
@@ -111,6 +112,7 @@ function AppRoutes() {
         <Route path="/procurement" element={<PermissionGuard permission="view_procurement" module="procurement"><Procurement /></PermissionGuard>} />
         <Route path="/hr" element={<PermissionGuard permission="view_hr" module="hr"><HR /></PermissionGuard>} />
         <Route path="/accounts" element={<PermissionGuard permission="view_accounts" module="accounts"><Accounts /></PermissionGuard>} />
+        <Route path="/land" element={<PermissionGuard permission="view_land" module="land"><Land /></PermissionGuard>} />
         <Route path="/sales-performance" element={<PermissionGuard permission="view_sales_performance" module="sales-performance"><SalesPerformance /></PermissionGuard>} />
         <Route path="/ai-studio" element={<PermissionGuard permission="use_ai_studio" module="ai-studio"><AIStudio /></PermissionGuard>} />
         <Route path="/campaigns" element={<PermissionGuard permission="view_campaigns" module="campaigns"><Campaigns /></PermissionGuard>} />

@@ -20,7 +20,9 @@ type TableName = 'tenants' | 'users' | 'projects' | 'towers' | 'units' | 'leads'
   'accounts' | 'journalEntries' | 'raBills' | 'paymentsMade' |
   'quotations' | 'approvalRules' |
   // ERP: banking & reconciliation, loans
-  'bankAccounts' | 'bankTransactions' | 'loans';
+  'bankAccounts' | 'bankTransactions' | 'loans' |
+  // ERP: land acquisition (deal → feasibility → convert-to-project)
+  'landLeads' | 'feasibilityRecords' | 'landDocuments';
 
 function readTable<T>(table: TableName): T[] {
   try {

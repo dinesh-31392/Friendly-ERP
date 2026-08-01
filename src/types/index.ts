@@ -13,10 +13,14 @@ export type UnitStatus = 'available' | 'reserved' | 'blocked' | 'booked' | 'sold
 // cannot quote or book — hands qualified leads to a sales executive.
 // 'accountant' = finance staff: journals, bills, payments — no final approval.
 // 'auditor' = read-only across every module plus the audit log.
+// 'land_manager' = sources & works land deals up to feasibility; cannot
+// qualify their own lead (maker). 'bd_manager' = business development, the
+// checker who qualifies a land lead into the pipeline.
 export type Role =
   | 'super_admin' | 'tech_team'
   | 'builder_admin' | 'sales_manager' | 'sales_executive' | 'site_engineer'
-  | 'telecaller' | 'accountant' | 'auditor';
+  | 'telecaller' | 'accountant' | 'auditor'
+  | 'land_manager' | 'bd_manager';
 
 export type ApprovalStatus = 'pending' | 'approved' | 'rejected';
 
@@ -983,6 +987,167 @@ export const PAYMENT_MODES: { id: PaymentMode; label: string }[] = [
 ];
 
 export const LOST_REASONS = ['Price', 'Location', 'Competitor', 'Timeline', 'Financing', 'Other'];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ERP: Land Management (deal sourcing → feasibility → convert-to-project).
+// The front of the acquisition funnel, ahead of the sales pipeline.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type LandLeadStatus =
+  | 'lead_reference' | 'property_details' | 'feasibility_working'
+  | 'qualified' | 'converted_to_project' | 'rejected';
+export type LandReferenceSource = 'broker' | 'direct' | 'auction' | 'government';
+export type OwnershipType = 'freehold' | 'leasehold' | 'government_allotted';
+export type LitigationStatus = 'none' | 'pending' | 'resolved';
+export type LandDocType = 'title_deed' | '7_12_extract' | 'survey_map' | 'noc' | 'encumbrance_certificate';
+export type DocVerificationStatus = 'pending' | 'verified' | 'rejected';
+
+/** A land parcel under evaluation. Property details are 1:1 so they ride
+ *  inline; feasibility history and documents are separate collections. */
+export interface LandLead {
+  id: string;
+  tenantId: string;
+  referenceSource: LandReferenceSource;
+  ownerName: string;
+  ownerContact: string;
+  location: string;
+  city: string;
+  state: string;
+  pincode: string;
+  surveyNumber: string;
+  areaAcres: number;
+  askingPrice: number;
+  status: LandLeadStatus;
+  rejectionReason?: string;
+  assignedTo?: string;          // land manager userId
+  // ── Property details (1:1) ──
+  ownershipType?: OwnershipType;
+  zoning?: string;              // 'Residential R1', 'Commercial', 'Mixed'
+  fsiPermissible?: number;
+  fsiConsumed?: number;
+  roadWidthFt?: number;
+  isEncumbered: boolean;
+  encumbranceNotes?: string;
+  litigationStatus: LitigationStatus;
+  // ── Provenance / linkage ──
+  duplicateOf?: string;         // flagged possible duplicate (same survey no.)
+  projectId?: string;           // set once converted
+  latestScore?: number;         // cached from the most recent feasibility run
+  createdBy?: string;
+  createdAt: string;
+}
+
+/** One feasibility computation. Kept as history — a parcel is re-scored as
+ *  numbers firm up, and prior runs must remain auditable. */
+export interface FeasibilityRecord {
+  id: string;
+  tenantId: string;
+  landLeadId: string;
+  costPerSqft: number;
+  saleableArea: number;
+  estimatedRevenue: number;
+  marginPercent: number;
+  score: number;                // 0–100
+  cappedByRisk: boolean;        // true when litigation/encumbrance capped it
+  computedBy: string;
+  computedAt: string;
+}
+
+/** Title deeds and survey docs are versioned, never overwritten — full
+ *  history is retained for dispute resolution years later. */
+export interface LandDocument {
+  id: string;
+  tenantId: string;
+  landLeadId: string;
+  docType: LandDocType;
+  version: number;
+  fileName: string;
+  verificationStatus: DocVerificationStatus;
+  verifiedBy?: string;
+  verifiedAt?: string;
+  uploadedBy: string;
+  createdAt: string;
+}
+
+export const LAND_STATUSES: { id: LandLeadStatus; label: string; color: string }[] = [
+  { id: 'lead_reference', label: 'Lead Reference', color: 'bg-zinc-400' },
+  { id: 'property_details', label: 'Property Details', color: 'bg-blue-500' },
+  { id: 'feasibility_working', label: 'Feasibility', color: 'bg-amber-500' },
+  { id: 'qualified', label: 'Qualified', color: 'bg-indigo-500' },
+  { id: 'converted_to_project', label: 'Converted', color: 'bg-emerald-500' },
+  { id: 'rejected', label: 'Rejected', color: 'bg-red-400' },
+];
+
+export const LAND_DOC_TYPES: { id: LandDocType; label: string }[] = [
+  { id: 'title_deed', label: 'Title Deed' },
+  { id: '7_12_extract', label: '7/12 Extract' },
+  { id: 'survey_map', label: 'Survey Map' },
+  { id: 'noc', label: 'NOC' },
+  { id: 'encumbrance_certificate', label: 'Encumbrance Certificate' },
+];
+
+export interface FeasibilityFactor { label: string; points: number; detail: string }
+
+/**
+ * Explainable land-feasibility score (0–100). Same responsible-AI principle as
+ * the lead scorer: a number that decides whether the company commits capital to
+ * a parcel must be transparent and auditable, never a black box.
+ *
+ * Weights (documented so the model is defensible if questioned):
+ *   • FSI utilisation headroom   — 25 pts. Unused FSI (permissible − consumed)
+ *     is buildable upside; a parcel with FSI already fully consumed scores 0
+ *     here, a virgin parcel scores full.
+ *   • Estimated margin           — 35 pts. The single biggest driver; 30%+
+ *     margin earns the full weight, scaled down linearly below that.
+ *   • Road-width adequacy        — 15 pts. Below a 30 ft access threshold is a
+ *     real constructability/approval penalty.
+ *   • Ownership clarity          — 10 pts. Freehold clean; leasehold/govt
+ *     allotted carry residual risk.
+ *   • Legal cleanliness          — 15 pts. No encumbrance/litigation = full.
+ *
+ * HARD CAP: any *unresolved* litigation (status = 'pending') caps the total at
+ * 20 regardless of everything else — a fat margin must never mask a live legal
+ * risk. An encumbrance without litigation applies a −20 penalty instead.
+ */
+export function explainLandFeasibility(input: {
+  fsiPermissible?: number; fsiConsumed?: number; marginPercent: number;
+  roadWidthFt?: number; ownershipType?: OwnershipType;
+  isEncumbered: boolean; litigationStatus: LitigationStatus;
+}): { score: number; cappedByRisk: boolean; factors: FeasibilityFactor[]; verdict: string } {
+  const factors: FeasibilityFactor[] = [];
+
+  const perm = input.fsiPermissible ?? 0;
+  const cons = input.fsiConsumed ?? 0;
+  const headroom = perm > 0 ? Math.max(0, Math.min(1, (perm - cons) / perm)) : 0;
+  const fsiPts = Math.round(headroom * 25);
+  factors.push({ label: 'FSI headroom', points: fsiPts, detail: perm > 0 ? `${Math.round(headroom * 100)}% of permissible FSI still buildable` : 'FSI not captured yet' });
+
+  const marginPts = Math.round(Math.max(0, Math.min(1, input.marginPercent / 30)) * 35);
+  factors.push({ label: 'Estimated margin', points: marginPts, detail: `${input.marginPercent.toFixed(1)}% projected margin` });
+
+  const road = input.roadWidthFt ?? 0;
+  const roadPts = road >= 40 ? 15 : road >= 30 ? 10 : road > 0 ? 4 : 0;
+  factors.push({ label: 'Access / road width', points: roadPts, detail: road > 0 ? `${road} ft frontage${road < 30 ? ' — below the 30 ft threshold' : ''}` : 'road width not captured' });
+
+  const ownPts = input.ownershipType === 'freehold' ? 10 : input.ownershipType ? 5 : 0;
+  factors.push({ label: 'Ownership clarity', points: ownPts, detail: input.ownershipType ? input.ownershipType.replace('_', ' ') : 'ownership not captured' });
+
+  const legalClean = !input.isEncumbered && input.litigationStatus === 'none';
+  const legalPts = legalClean ? 15 : input.litigationStatus === 'resolved' ? 8 : 0;
+  factors.push({ label: 'Legal cleanliness', points: legalPts, detail: legalClean ? 'no encumbrance or litigation' : input.litigationStatus === 'pending' ? 'LIVE litigation' : input.isEncumbered ? 'encumbered' : 'litigation resolved' });
+
+  let score = factors.reduce((s, f) => s + f.points, 0);
+  let cappedByRisk = false;
+  if (input.litigationStatus === 'pending') { score = Math.min(score, 20); cappedByRisk = true; }
+  else if (input.isEncumbered) { score = Math.max(0, score - 20); cappedByRisk = true; }
+  score = Math.max(0, Math.min(100, score));
+
+  let verdict = 'Weak parcel — margin, access or FSI headroom too thin.';
+  if (cappedByRisk && input.litigationStatus === 'pending') verdict = 'Blocked on legal — resolve the live litigation before qualifying.';
+  else if (score >= 70) verdict = 'Strong parcel — clear to qualify for the acquisition pipeline.';
+  else if (score >= 45) verdict = 'Workable — qualify only if the margin assumptions hold.';
+  return { score, cappedByRisk, factors, verdict };
+}
 
 export const DEPARTMENTS = ['Engineering', 'Sales', 'Accounts', 'Procurement', 'Admin & HR', 'Labour', 'Other'];
 

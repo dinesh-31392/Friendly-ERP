@@ -4,7 +4,7 @@ import {
   Settings, Calendar, ChevronDown, Bell, Search, Megaphone,
   MessageSquare, FileText, CreditCard, Wrench, Shield, LogOut,
   X, AlertCircle, CheckCircle2, Clock, Menu, BookOpenCheck, Handshake, Globe, ShieldAlert,
-  HardHat, Truck, Package, UserCheck, Scale,
+  HardHat, Truck, Package, UserCheck, Scale, Map,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useState, useEffect, useMemo, useRef } from 'react';
@@ -19,6 +19,7 @@ import type { Lead, Task, Ticket, Conversation, SiteTask, PurchaseOrder, Vendor,
 
 const navItems = [
   { to: '/', icon: LayoutDashboard, label: 'Dashboard', permission: 'view_dashboard' },
+  { to: '/land', icon: Map, label: 'Land Acquisition', permission: 'view_land' },
   { to: '/leads', icon: Users, label: 'Leads', permission: 'view_leads' },
   { to: '/projects', icon: Building2, label: 'Projects', permission: 'view_projects' },
   { to: '/execution', icon: HardHat, label: 'Site Execution', permission: 'view_execution' },
@@ -60,6 +61,8 @@ const roles = [
   { role: 'telecaller' as const, label: 'Telecaller' },
   { role: 'accountant' as const, label: 'Accountant' },
   { role: 'auditor' as const, label: 'Auditor' },
+  { role: 'land_manager' as const, label: 'Land Manager' },
+  { role: 'bd_manager' as const, label: 'BD Manager' },
 ];
 
 export default function DashboardLayout() {

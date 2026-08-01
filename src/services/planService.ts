@@ -73,6 +73,7 @@ export function tenantMrrUsd(t: Tenant): number {
 /** Modules the super admin can enable/disable per tenant. Keys match route
  *  path segments; Dashboard and Settings are always on. */
 export const CONTROLLABLE_MODULES: { key: string; label: string }[] = [
+  { key: 'land', label: 'Land Acquisition' },
   { key: 'leads', label: 'Leads' },
   { key: 'projects', label: 'Projects' },
   { key: 'execution', label: 'Site Execution' },

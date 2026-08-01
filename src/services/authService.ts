@@ -424,6 +424,8 @@ export function hasPermission(user: User, action: string): boolean {
       'view_hr', 'manage_hr', 'manage_attendance',
       'view_accounts', 'manage_accounts', 'approve_vendor_bills', 'signoff_ra_bills',
       'create_quotations', 'approve_discounts', 'manage_approval_rules',
+      // Land acquisition: admin holds every gate (maker + both checkers)
+      'view_land', 'manage_land', 'approve_land_qualify', 'approve_land_convert',
     ],
     sales_manager: [
       'view_dashboard', 'view_leads', 'manage_leads', 'assign_leads', 'add_notes', 'manage_team',
@@ -474,6 +476,20 @@ export function hasPermission(user: User, action: string): boolean {
       'view_documents', 'view_calendar', 'view_messages', 'send_messages',
       // First stage of RA-bill approval: verifies claimed progress on site
       'signoff_ra_bills',
+    ],
+    // Land sourcing — the MAKER: logs parcels, runs feasibility, uploads docs.
+    // Cannot qualify their own parcel (no approve_land_qualify) — must hand off.
+    land_manager: [
+      'view_dashboard', 'view_projects', 'view_documents',
+      'view_land', 'manage_land',
+      'view_calendar', 'view_messages', 'send_messages',
+    ],
+    // Business development — the CHECKER: qualifies parcels into the pipeline
+    // and verifies land documents; conversion to a project stays admin-only.
+    bd_manager: [
+      'view_dashboard', 'view_projects', 'view_reports',
+      'view_land', 'approve_land_qualify',
+      'view_documents', 'view_calendar', 'view_messages', 'send_messages',
     ],
   };
   const perms = permissions[user.role];

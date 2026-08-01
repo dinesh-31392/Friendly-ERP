@@ -1,9 +1,11 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { Building2, Mail, Lock, User, Phone, ArrowRight, Eye, EyeOff, Shield, Globe, Home, KeyRound, CheckCircle2, X, Clock, AlertCircle, Hash } from 'lucide-react';
+import { Building2, Mail, Lock, User, Phone, ArrowRight, Eye, EyeOff, Shield, Globe, Home, KeyRound, CheckCircle2, X, Clock, AlertCircle, Hash, Sparkles, Copy } from 'lucide-react';
 import { COUNTRIES } from '../utils/format';
 import { getRecentAccounts, forgetRecentAccount, type RecentAccount } from '../services/authService';
+import { isDemoMode } from '../services/apiClient';
+import { seedDemoWorkspace, DEMO_PASSWORD, DEMO_ACCOUNTS, DEMO_WORKSPACE_CODE } from '../services/demoSeed';
 import InstallAppButton from '../components/InstallAppButton';
 import toast from 'react-hot-toast';
 
@@ -28,6 +30,32 @@ export default function Login() {
   // Login fields
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  // Demo workspace (demo/localStorage mode only)
+  const [demoLoading, setDemoLoading] = useState(false);
+  const [showDemoAccounts, setShowDemoAccounts] = useState(false);
+
+  const handleLoadDemo = async () => {
+    setDemoLoading(true);
+    try {
+      const { builderAdmin } = seedDemoWorkspace();
+      const result = await login(builderAdmin.email, DEMO_PASSWORD);
+      if (!result.success) { toast.error(result.error || 'Could not open the demo'); return; }
+      toast.success('Demo workspace loaded — signed in as Builder Admin');
+    } finally {
+      setDemoLoading(false);
+    }
+  };
+
+  const useDemoAccount = (accEmail: string) => {
+    seedDemoWorkspace();               // ensure the workspace exists
+    setTab(DEMO_ACCOUNTS.find(a => a.email === accEmail)?.tab || 'builder');
+    setIsRegistering(false);
+    setEmail(accEmail);
+    setPassword(DEMO_PASSWORD);
+    if (DEMO_ACCOUNTS.find(a => a.email === accEmail)?.tab === 'builder') setWorkspaceCode(DEMO_WORKSPACE_CODE);
+    setShowDemoAccounts(false);
+    toast('Credentials filled — press Sign In', { icon: '✨' });
+  };
   // Optional workspace code (tenant slug) — spec §4 company-code entry
   const [workspaceCode, setWorkspaceCode] = useState('');
 
@@ -586,6 +614,49 @@ export default function Login() {
             </>
             )}
           </div>
+
+          {/* Demo workspace — DEMO MODE ONLY. Provisions a fully-populated
+              tenant + a login per role. Never shown in API (server-backed)
+              mode, so it can't act as a credential backdoor on a real deploy. */}
+          {isDemoMode() && (
+            <div className="mt-5 rounded-2xl border border-indigo-100 bg-indigo-50/50 p-4">
+              <div className="flex items-start gap-2.5">
+                <div className="h-9 w-9 rounded-xl bg-indigo-100 flex items-center justify-center shrink-0">
+                  <Sparkles className="h-4 w-4 text-indigo-600" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-semibold text-zinc-900">Explore with demo data</p>
+                  <p className="text-[11px] text-zinc-500 mt-0.5">One click loads a fully-populated builder workspace — projects, leads, bookings, finance, land, HR and more.</p>
+                </div>
+              </div>
+              <button
+                onClick={handleLoadDemo}
+                disabled={demoLoading}
+                className="w-full mt-3 flex items-center justify-center gap-2 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 transition-colors shadow-sm disabled:opacity-50"
+              >
+                {demoLoading ? <span className="h-5 w-5 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : <>Launch Demo Workspace <ArrowRight className="h-4 w-4" /></>}
+              </button>
+              <button onClick={() => { seedDemoWorkspace(); setShowDemoAccounts(v => !v); }} className="w-full mt-2 text-[11px] font-medium text-indigo-600 hover:text-indigo-700">
+                {showDemoAccounts ? 'Hide role logins' : 'Or sign in as a specific role →'}
+              </button>
+              {showDemoAccounts && (
+                <div className="mt-2 space-y-1">
+                  <p className="text-[10px] text-zinc-400">All passwords <code className="font-mono text-zinc-500">{DEMO_PASSWORD}</code> · workspace code <code className="font-mono text-zinc-500">{DEMO_WORKSPACE_CODE}</code></p>
+                  {DEMO_ACCOUNTS.map(a => (
+                    <button
+                      key={a.email}
+                      onClick={() => useDemoAccount(a.email)}
+                      className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-white border border-zinc-200 hover:border-indigo-300 hover:bg-indigo-50/40 transition-colors text-left"
+                    >
+                      <span className="text-[11px] font-semibold text-zinc-800 w-28 shrink-0">{a.label}</span>
+                      <span className="text-[11px] text-zinc-500 truncate flex-1">{a.email}</span>
+                      <Copy className="h-3 w-3 text-zinc-300" />
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Always offered here: the login page is where people discover the
               app is installable at all, so it must not hide itself in browsers

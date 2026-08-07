@@ -1,10 +1,13 @@
-import { getByTenant, create, update, logAudit } from './db';
+import { getByTenant, create, update, removeByTenant, logAudit } from './db';
 import type {
   Account, AccountType, JournalEntry, JournalLine, JournalSource,
   VendorBill, RaBill, PaymentMade, Loan, LoanInstallment, PaymentPlan, Invoice,
 } from '../types';
 import { BUDGET_CATEGORIES } from '../types';
 import { v4 as uuid } from 'uuid';
+import {
+  isApiEnabled, apiGetAccounts, apiCreateAccount, apiGetJournalEntries, apiPostJournalEntry,
+} from './apiClient';
 
 /**
  * Double-entry ledger. Every business event that moves money posts a balanced
@@ -23,6 +26,8 @@ export const COA = {
   RETENTION: '2100',
   STATUTORY: '2200',
   LOANS: '2300',
+  CUSTOMER_ADVANCES: '2400',   // buyer money received before possession (deferred revenue)
+  GST_OUTPUT: '2500',          // output GST collected — a statutory liability
   EQUITY: '3000',
   SALES: '4000',
   OTHER_INCOME: '4100',
@@ -35,6 +40,8 @@ const SEED_ACCOUNTS: { code: string; name: string; type: AccountType }[] = [
   { code: COA.AP, name: 'Accounts Payable', type: 'liability' },
   { code: COA.RETENTION, name: 'Retention Payable', type: 'liability' },
   { code: COA.STATUTORY, name: 'Statutory Deductions Payable', type: 'liability' },
+  { code: COA.CUSTOMER_ADVANCES, name: 'Customer Advances (deferred revenue)', type: 'liability' },
+  { code: COA.GST_OUTPUT, name: 'GST Output Payable', type: 'liability' },
   { code: COA.LOANS, name: 'Loans Payable', type: 'liability' },
   { code: COA.EQUITY, name: "Owner's Equity", type: 'equity' },
   { code: COA.SALES, name: 'Sales — Unit Bookings', type: 'income' },
@@ -48,10 +55,17 @@ const SEED_ACCOUNTS: { code: string; name: string; type: AccountType }[] = [
   { code: COA.INTEREST, name: 'Interest Expense', type: 'expense' },
 ];
 
-/** Idempotent per tenant: seeds the standard chart on first use, then fills
- *  in any system account added by a later release. */
+/**
+ * The chart of accounts. Synchronous on purpose — the statements read it during
+ * render. In API mode the server owns the chart, so this only reads the local
+ * cache that hydrateLedger() populated at login; it never seeds client-side
+ * (that would mint local ids the server has never heard of). In demo mode it
+ * seeds the standard chart on first use and fills in any account a later release
+ * added.
+ */
 export function ensureCoa(tenantId: string): Account[] {
   const existing = getByTenant<Account>('accounts', tenantId);
+  if (isApiEnabled()) return existing.slice().sort((a, b) => a.code.localeCompare(b.code));
   const byCode = new Set(existing.map(a => a.code));
   const missing = SEED_ACCOUNTS.filter(s => !byCode.has(s.code));
   const created = missing.map(s => create<Account>('accounts', {
@@ -59,6 +73,37 @@ export function ensureCoa(tenantId: string): Account[] {
     isSystem: true, active: true, createdAt: new Date().toISOString(),
   }));
   return [...existing, ...created].sort((a, b) => a.code.localeCompare(b.code));
+}
+
+/**
+ * Load the server ledger into the local read-cache (API mode only). Ensures the
+ * standard chart exists server-side (seeding any missing system account), then
+ * mirrors accounts + posted journal entries into localStorage so the synchronous
+ * statement folds read fresh, server-authoritative data. Call it once after an
+ * API login; postEntry keeps the cache current after that. No-op in demo mode.
+ */
+export async function hydrateLedger(tenantId: string): Promise<void> {
+  if (!isApiEnabled()) return;
+  let accounts = await apiGetAccounts();
+  const haveCodes = new Set(accounts.map(a => a.code));
+  const missing = SEED_ACCOUNTS.filter(s => !haveCodes.has(s.code));
+  // Sequential (not Promise.all) to stay well clear of the API rate limit.
+  for (const s of missing) {
+    await apiCreateAccount({ code: s.code, name: s.name, type: s.type, isSystem: true });
+  }
+  if (missing.length) accounts = await apiGetAccounts();
+  const entries = await apiGetJournalEntries();
+  // Replace this tenant's slice of the cache with the server truth.
+  removeByTenant('accounts', tenantId);
+  accounts.forEach(a => { try { create<Account>('accounts', a); } catch { /* cache best-effort */ } });
+  removeByTenant('journalEntries', tenantId);
+  entries.forEach(e => { try { create<JournalEntry>('journalEntries', e); } catch { /* cache best-effort */ } });
+}
+
+/** Mirror a freshly-posted server entry into the local read-cache so the
+ *  synchronous statements pick it up before the next hydrate. Best-effort. */
+function cacheEntry(entry: JournalEntry): void {
+  try { create<JournalEntry>('journalEntries', entry); } catch { /* cache full — next hydrate reconciles */ }
 }
 
 export function accountByCode(tenantId: string, code: string): Account | undefined {
@@ -78,7 +123,7 @@ export interface PostLineInput { accountId: string; debit?: number; credit?: num
  * Post a balanced entry. Throws when debits ≠ credits (to the paisa) or the
  * entry has no lines — the ledger never stores an unbalanced posting.
  */
-export function postEntry(opts: {
+export async function postEntry(opts: {
   tenantId: string;
   narration: string;
   lines: PostLineInput[];
@@ -89,10 +134,12 @@ export function postEntry(opts: {
   date?: string;
   actor: { id: string; name: string };
   status?: 'draft' | 'posted';
-}): JournalEntry {
+}): Promise<JournalEntry> {
   const lines: JournalLine[] = opts.lines
     .filter(l => (l.debit ?? 0) > 0 || (l.credit ?? 0) > 0)
     .map(l => ({ id: uuid(), accountId: l.accountId, debit: l.debit ?? 0, credit: l.credit ?? 0, note: l.note }));
+  // Client-side balance check — fail fast before a round-trip. The server
+  // re-validates the same invariant (defence in depth) before it commits.
   if (lines.length < 2) throw new Error('A journal entry needs at least two lines');
   const dr = lines.reduce((s, l) => s + l.debit, 0);
   const cr = lines.reduce((s, l) => s + l.credit, 0);
@@ -100,26 +147,42 @@ export function postEntry(opts: {
     throw new Error(`Entry does not balance: debits ${dr} ≠ credits ${cr}`);
   }
   const status = opts.status ?? 'posted';
-  const entry = create<JournalEntry>('journalEntries', {
-    id: '', tenantId: opts.tenantId,
-    date: opts.date ?? new Date().toISOString().slice(0, 10),
-    narration: opts.narration, reference: opts.reference,
-    sourceType: opts.sourceType, sourceId: opts.sourceId, projectId: opts.projectId,
-    status, lines,
-    createdBy: opts.actor.id,
-    postedBy: status === 'posted' ? opts.actor.id : undefined,
-    postedAt: status === 'posted' ? new Date().toISOString() : undefined,
-    createdAt: new Date().toISOString(),
-  });
+
+  let entry: JournalEntry;
+  if (isApiEnabled()) {
+    // API mode always posts (drafts aren't part of the server flow). The server
+    // is the source of truth; mirror the result into the read-cache.
+    entry = await apiPostJournalEntry({
+      date: opts.date, narration: opts.narration, reference: opts.reference,
+      sourceType: opts.sourceType, sourceId: opts.sourceId, projectId: opts.projectId,
+      status: 'posted', lines,
+    });
+    cacheEntry(entry);
+  } else {
+    entry = create<JournalEntry>('journalEntries', {
+      id: '', tenantId: opts.tenantId,
+      date: opts.date ?? new Date().toISOString().slice(0, 10),
+      narration: opts.narration, reference: opts.reference,
+      sourceType: opts.sourceType, sourceId: opts.sourceId, projectId: opts.projectId,
+      status, lines,
+      createdBy: opts.actor.id,
+      postedBy: status === 'posted' ? opts.actor.id : undefined,
+      postedAt: status === 'posted' ? new Date().toISOString() : undefined,
+      createdAt: new Date().toISOString(),
+    });
+  }
   logAudit({
     tenantId: opts.tenantId, userId: opts.actor.id, userName: opts.actor.name,
     action: 'create', entity: 'journal_entry', entityId: entry.id,
-    details: `${status === 'posted' ? 'Posted' : 'Drafted'} JE (${opts.sourceType}): ${opts.narration.slice(0, 60)}`,
+    details: `${entry.status === 'posted' ? 'Posted' : 'Drafted'} JE (${opts.sourceType}): ${opts.narration.slice(0, 60)}`,
   });
   return entry;
 }
 
+/** Post a saved draft. Demo-only: in API mode entries are always created posted,
+ *  so there are no server drafts to flip. */
 export function postDraft(entry: JournalEntry, actor: { id: string; name: string }): void {
+  if (isApiEnabled()) return;
   update<JournalEntry>('journalEntries', entry.id, {
     status: 'posted', postedBy: actor.id, postedAt: new Date().toISOString(),
   });
@@ -134,7 +197,7 @@ export function postDraft(entry: JournalEntry, actor: { id: string; name: string
 // Each helper is a no-op (returns null) when the ledger accounts are missing —
 // posting must never block the business flow that triggered it.
 
-export function postVendorBillApproved(bill: VendorBill, actor: { id: string; name: string }): JournalEntry | null {
+export async function postVendorBillApproved(bill: VendorBill, actor: { id: string; name: string }): Promise<JournalEntry | null> {
   const expense = expenseAccountFor(bill.tenantId, bill.category);
   const ap = accountByCode(bill.tenantId, COA.AP);
   if (!expense || !ap) return null;
@@ -150,7 +213,7 @@ export function postVendorBillApproved(bill: VendorBill, actor: { id: string; na
   });
 }
 
-export function postApPayment(payment: PaymentMade, narration: string, projectId: string | undefined, actor: { id: string; name: string }): JournalEntry | null {
+export async function postApPayment(payment: PaymentMade, narration: string, projectId: string | undefined, actor: { id: string; name: string }): Promise<JournalEntry | null> {
   const ap = accountByCode(payment.tenantId, COA.AP);
   const cash = accountByCode(payment.tenantId, COA.CASH);
   if (!ap || !cash) return null;
@@ -165,7 +228,7 @@ export function postApPayment(payment: PaymentMade, narration: string, projectId
   });
 }
 
-export function postRaApproved(ra: RaBill, actor: { id: string; name: string }): JournalEntry | null {
+export async function postRaApproved(ra: RaBill, actor: { id: string; name: string }): Promise<JournalEntry | null> {
   const work = accountByCode(ra.tenantId, COA.CONTRACTOR_WORK);
   const retention = accountByCode(ra.tenantId, COA.RETENTION);
   const statutory = accountByCode(ra.tenantId, COA.STATUTORY);
@@ -185,21 +248,61 @@ export function postRaApproved(ra: RaBill, actor: { id: string; name: string }):
   });
 }
 
-export function postCustomerPayment(opts: {
+/**
+ * Collect a buyer receipt. Real-estate GAAP: money received before possession
+ * is NOT revenue — it is a customer advance (deferred), and the GST portion is a
+ * statutory output-tax liability. So a collection posts:
+ *   Dr Cash/Bank           (total received)
+ *     Cr GST Output Payable (gstAmount — the tax slice of this receipt)
+ *     Cr Customer Advances  (the rest — deferred until possession)
+ * Revenue (Cr Sales) is recognized later, at possession, via
+ * postPossessionRevenue. Passing gstAmount 0 (or omitting it) books the whole
+ * receipt to Customer Advances.
+ */
+export async function postCustomerPayment(opts: {
   tenantId: string; amount: number; narration: string; projectId?: string;
-  sourceId?: string; reference?: string; actor: { id: string; name: string };
-}): JournalEntry | null {
+  gstAmount?: number; sourceId?: string; reference?: string; actor: { id: string; name: string };
+}): Promise<JournalEntry | null> {
   const cash = accountByCode(opts.tenantId, COA.CASH);
+  const advances = accountByCode(opts.tenantId, COA.CUSTOMER_ADVANCES);
+  const gstOut = accountByCode(opts.tenantId, COA.GST_OUTPUT);
+  if (!cash || !advances || !gstOut || !(opts.amount > 0)) return null;
+  const gst = Math.max(0, Math.min(opts.gstAmount ?? 0, opts.amount));
+  const advance = opts.amount - gst;
+  const lines = [
+    { accountId: cash.id, debit: opts.amount },
+    ...(advance > 0 ? [{ accountId: advances.id, credit: advance }] : []),
+    ...(gst > 0 ? [{ accountId: gstOut.id, credit: gst }] : []),
+  ];
+  return postEntry({
+    tenantId: opts.tenantId, narration: opts.narration,
+    lines,
+    sourceType: 'customer_payment', sourceId: opts.sourceId,
+    projectId: opts.projectId, reference: opts.reference, actor: opts.actor,
+  });
+}
+
+/**
+ * Recognize revenue at possession/handover: move the accumulated customer
+ * advance (net of GST already parked as a liability) into Sales.
+ *   Dr Customer Advances (net-of-GST consideration)
+ *     Cr Sales — Unit Bookings
+ */
+export async function postPossessionRevenue(opts: {
+  tenantId: string; netRevenue: number; narration: string; projectId?: string;
+  sourceId?: string; actor: { id: string; name: string };
+}): Promise<JournalEntry | null> {
+  const advances = accountByCode(opts.tenantId, COA.CUSTOMER_ADVANCES);
   const sales = accountByCode(opts.tenantId, COA.SALES);
-  if (!cash || !sales || !(opts.amount > 0)) return null;
+  if (!advances || !sales || !(opts.netRevenue > 0)) return null;
   return postEntry({
     tenantId: opts.tenantId, narration: opts.narration,
     lines: [
-      { accountId: cash.id, debit: opts.amount },
-      { accountId: sales.id, credit: opts.amount },
+      { accountId: advances.id, debit: opts.netRevenue },
+      { accountId: sales.id, credit: opts.netRevenue },
     ],
-    sourceType: 'customer_payment', sourceId: opts.sourceId,
-    projectId: opts.projectId, reference: opts.reference, actor: opts.actor,
+    sourceType: 'revenue_recognition', sourceId: opts.sourceId,
+    projectId: opts.projectId, actor: opts.actor,
   });
 }
 
@@ -301,7 +404,7 @@ export function buildLoanSchedule(
 }
 
 /** Receiving the money: Dr Cash / Cr Loans Payable. */
-export function postLoanDisbursed(loan: Loan, actor: { id: string; name: string }): JournalEntry | null {
+export async function postLoanDisbursed(loan: Loan, actor: { id: string; name: string }): Promise<JournalEntry | null> {
   const cash = accountByCode(loan.tenantId, COA.CASH);
   const loans = accountByCode(loan.tenantId, COA.LOANS);
   if (!cash || !loans) return null;
@@ -318,7 +421,7 @@ export function postLoanDisbursed(loan: Loan, actor: { id: string; name: string 
 
 /** One EMI: Dr Loans Payable (principal) + Dr Interest Expense (interest) /
  *  Cr Statutory (TDS withheld) + Cr Cash (net outflow). */
-export function postLoanRepayment(loan: Loan, inst: LoanInstallment, actor: { id: string; name: string }): JournalEntry | null {
+export async function postLoanRepayment(loan: Loan, inst: LoanInstallment, actor: { id: string; name: string }): Promise<JournalEntry | null> {
   const cash = accountByCode(loan.tenantId, COA.CASH);
   const loans = accountByCode(loan.tenantId, COA.LOANS);
   const interest = accountByCode(loan.tenantId, COA.INTEREST);
@@ -350,10 +453,10 @@ export function loansDueSoon(tenantId: string, days = 7): { loan: Loan; inst: Lo
 // ── Tax remittance ───────────────────────────────────────────────────────────
 
 /** Paying a filed statutory amount: Dr Statutory Payable / Cr Cash. */
-export function postTaxRemitted(opts: {
+export async function postTaxRemitted(opts: {
   tenantId: string; amount: number; narration: string; sourceId?: string;
   actor: { id: string; name: string };
-}): JournalEntry | null {
+}): Promise<JournalEntry | null> {
   const statutory = accountByCode(opts.tenantId, COA.STATUTORY);
   const cash = accountByCode(opts.tenantId, COA.CASH);
   if (!statutory || !cash || !(opts.amount > 0)) return null;
@@ -398,7 +501,10 @@ export function fundFlow(tenantId: string, days = 30): {
       .forEach(i => inflows.push({ label: `Installment — ${i.description}`, amount: i.amount, due: i.dueDate }))
   );
   getByTenant<Invoice>('invoices', tenantId)
-    .filter(i => (i.status === 'Pending' || i.status === 'Overdue' || i.status === 'Generated') && inWindow(i.dueDate))
+    // 'Booking Token' invoices are already represented in the booking's payment
+    // schedule (counted above), so excluding them here avoids projecting the same
+    // money twice in the cash-flow forecast.
+    .filter(i => (i.status === 'Pending' || i.status === 'Overdue' || i.status === 'Generated') && i.type !== 'Booking Token' && inWindow(i.dueDate))
     .forEach(i => inflows.push({ label: `Invoice — ${i.leadName} (${i.type})`, amount: i.amount, due: i.dueDate }));
 
   getByTenant<VendorBill>('vendorBills', tenantId)

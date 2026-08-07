@@ -50,7 +50,19 @@ export function leaveDays(from: string, to: string): number {
  * with no pay basis are skipped.
  */
 export function buildPayrollItems(tenantId: string, month: string): PayrollItem[] {
-  return getByTenant<Employee>('employees', tenantId)
+  return buildPayrollItemsFrom(
+    getByTenant<Employee>('employees', tenantId),
+    getByTenant<AttendanceRecord>('attendance', tenantId),
+    month,
+  );
+}
+
+/** Pure variant over in-memory arrays — used in API mode, where the page holds
+ *  server-fetched employees/attendance instead of localStorage. */
+export function buildPayrollItemsFrom(employees: Employee[], attendance: AttendanceRecord[], month: string): PayrollItem[] {
+  const daysFor = (employeeId: string) =>
+    new Set(attendance.filter(a => a.employeeId === employeeId && a.date.startsWith(month)).map(a => a.date)).size;
+  return employees
     .filter(e => e.active)
     .map((e): PayrollItem | null => {
       if (e.type === 'staff' && e.monthlySalary && e.monthlySalary > 0) {
@@ -60,7 +72,7 @@ export function buildPayrollItems(tenantId: string, month: string): PayrollItem[
         };
       }
       if (e.type === 'contract_worker' && e.dailyWage && e.dailyWage > 0) {
-        const days = presentDays(tenantId, e.id, month);
+        const days = daysFor(e.id);
         return {
           employeeId: e.id, name: e.name, designation: e.designation, empType: e.type,
           basis: `${days} day${days === 1 ? '' : 's'} × ${e.dailyWage}/day`,

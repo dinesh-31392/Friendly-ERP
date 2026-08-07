@@ -24,7 +24,9 @@ type TableName = 'tenants' | 'users' | 'projects' | 'towers' | 'units' | 'leads'
   // ERP: land acquisition (deal → feasibility → convert-to-project)
   'landLeads' | 'feasibilityRecords' | 'landDocuments' |
   // ERP: business development (deal sourcing → hand-off into land)
-  'bdLeads' | 'marketReports';
+  'bdLeads' | 'marketReports' |
+  // Sales: buyer Statement of Account (construction-linked demands + receipts)
+  'customerLedger';
 
 function readTable<T>(table: TableName): T[] {
   try {

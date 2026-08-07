@@ -1,4 +1,6 @@
 import { getByTenant, create, update, remove, logAudit } from './db';
+import { isApiEnabled, apiCreateProject } from './apiClient';
+import { persistLandStatus, persistFeasibility, persistLandDocument, persistDocumentVerification } from './landBdWrites';
 import { explainLandFeasibility } from '../types';
 import type { LandLead, FeasibilityRecord, LandDocument, LandDocType, Project, ProjectStatus } from '../types';
 
@@ -22,9 +24,9 @@ export interface FeasibilityInputs {
 
 /** Compute + persist a feasibility record; caches the score onto the lead and
  *  advances it to 'feasibility_working' if it was earlier in the funnel. */
-export function computeFeasibility(
+export async function computeFeasibility(
   lead: LandLead, inputs: FeasibilityInputs, actor: { id: string; name: string },
-): FeasibilityRecord {
+): Promise<FeasibilityRecord> {
   const estimatedRevenue = Math.round(inputs.saleableArea * inputs.costPerSqft);
   const cost = lead.askingPrice + Math.round(inputs.saleableArea * inputs.costPerSqft * 0.55); // land + ~55% build cost proxy
   const marginPercent = estimatedRevenue > 0 ? ((estimatedRevenue - cost) / estimatedRevenue) * 100 : 0;
@@ -35,17 +37,19 @@ export function computeFeasibility(
     isEncumbered: lead.isEncumbered, litigationStatus: lead.litigationStatus,
   });
 
-  const rec = create<FeasibilityRecord>('feasibilityRecords', {
-    id: '', tenantId: lead.tenantId, landLeadId: lead.id,
+  const rec = await persistFeasibility({
+    tenantId: lead.tenantId, landLeadId: lead.id,
     costPerSqft: inputs.costPerSqft, saleableArea: inputs.saleableArea,
     estimatedRevenue, marginPercent: Number(marginPercent.toFixed(1)),
     score, cappedByRisk, computedBy: actor.id, computedAt: new Date().toISOString(),
   });
 
-  update<LandLead>('landLeads', lead.id, {
-    latestScore: score,
+  // The server bumps latest_score itself when a feasibility run lands; this
+  // moves the funnel status and keeps the demo-mode cache in step.
+  await persistLandStatus(lead, {
     status: lead.status === 'lead_reference' || lead.status === 'property_details' ? 'feasibility_working' : lead.status,
   });
+  update<LandLead>('landLeads', lead.id, { latestScore: score });
   logAudit({
     tenantId: lead.tenantId, userId: actor.id, userName: actor.name,
     action: 'create', entity: 'feasibility', entityId: rec.id,
@@ -80,12 +84,12 @@ export interface QualifyResult { ok: boolean; error?: string }
  * Checker action (bd_manager / builder_admin). Blocks in CODE, not just the UI:
  * an encumbered or actively-litigated parcel cannot be qualified.
  */
-export function qualifyLead(lead: LandLead, actor: { id: string; name: string }): QualifyResult {
+export async function qualifyLead(lead: LandLead, actor: { id: string; name: string }): Promise<QualifyResult> {
   if (lead.status === 'converted_to_project') return { ok: false, error: 'Already converted to a project.' };
   if (lead.isEncumbered) return { ok: false, error: 'Parcel is encumbered — clear the encumbrance before qualifying.' };
   if (lead.litigationStatus === 'pending') return { ok: false, error: 'Live litigation on this parcel — resolve it before qualifying.' };
   if ((lead.latestScore ?? 0) <= 0) return { ok: false, error: 'Run a feasibility computation first.' };
-  const updated = update<LandLead>('landLeads', lead.id, { status: 'qualified' });
+  const updated = await persistLandStatus(lead, { status: 'qualified' });
   if (!updated) return { ok: false, error: 'Could not update the parcel (it may have been removed).' };
   logAudit({
     tenantId: lead.tenantId, userId: actor.id, userName: actor.name,
@@ -95,8 +99,8 @@ export function qualifyLead(lead: LandLead, actor: { id: string; name: string })
   return { ok: true };
 }
 
-export function rejectLead(lead: LandLead, reason: string, actor: { id: string; name: string }): void {
-  update<LandLead>('landLeads', lead.id, { status: 'rejected', rejectionReason: reason });
+export async function rejectLead(lead: LandLead, reason: string, actor: { id: string; name: string }): Promise<void> {
+  await persistLandStatus(lead, { status: 'rejected', rejectionReason: reason });
   logAudit({
     tenantId: lead.tenantId, userId: actor.id, userName: actor.name,
     action: 'update', entity: 'land_lead', entityId: lead.id,
@@ -114,7 +118,7 @@ export interface ConvertResult { ok: boolean; error?: string; projectId?: string
  * never end up half-converted (project exists but lead still 'qualified',
  * or vice versa).
  */
-export function convertToProject(lead: LandLead, actor: { id: string; name: string }): ConvertResult {
+export async function convertToProject(lead: LandLead, actor: { id: string; name: string }): Promise<ConvertResult> {
   const fresh = getByTenant<LandLead>('landLeads', lead.tenantId).find(l => l.id === lead.id);
   if (!fresh) return { ok: false, error: 'Parcel no longer exists.' };
   if (fresh.status !== 'qualified') return { ok: false, error: 'Only a qualified parcel can be converted.' };
@@ -123,8 +127,8 @@ export function convertToProject(lead: LandLead, actor: { id: string; name: stri
   const feas = feasibilityHistory(lead.tenantId, lead.id)[0];
   const saleable = feas?.saleableArea ?? 0;
 
-  const project = create<Project>('projects', {
-    id: '', tenantId: lead.tenantId,
+  const draft = {
+    tenantId: lead.tenantId,
     name: `${fresh.city} — Survey ${fresh.surveyNumber}`,
     location: fresh.location || `${fresh.city}, ${fresh.state}`,
     type: 'Residential',
@@ -132,12 +136,20 @@ export function convertToProject(lead: LandLead, actor: { id: string; name: stri
     reraNumber: '',
     totalUnits: saleable > 0 ? Math.max(1, Math.round(saleable / 1000)) : 0,
     availableUnits: saleable > 0 ? Math.max(1, Math.round(saleable / 1000)) : 0,
-    priceRange: [0, 0],
+    priceRange: [0, 0] as [number, number],
     description: `Converted from land parcel ${fresh.surveyNumber} (${fresh.areaAcres} acres). Feasibility score ${fresh.latestScore ?? '—'}/100.`,
     createdAt: new Date().toISOString(),
-  });
+  };
+  let project: Project;
+  try {
+    project = isApiEnabled()
+      ? create<Project>('projects', await apiCreateProject(draft))
+      : create<Project>('projects', { id: '', ...draft } as Project);
+  } catch {
+    return { ok: false, error: 'Could not create the project — conversion aborted.' };
+  }
 
-  const linked = update<LandLead>('landLeads', fresh.id, { status: 'converted_to_project', projectId: project.id });
+  const linked = await persistLandStatus(fresh, { status: 'converted_to_project', projectId: project.id });
   if (!linked) {
     // Compensating action — undo the orphaned project so nothing half-commits
     remove('projects', project.id);
@@ -153,15 +165,15 @@ export function convertToProject(lead: LandLead, actor: { id: string; name: stri
 
 /** Versioned upload — always a NEW row at max(version)+1 for that doc type;
  *  title deeds and survey docs keep full history, never overwritten. */
-export function addLandDocument(
+export async function addLandDocument(
   tenantId: string, landLeadId: string, docType: LandDocType, fileName: string,
   actor: { id: string; name: string },
-): LandDocument {
+): Promise<LandDocument> {
   const existing = getByTenant<LandDocument>('landDocuments', tenantId)
     .filter(d => d.landLeadId === landLeadId && d.docType === docType);
   const version = existing.reduce((max, d) => Math.max(max, d.version), 0) + 1;
-  const doc = create<LandDocument>('landDocuments', {
-    id: '', tenantId, landLeadId, docType, version, fileName,
+  const doc = await persistLandDocument({
+    tenantId, landLeadId, docType, version, fileName,
     verificationStatus: 'pending', uploadedBy: actor.id, createdAt: new Date().toISOString(),
   });
   logAudit({
@@ -179,12 +191,10 @@ export function landDocuments(tenantId: string, landLeadId: string): LandDocumen
 }
 
 /** Verifier (separate from uploader) sets a document's status. */
-export function verifyDocument(
+export async function verifyDocument(
   doc: LandDocument, status: 'verified' | 'rejected', actor: { id: string; name: string },
-): void {
-  update<LandDocument>('landDocuments', doc.id, {
-    verificationStatus: status, verifiedBy: actor.id, verifiedAt: new Date().toISOString(),
-  });
+): Promise<void> {
+  await persistDocumentVerification(doc, status, actor.id);
   logAudit({
     tenantId: doc.tenantId, userId: actor.id, userName: actor.name,
     action: 'update', entity: 'land_document', entityId: doc.id,

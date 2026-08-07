@@ -1,6 +1,10 @@
 import { v4 as uuid } from 'uuid';
 import { getByTenant, create, update, logAudit } from './db';
 import type { PaymentPlan, Installment, PaymentPlanType } from '../types';
+import {
+  isApiEnabled, apiGetPaymentSchedules, apiCreatePaymentSchedule,
+  apiRecordPayment, apiUpdatePaymentSchedule,
+} from './apiClient';
 
 /** Milestone templates per payment-plan label. Percentages must sum to 100.
  *  Offsets are days from the booking date. */
@@ -52,6 +56,36 @@ const FLEXI: { type: PaymentPlanType; milestones: { pct: number; days: number; l
   ],
 };
 
+/** The plan template a label resolves to (falls back to flexi). */
+export function planTemplate(planLabel: string): { type: PaymentPlanType; milestones: { pct: number; days: number; label: string }[] } {
+  return PLAN_TEMPLATES[planLabel] || FLEXI;
+}
+
+/** Pure builder: plan template → installment list (no persistence). For a
+ *  construction-linked plan, every installment after the booking amount is
+ *  released by a construction milestone (not a fixed date) — tagged so a
+ *  completed site milestone can auto-raise its demand. The final installment
+ *  absorbs the rounding remainder so the schedule sums to exactly totalValue. */
+export function buildInstallments(planLabel: string, totalValue: number, bookingDate?: string): Installment[] {
+  const template = planTemplate(planLabel);
+  const start = bookingDate ? new Date(bookingDate).getTime() : Date.now();
+  const isCLP = template.type === 'construction_linked';
+  const installments: Installment[] = template.milestones.map((m, i) => ({
+    id: uuid(),
+    number: i + 1,
+    amount: Math.round((totalValue * m.pct) / 100),
+    dueDate: new Date(start + m.days * 86400000).toISOString(),
+    status: 'pending',
+    description: `${m.label} (${m.pct}%)`,
+    ...(isCLP && i > 0
+      ? { trigger: 'construction_milestone' as const, milestoneLabel: m.label }
+      : { trigger: 'time' as const }),
+  }));
+  const roundedSum = installments.reduce((s, i) => s + i.amount, 0);
+  installments[installments.length - 1].amount += totalValue - roundedSum;
+  return installments;
+}
+
 /** Auto-generate the installment schedule for a booking — "bridges the gap
  *  between sales and cash flow". Idempotent per booking. */
 export function generatePaymentSchedule(opts: {
@@ -74,20 +108,7 @@ export function generatePaymentSchedule(opts: {
   if (existing && existingTotal > 0) return existing;
 
   const template = PLAN_TEMPLATES[opts.planLabel] || FLEXI;
-  const start = opts.bookingDate ? new Date(opts.bookingDate).getTime() : Date.now();
-
-  const installments: Installment[] = template.milestones.map((m, i) => ({
-    id: uuid(),
-    number: i + 1,
-    amount: Math.round((opts.totalValue * m.pct) / 100),
-    dueDate: new Date(start + m.days * 86400000).toISOString(),
-    status: 'pending',
-    description: `${m.label} (${m.pct}%)`,
-  }));
-  // Rounding reconciliation: the final installment absorbs the remainder so
-  // the schedule sums to exactly totalValue
-  const roundedSum = installments.reduce((s, i) => s + i.amount, 0);
-  installments[installments.length - 1].amount += opts.totalValue - roundedSum;
+  const installments = buildInstallments(opts.planLabel, opts.totalValue, opts.bookingDate);
 
   if (existing) {
     // Replace the zero-value legacy plan's installments in place
@@ -141,4 +162,58 @@ export function setInstallmentStatus(
 /** Overdue = pending and past due date. Used for alerts. */
 export function isOverdue(inst: Installment): boolean {
   return inst.status === 'pending' && new Date(inst.dueDate).getTime() < Date.now();
+}
+
+// ── API mode: the server's payment_schedules are the source of truth ─────────
+
+/**
+ * Fetch a booking's schedule from the server, creating it from the plan
+ * template on first open (mirror of generatePaymentSchedule's idempotency, but
+ * server-side). Returns a synthetic PaymentPlan shaped for the existing UI —
+ * each installment's id IS the server schedule-row id, so Mark Paid / Raise
+ * Demand can address rows directly.
+ */
+export async function fetchApiSchedule(opts: {
+  tenantId: string; bookingId: string; leadId: string;
+  planLabel: string; totalValue: number; bookingDate?: string;
+}): Promise<PaymentPlan | null> {
+  if (!isApiEnabled() || !(opts.totalValue > 0)) return null;
+  const template = planTemplate(opts.planLabel);
+  let rows = await apiGetPaymentSchedules(opts.bookingId);
+  if (rows.length === 0) {
+    const drafts = buildInstallments(opts.planLabel, opts.totalValue, opts.bookingDate);
+    rows = await apiCreatePaymentSchedule(opts.bookingId, drafts.map((d, i) => ({
+      number: d.number,
+      milestoneName: template.milestones[i]?.label ?? d.description,
+      percentage: template.milestones[i]?.pct,
+      amount: d.amount,
+      dueDate: d.dueDate.slice(0, 10),
+      status: 'pending',
+      trigger: d.trigger,
+    })));
+  }
+  const installments: Installment[] = rows.map(r => ({
+    id: r.id || uuid(),
+    number: r.number,
+    amount: r.amount,
+    dueDate: r.dueDate ? String(r.dueDate) : new Date().toISOString(),
+    status: r.status,
+    description: r.percentage ? `${r.milestoneName} (${r.percentage}%)` : r.milestoneName,
+    trigger: r.trigger,
+    milestoneLabel: r.trigger === 'construction_milestone' ? r.milestoneName : undefined,
+  }));
+  return {
+    id: `api-${opts.bookingId}`, tenantId: opts.tenantId, bookingId: opts.bookingId,
+    leadId: opts.leadId, type: template.type, installments, createdAt: new Date().toISOString(),
+  };
+}
+
+/** API mode: collect an installment (server flips it to paid). */
+export async function apiPayInstallment(inst: Installment): Promise<void> {
+  await apiRecordPayment({ scheduleId: inst.id, amount: inst.amount });
+}
+
+/** API mode: raise the demand on a construction-linked installment. */
+export async function apiDemandInstallment(inst: Installment): Promise<void> {
+  await apiUpdatePaymentSchedule(inst.id, 'demanded');
 }

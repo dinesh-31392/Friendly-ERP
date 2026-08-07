@@ -1,4 +1,5 @@
-import { getByTenant, create, update, remove, logAudit } from './db';
+import { getByTenant, remove, logAudit } from './db';
+import { persistLandLead, persistBdPatch } from './landBdWrites';
 import type { BdLead, LandLead, LitigationStatus } from '../types';
 
 /**
@@ -18,15 +19,17 @@ export interface HandOffResult { ok: boolean; error?: string; landLeadId?: strin
  * 'terms_negotiation', or vice versa) — the same compensating discipline as
  * Land's convertToProject.
  */
-export function handOffToLand(deal: BdLead, actor: { id: string; name: string }): HandOffResult {
+export async function handOffToLand(deal: BdLead, actor: { id: string; name: string }): Promise<HandOffResult> {
   const fresh = getByTenant<BdLead>('bdLeads', deal.tenantId).find(d => d.id === deal.id);
   if (!fresh) return { ok: false, error: 'Deal no longer exists.' };
   if (fresh.stage === 'handed_to_land' || fresh.landLeadId) return { ok: false, error: 'This deal has already been handed to Land.' };
   if (fresh.stage === 'closed_lost') return { ok: false, error: 'A closed-lost deal cannot be handed off.' };
 
   const now = new Date().toISOString();
-  const parcel = create<LandLead>('landLeads', {
-    id: '', tenantId: fresh.tenantId,
+  let parcel: LandLead;
+  try {
+    parcel = await persistLandLead({
+    tenantId: fresh.tenantId,
     referenceSource: fresh.source === 'broker' ? 'broker' : 'direct',
     ownerName: fresh.counterpartyName,
     ownerContact: fresh.counterpartyContact,
@@ -38,9 +41,12 @@ export function handOffToLand(deal: BdLead, actor: { id: string; name: string })
     isEncumbered: false,
     litigationStatus: 'none' as LitigationStatus,
     createdBy: actor.id, createdAt: now,
-  });
+    });
+  } catch {
+    return { ok: false, error: 'Could not create the land parcel — hand-off aborted.' };
+  }
 
-  const linked = update<BdLead>('bdLeads', fresh.id, { stage: 'handed_to_land', landLeadId: parcel.id });
+  const linked = await persistBdPatch(fresh, { stage: 'handed_to_land', landLeadId: parcel.id });
   if (!linked) {
     remove('landLeads', parcel.id);   // compensating action — no orphan parcel
     return { ok: false, error: 'Could not link the deal to the new parcel — hand-off rolled back.' };
@@ -53,8 +59,8 @@ export function handOffToLand(deal: BdLead, actor: { id: string; name: string })
   return { ok: true, landLeadId: parcel.id };
 }
 
-export function advanceStage(deal: BdLead, stage: BdLead['stage'], actor: { id: string; name: string }): void {
-  update<BdLead>('bdLeads', deal.id, { stage });
+export async function advanceStage(deal: BdLead, stage: BdLead['stage'], actor: { id: string; name: string }): Promise<void> {
+  await persistBdPatch(deal, { stage });
   logAudit({
     tenantId: deal.tenantId, userId: actor.id, userName: actor.name,
     action: 'update', entity: 'bd_lead', entityId: deal.id,
@@ -62,10 +68,10 @@ export function advanceStage(deal: BdLead, stage: BdLead['stage'], actor: { id: 
   });
 }
 
-export function closeLost(deal: BdLead, reason: string, actor: { id: string; name: string }): void {
+export async function closeLost(deal: BdLead, reason: string, actor: { id: string; name: string }): Promise<void> {
   // Never delete — a closed-lost deal stays in reporting so post-mortems on why
   // deals fall through are possible later.
-  update<BdLead>('bdLeads', deal.id, { stage: 'closed_lost', closedLostReason: reason });
+  await persistBdPatch(deal, { stage: 'closed_lost', closedLostReason: reason });
   logAudit({
     tenantId: deal.tenantId, userId: actor.id, userName: actor.name,
     action: 'update', entity: 'bd_lead', entityId: deal.id,

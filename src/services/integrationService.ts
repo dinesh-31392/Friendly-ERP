@@ -1,6 +1,6 @@
 import { v4 as uuid } from 'uuid';
 import { getByTenant, getByField, create, update, remove, logAudit } from './db';
-import type { Lead, Project, User } from '../types';
+import type { Lead, Project, User, LeadQualification } from '../types';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Provider catalog
@@ -55,8 +55,8 @@ export const INTEGRATION_PROVIDERS: IntegrationProviderDef[] = [
     ],
   },
   {
-    id: 'whatsapp_business', name: 'WhatsApp Business', category: 'lead_source', icon: '💬',
-    description: 'Two-way WhatsApp chat and enquiry capture via the Business API.',
+    id: 'whatsapp_business', name: 'WhatsApp Business API', category: 'lead_source', icon: '💬',
+    description: 'Official Meta Cloud API — enables automated & bulk WhatsApp (drip sequences, templates) + enquiry capture. Optional: without it, agents already chat interested leads 1-to-1 from their own WhatsApp for free (Click to Chat).',
     leadSource: 'WhatsApp',
     configFields: [
       { key: 'phoneNumberId', label: 'Phone Number ID', placeholder: 'e.g. 1065534...' },
@@ -276,6 +276,11 @@ export interface InboundLeadPayload {
   budget?: number;
   configuration?: string;
   message?: string;
+  /** Answers to the builder's chatbot custom questions, keyed by field key. */
+  customFields?: Record<string, string>;
+  /** Qualification computed at intake (chatbot). When present it also sets the
+   *  lead's opening stage/priority. */
+  qualification?: LeadQualification;
 }
 
 /** Create a Lead (+ intake activity) from an inbound payload.
@@ -300,6 +305,17 @@ export function ingestLead(tenantId: string, payload: InboundLeadPayload): Lead 
   const project = payload.project || (projects.length > 0 ? randomOf(projects).name : 'General Enquiry');
   const now = new Date().toISOString();
 
+  // A qualification result (from the chatbot) sets the opening stage/priority:
+  // a lead that already cleared the bar enters as 'qualified', and the priority
+  // tracks the Hot/Warm/Cold status. Without it we keep the previous defaults.
+  const q = payload.qualification;
+  const openingStage: Lead['stage'] = q
+    ? (q.status !== 'unqualified' && q.score >= 55 ? 'qualified' : 'new')
+    : 'new';
+  const openingPriority: Lead['priority'] = q
+    ? (q.status === 'hot' ? 'hot' : q.status === 'warm' ? 'warm' : 'cold')
+    : 'warm';
+
   const lead = create<Lead>('leads', {
     id: '', tenantId,
     name: payload.name,
@@ -309,15 +325,17 @@ export function ingestLead(tenantId: string, payload: InboundLeadPayload): Lead 
     project,
     budget: payload.budget || 0,
     configuration: payload.configuration || '2 BHK',
-    stage: 'new', priority: 'warm',
+    stage: openingStage, priority: openingPriority,
     assignedTo: assignee?.id || '',
+    ...(payload.customFields && Object.keys(payload.customFields).length ? { customFields: payload.customFields } : {}),
+    ...(q ? { qualification: q } : {}),
     lastContact: now, createdAt: now,
   });
 
   create('activities', {
     id: '', tenantId, leadId: lead.id, userId: assignee?.id || '',
     type: 'note',
-    description: `Lead captured via ${payload.source}${payload.message ? ` — "${payload.message}"` : ''} · auto-routed to ${assignee?.name || 'unassigned'} (capacity-based)`,
+    description: `Lead captured via ${payload.source}${payload.message ? ` — "${payload.message}"` : ''}${q ? ` · qualified ${q.status.toUpperCase()} (${q.score}/100)` : ''} · auto-routed to ${assignee?.name || 'unassigned'} (capacity-based)`,
     createdAt: now,
   });
 

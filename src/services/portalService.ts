@@ -1,4 +1,5 @@
 import { getAll, getByTenant, getById, create, update, logAudit } from './db';
+import { isApiEnabled, apiPortalLogin, apiPortalInvite } from './apiClient';
 import type { PortalUser, Tenant, Lead, Broker } from '../types';
 
 // Portal auth lives under its OWN key so a portal login can never leak into
@@ -11,6 +12,13 @@ export interface PortalSession {
   role: 'customer' | 'partner';
   token: string;
   expiresAt: number;
+  /**
+   * API mode only. There is no local portalUsers/tenants table to look the
+   * session up in, so the login response's snapshot rides along in the session
+   * itself. `token` is then the server-issued portal JWT (realm-scoped
+   * `portal_*`), not a locally generated one.
+   */
+  snapshot?: { portalUser: PortalUser; tenant: Tenant };
 }
 
 function generateToken(): string {
@@ -46,6 +54,10 @@ export function portalLogout(): void {
 export function getPortalUser(): { portalUser: PortalUser; tenant: Tenant } | null {
   const session = getPortalSession();
   if (!session) return null;
+  // API mode: the server already authenticated this session; the snapshot is
+  // the only local record of who it belongs to. Revocation is still enforced
+  // server-side — /api/portal/overview 401s if the account was deactivated.
+  if (session.snapshot) return session.snapshot;
   const portalUser = getById<PortalUser>('portalUsers', session.portalUserId);
   const tenant = getById<Tenant>('tenants', session.tenantId);
   if (!portalUser || !tenant || !portalUser.active) { portalLogout(); return null; }
@@ -56,6 +68,39 @@ export function getPortalUser(): { portalUser: PortalUser; tenant: Tenant } | nu
 
 /** Portal login. When `tenantSlug` is present (subdomain / ?builder= link),
  *  only that builder's portal accounts are considered. */
+/** API-mode login: the server verifies the argon2 hash and issues a realm-scoped
+ *  JWT. Demo mode keeps the local-store path below, untouched. */
+export async function portalLoginApi(
+  email: string, password: string, tenantSlug?: string
+): Promise<{ portalUser: PortalUser; tenant: Tenant } | { error: string }> {
+  try {
+    const res = await apiPortalLogin(email, password, tenantSlug);
+    const portalUser = {
+      id: res.portalUser.id, tenantId: res.tenant.id, role: res.portalUser.role,
+      email: res.portalUser.email, name: res.portalUser.name, password: '',
+      leadId: res.portalUser.leadId ?? undefined, brokerId: res.portalUser.brokerId ?? undefined,
+      active: true, createdAt: new Date().toISOString(),
+    } as PortalUser;
+    const tenant = {
+      id: res.tenant.id, name: res.tenant.name, slug: res.tenant.slug,
+      currency: res.tenant.currency ?? 'INR', primaryColor: res.tenant.primaryColor ?? '#6366f1',
+      logo: res.tenant.logo ?? undefined, status: 'active',
+    } as Tenant;
+    const session: PortalSession = {
+      portalUserId: portalUser.id, tenantId: tenant.id, role: portalUser.role,
+      token: res.token,
+      // Mirrors the server's 24h portal JWT lifetime.
+      expiresAt: Date.now() + 24 * 60 * 60 * 1000,
+      snapshot: { portalUser, tenant },
+    };
+    localStorage.setItem(PORTAL_AUTH_KEY, JSON.stringify(session));
+    return { portalUser, tenant };
+  } catch (err) {
+    // The server returns a constant-shape 401 for every miss — don't embellish it.
+    return { error: err instanceof Error ? err.message : 'Invalid email or password.' };
+  }
+}
+
 export function portalLogin(
   email: string, password: string, tenantSlug?: string
 ): { portalUser: PortalUser; tenant: Tenant } | { error: string } {
@@ -94,9 +139,15 @@ export function findPortalAccount(tenantId: string, opts: { leadId?: string; bro
 
 /** Create (or reset) a customer portal account for a lead. Returns the
  *  credentials so the builder can share them with the customer. */
-export function inviteCustomer(
+export async function inviteCustomer(
   tenantId: string, lead: Lead, actor: { id: string; name: string }
-): { email: string; password: string; isNew: boolean } {
+): Promise<{ email: string; password: string; isNew: boolean }> {
+  if (isApiEnabled()) {
+    // The server generates the temp password, stores only its argon2 hash, and
+    // returns the plaintext exactly once.
+    const res = await apiPortalInvite({ leadId: lead.id, email: lead.email || undefined });
+    return { email: res.email, password: res.tempPassword, isNew: res.isNew };
+  }
   const email = lead.email.toLowerCase();
   const password = generatePassword();
   const existing = findPortalAccount(tenantId, { leadId: lead.id });
@@ -115,9 +166,13 @@ export function inviteCustomer(
 }
 
 /** Create (or reset) a channel-partner portal account for a broker. */
-export function invitePartner(
+export async function invitePartner(
   tenantId: string, broker: Broker, actor: { id: string; name: string }
-): { email: string; password: string; isNew: boolean } {
+): Promise<{ email: string; password: string; isNew: boolean }> {
+  if (isApiEnabled()) {
+    const res = await apiPortalInvite({ brokerId: broker.id, email: broker.email || undefined });
+    return { email: res.email, password: res.tempPassword, isNew: res.isNew };
+  }
   const email = broker.email.toLowerCase();
   const password = generatePassword();
   const existing = findPortalAccount(tenantId, { brokerId: broker.id });

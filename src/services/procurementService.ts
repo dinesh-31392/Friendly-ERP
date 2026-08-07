@@ -30,6 +30,26 @@ export function lowStockMaterials(tenantId: string): { material: Material; onHan
     .filter(({ material, onHand }) => material.reorderLevel > 0 && onHand <= material.reorderLevel);
 }
 
+// Pure variants over in-memory arrays — used in API mode, where the page holds
+// server-fetched rows instead of localStorage.
+
+export function stockOnHandFrom(txns: StockTransaction[], materialId: string, projectId?: string): number {
+  return txns
+    .filter(t => t.materialId === materialId && (projectId === undefined || t.projectId === projectId))
+    .reduce((s, t) => s + (t.type === 'inward' ? t.qty : -t.qty), 0);
+}
+
+export function lowStockFrom(materials: Material[], txns: StockTransaction[]): { material: Material; onHand: number }[] {
+  return materials
+    .map(material => ({ material, onHand: stockOnHandFrom(txns, material.id) }))
+    .filter(({ material, onHand }) => material.reorderLevel > 0 && onHand <= material.reorderLevel);
+}
+
+export function machinesDueFrom(machines: Machine[], days = 7): Machine[] {
+  const horizon = Date.now() + days * 86400000;
+  return machines.filter(m => m.nextServiceDate && new Date(m.nextServiceDate).getTime() <= horizon);
+}
+
 /**
  * Receive material against an approved PO: bumps each line's receivedQty,
  * writes matching inward stock transactions, and rolls the PO status forward

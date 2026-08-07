@@ -1,4 +1,4 @@
-import { getAll, create } from './db';
+import { getAll, create, update } from './db';
 import {
   ensureCoa, postEntry, accountByCode, expenseAccountFor, COA,
   buildLoanSchedule, postLoanDisbursed,
@@ -10,7 +10,9 @@ import type {
   BdLead, MarketReport, Vendor, Material, StockTransaction, PurchaseOrder,
   Machine, VendorBill, ProjectBudget, Employee, AttendanceRecord, LeaveRequest,
   PayrollRun, ComplianceItem, SiteTask, Rfi, Inspection, Quotation, BankAccount,
-  Loan,
+  Loan, PaymentPlan,
+  Campaign, Conversation, ChatMessage, Ticket, TicketPriority, TicketStatus,
+  Document, Note, Reminder, Template, PortalUser,
 } from '../types';
 
 /**
@@ -188,8 +190,14 @@ export function seedDemoWorkspace(): { builderAdmin: User; tenant: Tenant } {
       id: '', tenantId: T, projectId: proj1.id, leadId: lead.id, unitId: unit.id,
       amount: 300000, paymentPlan: '30-70', stage: i === 0 ? 'payment' : 'agreement', createdAt: rel(-(20 - i * 5)),
     });
-    generatePaymentSchedule({ tenantId: T, bookingId: booking.id, leadId: lead.id, planLabel: '30-70', totalValue: unit.price, bookingDate: booking.createdAt, actor });
-    // token invoice (paid) + first installment (pending)
+    const demoPlan = generatePaymentSchedule({ tenantId: T, bookingId: booking.id, leadId: lead.id, planLabel: '30-70', totalValue: unit.price, bookingDate: booking.createdAt, actor });
+    // The token collection is recorded on the SCHEDULE (the single source of
+    // truth for a booking's collections), so mark its first installment paid.
+    if (demoPlan?.installments[0]) {
+      demoPlan.installments[0] = { ...demoPlan.installments[0], status: 'paid', paidDate: rel(-(11 - i * 5)) };
+      update<PaymentPlan>('paymentPlans', demoPlan.id, { installments: demoPlan.installments });
+    }
+    // token invoice (document — collected via the schedule above) + first installment (pending)
     create<Invoice>('invoices', {
       id: '', tenantId: T, leadId: lead.id, leadName: lead.name, project: proj1.name, type: 'Booking Token',
       amount: 300000, date: rel(-(18 - i * 5)), dueDate: rel(-(11 - i * 5)), status: 'Paid',
@@ -316,6 +324,84 @@ export function seedDemoWorkspace(): { builderAdmin: User; tenant: Tenant } {
     schedule: buildLoanSchedule(30000000, 11.5, 36, 10, relDate(-60)), status: 'active', createdAt: rel(-60),
   });
   postLoanDisbursed(loan, actor);
+
+  // ── Engagement demo content — so every menu renders a live, believable flow:
+  //    lead notes, reminders, WhatsApp chats, service tickets, documents,
+  //    marketing campaigns, message templates and portal accounts. ────────────
+  const custLead = leads.find(l => l.name === 'Rohan Verma') || leads[0];
+  const negoLead = leads.find(l => l.stage === 'negotiation') || leads[0];
+  const visitLead = leads.find(l => l.stage === 'visit_scheduled') || leads[0];
+  const qualLead = leads.find(l => l.stage === 'qualified') || leads[0];
+
+  // Lead notes (the lead-drawer history)
+  ([
+    [negoLead, 'Wants a corner unit on a lower floor. Negotiating covered parking into the price.'],
+    [visitLead, 'Site visit confirmed for the weekend — bringing spouse and parents.'],
+    [custLead, 'Token collected; sale agreement drafting in progress.'],
+  ] as Array<[Lead, string]>).forEach(([l, content], i) =>
+    create<Note>('notes', { id: '', tenantId: T, leadId: l.id, userId: l.assignedTo, content, createdAt: rel(-(i + 1)) }));
+
+  // Reminders (the manager's follow-up queue)
+  create<Reminder>('reminders', { id: '', tenantId: T, leadId: negoLead.id, userId: salesExec.id, title: 'Call Karan with revised pricing', dueDate: rel(1), completed: false });
+  create<Reminder>('reminders', { id: '', tenantId: T, leadId: visitLead.id, userId: salesExec.id, title: 'Confirm Sneha’s site-visit slot', dueDate: rel(0), completed: false });
+  create<Reminder>('reminders', { id: '', tenantId: T, leadId: qualLead.id, userId: salesMgr.id, title: 'Send Amit the payment-plan options', dueDate: rel(2), completed: false });
+
+  // WhatsApp conversations + message threads (Messages module)
+  const mkConvo = (lead: Lead, lastMsg: string, unread: number, msgs: Array<['lead' | 'us', string, number]>) => {
+    const c = create<Conversation>('conversations', { id: '', tenantId: T, leadId: lead.id, leadName: lead.name, lastMsg, time: rel(-msgs[msgs.length - 1][2]), unread, channel: 'WhatsApp' });
+    msgs.forEach(([from, text, ago]) => create<ChatMessage>('chatMessages', { id: '', tenantId: T, conversationId: c.id, senderId: from === 'lead' ? lead.id : lead.assignedTo, content: text, timestamp: rel(-ago) }));
+  };
+  mkConvo(negoLead, 'Can you do ₹1.15 Cr all-in?', 2, [
+    ['lead', 'Hi, is the 3 BHK corner unit still available?', 1.2],
+    ['us', 'Yes it is — I can hold it for you. Shall I share the cost sheet?', 1.1],
+    ['lead', 'Please. Can you do ₹1.15 Cr all-in?', 1.0],
+  ]);
+  mkConvo(visitLead, 'Great, see you Saturday 11am', 0, [
+    ['us', 'Confirming your site visit this Saturday at 11am at the site office.', 0.5],
+    ['lead', 'Great, see you Saturday 11am', 0.4],
+  ]);
+  mkConvo(qualLead, 'What payment plans do you offer?', 1, [
+    ['lead', 'What payment plans do you offer?', 0.2],
+  ]);
+
+  // Service tickets (post-sale / snag desk)
+  ([
+    ['Seepage in master-bedroom wall', custLead, 'Snag', 'high', 'open'],
+    ['Modular kitchen handover pending', custLead, 'Handover', 'medium', 'in_progress'],
+    ['Society NOC copy request', custLead, 'Documentation', 'low', 'resolved'],
+    ['Parking allocation clarification', negoLead, 'Query', 'medium', 'open'],
+  ] as Array<[string, Lead, string, TicketPriority, TicketStatus]>).forEach(([title, l, category, priority, status], i) =>
+    create<Ticket>('tickets', { id: '', tenantId: T, title, leadId: l.id, customer: l.name, project: proj1.name, category, priority, status, assignedTo: i % 2 === 0 ? salesExec.id : salesMgr.id, createdAt: rel(-(i + 1)) }));
+
+  // Documents (brochures, RERA, agreements, drawings)
+  ([
+    [`${proj1.name} — Brochure.pdf`, 'Brochure', 'active', '4.2 MB'],
+    ['RERA Certificate — P51900012345.pdf', 'Compliance', 'active', '820 KB'],
+    ['Rohan Verma — Sale Agreement.pdf', 'Agreement', 'signed', '1.1 MB'],
+    ['Cost Sheet — Tower A 3 BHK.xlsx', 'Cost Sheet', 'active', '210 KB'],
+    ['Floor Plan — Tower A.pdf', 'Drawing', 'active', '3.6 MB'],
+    ['Master Plan Approval.pdf', 'Legal', 'active', '2.4 MB'],
+  ] as Array<[string, string, string, string]>).forEach(([name, type, status, size], i) =>
+    create<Document>('documents', { id: '', tenantId: T, name, type, project: proj1.name, date: rel(-(i * 3 + 2)), size, status, url: '#' }));
+
+  // Marketing campaigns (draft → scheduled → sent → completed)
+  create<Campaign>('campaigns', { id: '', tenantId: T, name: 'Diwali Offer — Tower A', type: 'promotional', status: 'sent', audience: 'All warm & hot leads', channel: 'WhatsApp', content: 'Book this Diwali and save ₹2L on registration + a free modular kitchen!', sentAt: rel(-6), createdAt: rel(-8) });
+  create<Campaign>('campaigns', { id: '', tenantId: T, name: 'New Launch Teaser — Tower B', type: 'awareness', status: 'scheduled', audience: 'All leads', channel: 'Email', content: 'Something new is coming to Skyline. Register your interest first.', scheduledAt: rel(3), createdAt: rel(-4) });
+  create<Campaign>('campaigns', { id: '', tenantId: T, name: 'Site-Visit Reminder Blast', type: 'engagement', status: 'completed', audience: 'Visit-scheduled leads', channel: 'SMS', content: 'Your Skyline site visit is confirmed. See you soon!', sentAt: rel(-2), createdAt: rel(-3) });
+  create<Campaign>('campaigns', { id: '', tenantId: T, name: 'Referral Program', type: 'referral', status: 'draft', audience: 'Booked customers', channel: 'WhatsApp', content: 'Refer a friend and earn ₹50,000 when they book.', createdAt: rel(-1) });
+
+  // Reusable message templates
+  ([
+    ['Welcome — New Lead', 'Onboarding', 'WhatsApp', 'Hi {{name}}, thanks for your interest in Skyline Heights! When is a good time to connect?'],
+    ['Site Visit Confirmation', 'Sales', 'WhatsApp', 'Your site visit is confirmed for {{date}} at {{time}}. We’ll meet you at the site office.'],
+    ['Payment Reminder', 'Finance', 'Email', 'Gentle reminder: your installment of {{amount}} is due on {{dueDate}}.'],
+    ['Festive Offer', 'Marketing', 'SMS', 'Limited-time festive pricing on select units. Reply YES to know more.'],
+  ] as Array<[string, string, string, string]>).forEach(([name, category, channel, content]) =>
+    create<Template>('templates', { id: '', tenantId: T, name, category, channel, content, createdAt: rel(-10) }));
+
+  // Portal accounts — Customer Portal + Channel-Partner Portal
+  create<PortalUser>('portalUsers', { id: '', tenantId: T, role: 'customer', email: custLead.email, password: DEMO_PASSWORD, name: custLead.name, leadId: custLead.id, active: true, createdAt: rel(-16) });
+  create<PortalUser>('portalUsers', { id: '', tenantId: T, role: 'partner', email: broker.email, password: DEMO_PASSWORD, name: broker.name, brokerId: broker.id, active: true, createdAt: rel(-20) });
 
   return { builderAdmin: admin, tenant };
 }

@@ -230,7 +230,7 @@ export async function usersRoutes(app: FastifyInstance): Promise<void> {
           );
           // The only time this value is ever transmitted. It is not stored in
           // plain text anywhere and cannot be read back.
-          return reply.code(201).send({ user: toApiUser(u), temporaryPassword: temp });
+          reply.code(201); return { user: toApiUser(u), temporaryPassword: temp };
         });
       } catch (err) {
         const mapped = mapWriteError(err);

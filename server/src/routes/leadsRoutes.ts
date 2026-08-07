@@ -32,6 +32,7 @@ function toApiLead(r: Record<string, unknown>) {
     stage: r.stage,
     priority: r.priority,
     assignedTo: r.assigned_to ?? '',
+    brokerId: (r.broker_id as string | null) ?? undefined,
     lastContact: r.last_contact_at,
     createdAt: r.created_at,
     customFields: r.custom_fields,
@@ -56,6 +57,7 @@ const WRITABLE: Record<string, string> = {
   priority: 'priority',
   score: 'score',
   assignedTo: 'assigned_to',
+  brokerId: 'broker_id',
   customFields: 'custom_fields',
   lastContact: 'last_contact_at',
 };
@@ -76,6 +78,7 @@ const LEAD_PROPS = {
   priority: { type: 'string', enum: ['hot', 'warm', 'cold'] },
   score: { type: 'integer', minimum: 0, maximum: 100 },
   assignedTo: { type: 'string', pattern: UUID },
+  brokerId: { type: 'string', pattern: UUID },
   customFields: { type: 'object' },
   lastContact: { type: 'string', maxLength: 40 },
 } as const;
@@ -84,7 +87,7 @@ interface LeadBody {
   name?: string; email?: string; phone?: string; source?: string;
   project?: string; projectId?: string; budget?: number; configuration?: string;
   stage?: string; priority?: string; score?: number; assignedTo?: string;
-  customFields?: Record<string, unknown>; lastContact?: string;
+  brokerId?: string; customFields?: Record<string, unknown>; lastContact?: string;
 }
 
 interface LeadAccess {
@@ -294,7 +297,7 @@ export async function leadsRoutes(app: FastifyInstance): Promise<void> {
           );
           // The audit row is written by the audit_row_change trigger using
           // app.current_user_id — no application-side logging needed.
-          return reply.code(201).send({ lead: toApiLead(rows[0]) });
+          reply.code(201); return { lead: toApiLead(rows[0]) };
         });
       } catch (err) {
         const mapped = mapWriteError(err);
@@ -406,7 +409,7 @@ export async function leadsRoutes(app: FastifyInstance): Promise<void> {
         }
 
         await db.query('DELETE FROM leads WHERE id = $1', [req.params.id]);
-        return reply.code(204).send();
+        reply.code(204); return null;
       }),
   );
 }

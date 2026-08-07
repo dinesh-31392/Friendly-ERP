@@ -11,7 +11,12 @@
     "db:up": "docker compose up -d db",
     "db:migrate": "tsx scripts/migrate.ts",
     "db:seed": "tsx scripts/seed.ts",
-    "verify:hardening": "node scripts/verify-hardening.mjs"
+    "verify:hardening": "node scripts/verify-hardening.mjs",
+    "verify:rls": "node scripts/verify-rls.mjs",
+    "verify:writes": "node scripts/verify-writes.mjs",
+    "verify:accounts": "node scripts/verify-accounts.mjs",
+    "verify:landbd": "node scripts/verify-landbd.mjs",
+    "verify:portal": "node scripts/verify-portal.mjs"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",

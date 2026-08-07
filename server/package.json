@@ -16,7 +16,8 @@
     "verify:writes": "node scripts/verify-writes.mjs",
     "verify:accounts": "node scripts/verify-accounts.mjs",
     "verify:landbd": "node scripts/verify-landbd.mjs",
-    "verify:portal": "node scripts/verify-portal.mjs"
+    "verify:portal": "node scripts/verify-portal.mjs",
+    "verify:whatsapp": "node scripts/verify-whatsapp.mjs"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",

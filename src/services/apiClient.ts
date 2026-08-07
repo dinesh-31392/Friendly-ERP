@@ -637,6 +637,8 @@ export interface WhatsAppInstance {
   displayPhone: string;
   status: 'connected' | 'disconnected' | 'error';
   hasToken: boolean;   // whether a server-side token is set (the token itself never leaves the server)
+  evolutionUrl?: string;
+  hasEvolutionKey?: boolean;
 }
 
 export async function apiGetWhatsAppInstance(): Promise<WhatsAppInstance> {
@@ -647,8 +649,9 @@ export async function apiGetWhatsAppInstance(): Promise<WhatsAppInstance> {
 /** Save the provider + (for the paid path) Meta WABA creds. The token is stored
  *  server-side; omit it to keep the existing one. */
 export async function apiSaveWhatsAppInstance(input: {
-  provider: 'click_to_chat' | 'meta_cloud_waba';
+  provider: 'click_to_chat' | 'meta_cloud_waba' | 'evolution';
   phoneNumberId?: string; accessToken?: string; displayPhone?: string;
+  evolutionUrl?: string; evolutionApiKey?: string;
 }): Promise<WhatsAppInstance> {
   const res = await request<{ instance: WhatsAppInstance }>('/api/whatsapp/instance', { method: 'PUT', body: JSON.stringify(input) });
   return res.instance;
@@ -656,13 +659,29 @@ export async function apiSaveWhatsAppInstance(input: {
 
 export interface WhatsAppSendResult {
   delivered: boolean;                 // true = sent server-side via Meta Cloud API
-  provider: 'click_to_chat' | 'meta_cloud_waba';
+  provider: 'click_to_chat' | 'meta_cloud_waba' | 'evolution';
   link?: string;                      // present in free mode — the agent opens it
   messageId?: string;                 // present when delivered via the API
 }
 
-export async function apiSendWhatsApp(to: string, body: string): Promise<WhatsAppSendResult> {
-  return request<WhatsAppSendResult>('/api/whatsapp/send', { method: 'POST', body: JSON.stringify({ to, body }) });
+export async function apiSendWhatsApp(to: string, body: string, leadId?: string): Promise<WhatsAppSendResult> {
+  return request<WhatsAppSendResult>('/api/whatsapp/send', { method: 'POST', body: JSON.stringify({ to, body, leadId }) });
+}
+
+// ── Per-rep Evolution sessions ───────────────────────────────────────────────
+
+export interface WhatsAppSession { instanceName: string; status: 'connected' | 'connecting' | 'disconnected'; phone: string; lastConnectedAt?: string | null }
+
+/** The CALLER's own session (live-refreshed from the gateway when reachable). */
+export async function apiWhatsappSession(): Promise<WhatsAppSession> {
+  return (await request<{ session: WhatsAppSession }>('/api/whatsapp/session')).session;
+}
+/** Link (or re-link) the caller's WhatsApp — returns the QR to scan. */
+export async function apiWhatsappConnect(): Promise<{ session: WhatsAppSession; qrcode: string; pairingCode: string }> {
+  return request('/api/whatsapp/connect', { method: 'POST', body: JSON.stringify({}) });
+}
+export async function apiWhatsappDisconnect(): Promise<WhatsAppSession> {
+  return (await request<{ session: WhatsAppSession }>('/api/whatsapp/disconnect', { method: 'POST', body: JSON.stringify({}) })).session;
 }
 
 // ── Metadata (dynamic forms / pipelines) ─────────────────────────────────────

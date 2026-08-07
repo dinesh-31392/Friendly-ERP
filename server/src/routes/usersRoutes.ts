@@ -131,16 +131,24 @@ export async function usersRoutes(app: FastifyInstance): Promise<void> {
       // LEFT JOIN, not INNER: an inner join would silently drop any user whose
       // role row wasn't visible, and a missing user is precisely the
       // "Unassigned" bug this endpoint exists to fix.
+      // whatsapp_user_sessions rides along so the directory can show which
+      // reps have a linked WhatsApp (the spec's whatsapp_instance_id/status on
+      // the user model — exposed via join, single source of truth in 025).
       const { rows } = await db.query(
         `SELECT u.id, u.tenant_id, u.name, u.email, u.phone, u.avatar_url,
                 u.active, u.must_change_password, u.created_at,
-                COALESCE(r.name, '') AS role
+                COALESCE(r.name, '') AS role,
+                COALESCE(w.instance_name, '') AS whatsapp_instance_id,
+                COALESCE(w.status, 'disconnected') AS whatsapp_status
            FROM users u
            LEFT JOIN roles r ON r.id = u.role_id
+           LEFT JOIN whatsapp_user_sessions w ON w.user_id = u.id
           ORDER BY u.name`,
       );
       const users = rows.map(r => {
-        const u = toApiUser(r);
+        const u = toApiUser(r) as ReturnType<typeof toApiUser> & { whatsappInstanceId?: string; whatsappStatus?: string };
+        u.whatsappInstanceId = String(r.whatsapp_instance_id ?? '');
+        u.whatsappStatus = String(r.whatsapp_status ?? 'disconnected');
         if (!can_see_contacts) { u.email = ''; u.phone = ''; }
         return u;
       });

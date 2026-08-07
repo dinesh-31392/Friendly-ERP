@@ -25,7 +25,7 @@ import { getIntegrationStates } from './integrationService';
 import { whatsappHref } from '../utils/contact';
 import { isApiEnabled, apiSendWhatsApp } from './apiClient';
 
-export type WhatsAppProvider = 'click_to_chat' | 'meta_cloud_waba';
+export type WhatsAppProvider = 'click_to_chat' | 'meta_cloud_waba' | 'evolution';
 
 export interface WhatsAppSend {
   provider: WhatsAppProvider;
@@ -54,13 +54,13 @@ export function whatsappProvider(tenantId: string): WhatsAppProvider {
  *    fall back to a locally-built link so the agent can still reach the lead.
  *  - Demo mode: always a click-to-chat link (no backend to dispatch through).
  */
-export async function whatsappSend(opts: { tenantId: string; phone: string; text?: string }): Promise<WhatsAppSend> {
+export async function whatsappSend(opts: { tenantId: string; phone: string; text?: string; leadId?: string }): Promise<WhatsAppSend> {
   const fallbackLink = whatsappHref(opts.phone, opts.text);
   if (!isApiEnabled()) {
     return { provider: whatsappProvider(opts.tenantId), delivered: false, link: fallbackLink };
   }
   try {
-    const r = await apiSendWhatsApp(opts.phone, opts.text ?? '');
+    const r = await apiSendWhatsApp(opts.phone, opts.text ?? '', opts.leadId);
     return { provider: r.provider, delivered: r.delivered, link: r.link, messageId: r.messageId };
   } catch (err) {
     // Paid path rejected (bad token, 24h window, unreachable) — never block the

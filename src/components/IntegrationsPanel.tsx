@@ -10,6 +10,7 @@ import {
 } from '../services/integrationService';
 import type { IntegrationProviderDef } from '../services/integrationService';
 import { isApiEnabled, apiSaveWhatsAppInstance } from '../services/apiClient';
+import MyWhatsAppCard from './MyWhatsAppCard';
 
 function timeAgo(iso?: string): string {
   if (!iso) return 'Never';
@@ -198,6 +199,9 @@ export default function IntegrationsPanel() {
   const other = INTEGRATION_PROVIDERS.filter(p => p.category === 'other');
 
   return (
+    <div className="space-y-4">
+    {/* Per-rep WhatsApp session — every rep links their own number here */}
+    <MyWhatsAppCard />
     <div className="bg-white rounded-2xl border border-zinc-200/60 p-6 space-y-6">
       <div className="flex items-center justify-between">
         <div>
@@ -411,6 +415,7 @@ export default function IntegrationsPanel() {
           </div>
         </div>
       )}
+    </div>
     </div>
   );
 }

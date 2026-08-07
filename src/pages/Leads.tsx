@@ -1255,7 +1255,7 @@ export default function Leads() {
                     // WhatsApp provider the tenant runs (free click-to-chat by
                     // default; Meta Business API when configured — server-side).
                     const greeting = `Hi ${selectedLead.name.split(' ')[0]}, this is ${user?.name || 'your advisor'} from ${tenant?.name || 'our team'} regarding ${selectedLead.project}. Is this a good time to chat?`;
-                    const out = await whatsappSend({ tenantId, phone: selectedLead.phone, text: greeting });
+                    const out = await whatsappSend({ tenantId, phone: selectedLead.phone, text: greeting, leadId: selectedLead.id });
                     audit('whatsapp_log', selectedLead.id, out.delivered
                       ? `Sent WhatsApp to ${selectedLead.name} via Business API`
                       : `Opened WhatsApp chat with ${selectedLead.name} (${out.provider})`);

@@ -1,0 +1,32 @@
+# WhatsApp gateway (Evolution API) + its own Postgres, self-contained.
+# Start:  docker compose up -d      Stop:  docker compose down
+# The ERP's API server reaches it at http://localhost:8080; the container
+# reaches the ERP's webhooks at http://host.docker.internal:4000 (PUBLIC_URL).
+services:
+  evolution-db:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: evolution_local
+      POSTGRES_DB: evolution
+    volumes:
+      - evolution_pg:/var/lib/postgresql/data
+
+  evolution:
+    image: atendai/evolution-api:latest
+    restart: unless-stopped
+    depends_on: [evolution-db]
+    ports: ["8080:8080"]
+    environment:
+      AUTHENTICATION_API_KEY: ${EVOLUTION_API_KEY:?set EVOLUTION_API_KEY in .env}
+      DATABASE_ENABLED: "true"
+      DATABASE_PROVIDER: postgresql
+      DATABASE_CONNECTION_URI: postgresql://postgres:evolution_local@evolution-db:5432/evolution
+      CACHE_LOCAL_ENABLED: "true"
+      CACHE_REDIS_ENABLED: "false"
+    volumes:
+      - evolution_instances:/evolution/instances
+
+volumes:
+  evolution_pg:
+  evolution_instances:

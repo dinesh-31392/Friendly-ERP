@@ -176,6 +176,22 @@ ok('phone-side reply logged (timeline complete both ways)', acts2 === 3, String(
 const unknown = await hook(token1, { event: 'messages.upsert', data: { key: { remoteJid: '910000000000@s.whatsapp.net', fromMe: false }, message: { conversation: 'spam' } } });
 ok('unknown number acked without logging', unknown.status === 200 && (await admin.query(`SELECT count(*)::int n FROM lead_activities WHERE lead_id=$1`, [lead.id])).rows[0].n === 3);
 
+// ── chat-thread data path (?type filter + prefix contract) ──────────────────
+console.log('\n=== CHAT THREAD FEED ===');
+// a non-whatsapp activity must NOT leak into the thread
+await call(adminTok, 'POST', '/api/lead-activities', { leadId: lead.id, type: 'note', notes: 'internal remark — not for the chat' });
+const thread = await call(adminTok, 'GET', `/api/lead-activities?leadId=${lead.id}&type=whatsapp`);
+const acts3 = thread.body?.activities ?? [];
+ok('?type=whatsapp returns only chat entries', thread.status === 200 && acts3.length === 3 && acts3.every(a => a.type === 'whatsapp'), `${thread.status} n=${acts3.length}`);
+const unfiltered = await call(adminTok, 'GET', `/api/lead-activities?leadId=${lead.id}`);
+ok('unfiltered timeline still shows everything', (unfiltered.body?.activities ?? []).length === 4);
+// every chat row carries the direction prefix the thread UI parses
+const PREFIX = /^\[(sent via [^\]]+|sent from phone|received)\]\s/;
+ok('every thread row carries a parseable direction prefix', acts3.every(a => PREFIX.test(a.notes)), JSON.stringify(acts3.map(a => a.notes.slice(0, 30))));
+// 10-digit local numbers are normalized before hitting the gateway
+const short = await call(adminTok, 'POST', '/api/whatsapp/send', { to: '9876511122', body: 'normalization check' });
+ok('10-digit number auto-prefixed with country code', short.status === 200 && calls.sendText.at(-1)?.number === '919876511122', calls.sendText.at(-1)?.number);
+
 // ── directory exposure + isolation + disconnect ─────────────────────────────
 console.log('\n=== DIRECTORY + ISOLATION + DISCONNECT ===');
 const dir = await call(adminTok, 'GET', '/api/users');

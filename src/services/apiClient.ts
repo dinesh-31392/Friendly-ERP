@@ -871,8 +871,11 @@ export async function apiCreateCustomer(input: { name: string; email?: string; p
 export async function apiUpdateCustomerKyc(id: string, kycStatus: string): Promise<ApiCustomer> {
   return (await request<{ customer: ApiCustomer }>(`/api/customers/${id}`, { method: 'PATCH', body: JSON.stringify({ kycStatus }) })).customer;
 }
-export async function apiGetLeadActivities(leadId?: string): Promise<ApiLeadActivity[]> {
-  const q = leadId ? `?leadId=${encodeURIComponent(leadId)}` : '';
+export async function apiGetLeadActivities(leadId?: string, type?: string): Promise<ApiLeadActivity[]> {
+  const params = new URLSearchParams();
+  if (leadId) params.set('leadId', leadId);
+  if (type) params.set('type', type);
+  const q = params.toString() ? `?${params.toString()}` : '';
   return (await request<{ activities: ApiLeadActivity[] }>(`/api/lead-activities${q}`)).activities;
 }
 export async function apiCreateLeadActivity(input: { leadId: string; type: string; notes?: string; scheduledAt?: string; outcome?: string }): Promise<ApiLeadActivity> {

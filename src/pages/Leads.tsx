@@ -16,10 +16,11 @@ import { telHref, mailtoHref } from '../utils/contact';
 import { whatsappSend } from '../services/whatsappService';
 import { toCsv } from '../utils/csv';
 import { inviteCustomer, portalPath } from '../services/portalService';
-import { isApiEnabled, apiGetLeads } from '../services/apiClient';
+import { isApiEnabled, apiGetLeads, apiWhatsappSession } from '../services/apiClient';
 import { createLead, patchLead, deleteLead as removeLead, patchLeads, deleteLeads } from '../services/leadWrites';
 import { useTenantUsers } from '../hooks/useTenantUsers';
 import DateRangeFilter from '../components/DateRangeFilter';
+import LeadWhatsAppChat from '../components/LeadWhatsAppChat';
 import { type DateRange, ALL_RANGE, resolveRange, inRange, rangeSlug, rangeLabel } from '../utils/dateRange';
 import { qualificationBadge } from '../services/chatbotService';
 import {
@@ -114,6 +115,14 @@ export default function Leads() {
 
   const [search, setSearch] = useState('');
   const [selectedLead, setSelectedLead] = useState<Lead | null>(null);
+  const [chatLead, setChatLead] = useState<Lead | null>(null);
+  // Whether the CALLER has a linked WhatsApp session — decides if the button
+  // opens the chat thread (connected) or keeps the one-shot greeting flow.
+  const [waConnected, setWaConnected] = useState(false);
+  useEffect(() => {
+    if (!isApiEnabled()) return;
+    apiWhatsappSession().then(s => setWaConnected(s.status === 'connected')).catch(() => {});
+  }, []);
   const [filterStage, setFilterStage] = useState<LeadStage | 'all'>('all');
   const [dateRange, setDateRange] = useState<DateRange>(ALL_RANGE);
   const [showAddModal, setShowAddModal] = useState(false);
@@ -1251,23 +1260,26 @@ export default function Leads() {
                 </button>
                 <button
                   onClick={async () => {
-                    // Brand-voice greeting prefilled, dispatched through whichever
-                    // WhatsApp provider the tenant runs (free click-to-chat by
-                    // default; Meta Business API when configured — server-side).
+                    // Rep has a linked WhatsApp session → open the real chat
+                    // thread (send + read replies without leaving the ERP).
+                    if (isApiEnabled() && waConnected) { setChatLead(selectedLead); return; }
+                    // Otherwise: the one-shot greeting flow, dispatched through
+                    // whichever provider the tenant runs (click-to-chat / Meta).
                     const greeting = `Hi ${selectedLead.name.split(' ')[0]}, this is ${user?.name || 'your advisor'} from ${tenant?.name || 'our team'} regarding ${selectedLead.project}. Is this a good time to chat?`;
                     const out = await whatsappSend({ tenantId, phone: selectedLead.phone, text: greeting, leadId: selectedLead.id });
+                    const viaLabel = out.provider === 'evolution' ? 'your WhatsApp' : 'Business API';
                     audit('whatsapp_log', selectedLead.id, out.delivered
-                      ? `Sent WhatsApp to ${selectedLead.name} via Business API`
+                      ? `Sent WhatsApp to ${selectedLead.name} via ${viaLabel}`
                       : `Opened WhatsApp chat with ${selectedLead.name} (${out.provider})`);
                     create<Activity>('activities', {
                       id: '', tenantId, leadId: selectedLead.id, userId, type: 'whatsapp',
                       description: out.delivered
-                        ? `WhatsApp sent to ${selectedLead.name} via Business API`
+                        ? `WhatsApp sent to ${selectedLead.name} via ${viaLabel}`
                         : `WhatsApp conversation opened with ${selectedLead.name}`,
                       createdAt: new Date().toISOString(),
                     });
                     refresh();
-                    if (out.delivered) toast.success('Message sent via WhatsApp Business API');
+                    if (out.delivered) toast.success(out.provider === 'evolution' ? 'Sent from your WhatsApp' : 'Message sent via WhatsApp Business API');
                     else if (out.link) window.open(out.link, '_blank', 'noopener');
                     if (out.error) toast(`WhatsApp API unavailable — opened a chat instead`);
                   }}
@@ -1819,6 +1831,11 @@ export default function Leads() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* WhatsApp chat thread — opens when the rep has a linked session */}
+      {chatLead && (
+        <LeadWhatsAppChat lead={chatLead} tenantId={tenantId} onClose={() => setChatLead(null)} />
       )}
     </div>
   );

@@ -71,11 +71,15 @@ export async function crmRoutes(app: FastifyInstance): Promise<void> {
   // ── Lead activity timeline ──────────────────────────────────────────────
   const actToApi = (r: Record<string, unknown>) => ({ id: r.id, leadId: r.lead_id, userId: r.user_id, type: r.type, notes: r.notes, scheduledAt: r.scheduled_at, outcome: r.outcome, createdAt: r.created_at });
 
-  app.get<{ Querystring: { leadId?: string } }>('/api/lead-activities', { preHandler: requireAuth }, async (req, reply) =>
+  app.get<{ Querystring: { leadId?: string; type?: string } }>('/api/lead-activities', { preHandler: requireAuth }, async (req, reply) =>
     withTenantContext(req.ctx, async (db) => {
       if (!await gate(db, 'view_leads')) return reply.code(403).send({ error: 'Missing permission: view_leads' });
+      // ?type= keeps the WhatsApp chat thread's 5s poll cheap — it only ever
+      // wants the whatsapp slice, not the whole timeline.
       const { rows } = req.query.leadId
-        ? await db.query('SELECT * FROM lead_activities WHERE lead_id = $1 ORDER BY created_at DESC', [req.query.leadId])
+        ? await db.query(
+            `SELECT * FROM lead_activities WHERE lead_id = $1 AND ($2::text IS NULL OR type = $2) ORDER BY created_at DESC`,
+            [req.query.leadId, req.query.type ?? null])
         : await db.query('SELECT * FROM lead_activities ORDER BY created_at DESC LIMIT 500');
       return { activities: rows.map(actToApi) };
     }),

@@ -22,6 +22,15 @@ function toApiInstance(r: Record<string, unknown> | undefined) {
   };
 }
 
+/** Leads are often stored as bare 10-digit local numbers; WhatsApp JIDs need
+ *  the country code. Default '91' (the product's market) — override with
+ *  WHATSAPP_DEFAULT_CC. Longer numbers pass through untouched. */
+function normalizePhone(raw: string): string {
+  let d = String(raw).replace(/\D/g, '').replace(/^0+/, '');
+  if (d.length === 10) d = (process.env.WHATSAPP_DEFAULT_CC || '91') + d;
+  return d;
+}
+
 function waLink(to: string, body?: string): string {
   const digits = String(to).replace(/\D/g, '');
   return `https://wa.me/${digits}${body ? `?text=${encodeURIComponent(body)}` : ''}`;
@@ -238,7 +247,7 @@ export async function whatsappRoutes(app: FastifyInstance): Promise<void> {
       withTenantContext(req.ctx, async (db) => {
         const { rows: [{ allowed }] } = await db.query(`SELECT has_permission('send_messages') AS allowed`);
         if (!allowed) return reply.code(403).send({ error: 'Missing permission: send_messages' });
-        const digits = req.body.to.replace(/\D/g, '');
+        const digits = normalizePhone(req.body.to);
 
         const logActivity = async (via: string) => {
           let leadId = req.body.leadId ?? null;

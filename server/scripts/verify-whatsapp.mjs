@@ -192,6 +192,34 @@ ok('every thread row carries a parseable direction prefix', acts3.every(a => PRE
 const short = await call(adminTok, 'POST', '/api/whatsapp/send', { to: '9876511122', body: 'normalization check' });
 ok('10-digit number auto-prefixed with country code', short.status === 200 && calls.sendText.at(-1)?.number === '919876511122', calls.sendText.at(-1)?.number);
 
+// ── inbox (Messages page) ───────────────────────────────────────────────────
+console.log('\n=== INBOX / CONVERSATIONS ===');
+const inbox = await call(adminTok, 'GET', '/api/whatsapp/conversations');
+const convs = inbox.body?.conversations ?? [];
+const kk = convs.find(c => c.leadId === lead.id);
+ok('inbox lists the lead with WhatsApp history', inbox.status === 200 && !!kk, `${inbox.status} n=${convs.length}`);
+ok('preview strips the direction prefix', !!kk && !/^\[/.test(kk.lastMessage), kk?.lastMessage);
+// Compare against the DB rather than a literal — earlier sections add messages,
+// and a hard-coded count would silently rot as this suite grows.
+const dbCount = (await admin.query(
+  `SELECT count(*)::int n FROM lead_activities WHERE lead_id=$1 AND type='whatsapp'`, [lead.id])).rows[0].n;
+ok('message count matches the thread', kk?.messageCount === dbCount, `inbox ${kk?.messageCount} vs db ${dbCount}`);
+// last message here was ours ("See you then!" from the phone) → not awaiting
+ok('awaitingReply false when we spoke last', kk?.awaitingReply === false, JSON.stringify({ a: kk?.awaitingReply, m: kk?.lastMessage }));
+// a fresh inbound flips it
+await hook(token1, { event: 'messages.upsert', data: {
+  key: { remoteJid: '919876511122@s.whatsapp.net', fromMe: false }, message: { conversation: 'One more question' } } });
+const inbox2 = (await call(adminTok, 'GET', '/api/whatsapp/conversations')).body?.conversations ?? [];
+const kk2 = inbox2.find(c => c.leadId === lead.id);
+ok('a customer reply flips awaitingReply + updates the preview',
+  kk2?.awaitingReply === true && kk2?.lastMessage === 'One more question', JSON.stringify({ a: kk2?.awaitingReply, m: kk2?.lastMessage }));
+// leads with no WhatsApp history must not appear
+const emptyLead = (await admin.query(
+  `INSERT INTO leads (tenant_id, name, phone, source, stage, priority, last_contact_at)
+   VALUES ($1, '${MARK} Silent Lead', '919999000011', 'Direct', 'new', 'warm', now()) RETURNING id`, [PLATFORM])).rows[0];
+const inbox3 = (await call(adminTok, 'GET', '/api/whatsapp/conversations')).body?.conversations ?? [];
+ok('leads with no chat history are excluded', !inbox3.some(c => c.leadId === emptyLead.id));
+
 // ── directory exposure + isolation + disconnect ─────────────────────────────
 console.log('\n=== DIRECTORY + ISOLATION + DISCONNECT ===');
 const dir = await call(adminTok, 'GET', '/api/users');
@@ -201,6 +229,9 @@ const rivalTok = await login('badmin@rival.test');
 if (rivalTok) {
   const rs = await call(rivalTok, 'GET', '/api/whatsapp/session');
   ok('rival tenant sees no session (RLS)', rs.body?.session?.status === 'disconnected' && rs.body?.session?.instanceName === '');
+  const ri = await call(rivalTok, 'GET', '/api/whatsapp/conversations');
+  ok('rival tenant inbox excludes our conversations',
+    !(ri.body?.conversations ?? []).some(c => c.leadId === lead.id), `saw ${(ri.body?.conversations ?? []).length}`);
 } else ok('rival login', false);
 const disc = await call(adminTok, 'POST', '/api/whatsapp/disconnect');
 ok('disconnect logs out on the gateway', disc.status === 200 && disc.body?.session?.status === 'disconnected' && calls.logout.includes(inst1));

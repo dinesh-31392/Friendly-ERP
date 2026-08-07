@@ -680,6 +680,16 @@ export async function apiWhatsappSession(): Promise<WhatsAppSession> {
 export async function apiWhatsappConnect(): Promise<{ session: WhatsAppSession; qrcode: string; pairingCode: string }> {
   return request('/api/whatsapp/connect', { method: 'POST', body: JSON.stringify({}) });
 }
+/** One inbox row per lead with WhatsApp history, newest first. */
+export interface WhatsAppConversation {
+  leadId: string; name: string; phone: string; project: string; stage: string;
+  lastMessage: string; lastAt: string;
+  lastFromCustomer: boolean; awaitingReply: boolean; messageCount: number;
+}
+export async function apiWhatsappConversations(): Promise<WhatsAppConversation[]> {
+  return (await request<{ conversations: WhatsAppConversation[] }>('/api/whatsapp/conversations')).conversations;
+}
+
 export async function apiWhatsappDisconnect(): Promise<WhatsAppSession> {
   return (await request<{ session: WhatsAppSession }>('/api/whatsapp/disconnect', { method: 'POST', body: JSON.stringify({}) })).session;
 }

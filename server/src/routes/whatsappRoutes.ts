@@ -205,6 +205,63 @@ export async function whatsappRoutes(app: FastifyInstance): Promise<void> {
     }),
   );
 
+  /**
+   * GET /api/whatsapp/conversations — the WhatsApp inbox: one row per lead
+   * that has any WhatsApp history, newest activity first, with the last
+   * message for the preview line.
+   *
+   * `awaitingReply` is true when the newest message came FROM the customer —
+   * that is the "needs you" signal the inbox sorts and badges on, and it needs
+   * no extra read-state table to maintain.
+   *
+   * Scoping: RLS pins the tenant. A sales executive additionally sees only
+   * leads assigned to them (mirrors the Messages page's existing rule); anyone
+   * with team-wide lead visibility sees the whole tenant inbox.
+   */
+  app.get('/api/whatsapp/conversations', { preHandler: requireAuth }, async (req, reply) =>
+    withTenantContext(req.ctx, async (db) => {
+      const { rows: [{ allowed }] } = await db.query(`SELECT has_permission('view_messages') AS allowed`);
+      if (!allowed) return reply.code(403).send({ error: 'Missing permission: view_messages' });
+      // manage_leads = team-wide lead ownership; a sales executive holds only
+      // manage_own_leads, so their inbox is filtered to leads assigned to them.
+      const { rows: [{ all_leads }] } = await db.query(
+        `SELECT has_permission('manage_leads') OR has_permission('manage_team') AS all_leads`);
+
+      const { rows } = await db.query(
+        `SELECT l.id AS lead_id, l.name, l.phone, l.project, l.stage, l.assigned_to,
+                last.notes AS last_notes, last.created_at AS last_at, agg.n AS message_count
+           FROM leads l
+           JOIN LATERAL (
+             SELECT notes, created_at FROM lead_activities
+              WHERE lead_id = l.id AND type = 'whatsapp'
+              ORDER BY created_at DESC LIMIT 1
+           ) last ON true
+           JOIN LATERAL (
+             SELECT count(*)::int AS n FROM lead_activities
+              WHERE lead_id = l.id AND type = 'whatsapp'
+           ) agg ON true
+          WHERE ($1::boolean OR l.assigned_to = $2::uuid)
+          ORDER BY last.created_at DESC
+          LIMIT 200`,
+        [!!all_leads, req.ctx.userId || null]);
+
+      return {
+        conversations: rows.map(r => {
+          const notes = String(r.last_notes ?? '');
+          const m = notes.match(/^\[(sent via [^\]]+|sent from phone|received)\]\s?([\s\S]*)$/);
+          return {
+            leadId: r.lead_id, name: r.name, phone: r.phone, project: r.project, stage: r.stage,
+            lastMessage: m ? m[2] : notes,
+            lastAt: r.last_at,
+            lastFromCustomer: m ? m[1] === 'received' : false,
+            awaitingReply: m ? m[1] === 'received' : false,
+            messageCount: r.message_count,
+          };
+        }),
+      };
+    }),
+  );
+
   /** POST /api/whatsapp/disconnect — unlink the CALLER's session. */
   app.post('/api/whatsapp/disconnect', { preHandler: requireAuth }, async (req, reply) =>
     withTenantContext(req.ctx, async (db) => {

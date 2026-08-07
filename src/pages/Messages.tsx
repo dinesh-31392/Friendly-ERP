@@ -1,5 +1,7 @@
 import { useState, useMemo, useRef, useEffect } from 'react';
 import { Search, Send, Paperclip, Phone, MoreHorizontal, MessageSquare } from 'lucide-react';
+import WhatsAppInbox from '../components/WhatsAppInbox';
+import { isApiEnabled } from '../services/apiClient';
 import { useAuth } from '../context/AuthContext';
 import { getByTenant, create, update } from '../services/db';
 import { localeFor } from '../utils/format';
@@ -17,6 +19,9 @@ export default function Messages() {
   const isExecutive = user?.role === 'sales_executive';
   const [refreshKey, setRefreshKey] = useState(0);
   const refresh = () => setRefreshKey(k => k + 1);
+  // WhatsApp is the real channel (server-backed); 'internal' is the simulated
+  // in-app thread the demo has always had. Default to WhatsApp on the server.
+  const [channel, setChannel] = useState<'whatsapp' | 'internal'>(isApiEnabled() ? 'whatsapp' : 'internal');
 
   const leads = useMemo(() => getByTenant<Lead>('leads', tenantId), [tenantId, refreshKey]);
   const visibleLeadIds = useMemo(
@@ -155,18 +160,59 @@ export default function Messages() {
     replyTimers.current.add(timer);
   };
 
+  const channelTabs = (
+    <div className="flex items-center gap-2">
+      {([
+        { id: 'whatsapp' as const, label: 'WhatsApp', hint: 'Real conversations from your linked number' },
+        { id: 'internal' as const, label: 'In-app', hint: 'Simulated in-app thread' },
+      ]).map(t => (
+        <button
+          key={t.id}
+          onClick={() => setChannel(t.id)}
+          title={t.hint}
+          className={`px-3.5 py-2 rounded-xl text-sm font-semibold transition-colors ${
+            channel === t.id ? 'bg-emerald-600 text-white' : 'bg-white text-zinc-600 border border-zinc-200 hover:bg-zinc-50'
+          }`}
+        >
+          {t.label}
+        </button>
+      ))}
+    </div>
+  );
+
+  // WhatsApp inbox — every conversation across all leads, sent and received.
+  if (channel === 'whatsapp') {
+    return (
+      <div className="space-y-4 max-w-[1200px]">
+        <div className="flex items-center justify-between flex-wrap gap-3">
+          <div>
+            <h2 className="text-2xl font-bold text-zinc-900">Messages</h2>
+            <p className="text-sm text-zinc-500 mt-0.5">Every WhatsApp conversation with your leads, in one inbox.</p>
+          </div>
+          {channelTabs}
+        </div>
+        <WhatsAppInbox tenantId={tenantId} />
+      </div>
+    );
+  }
+
   if (conversations.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center py-20 text-center">
-        <MessageSquare className="h-12 w-12 text-zinc-300 mb-4" />
-        <h3 className="text-lg font-semibold text-zinc-700 mb-1">No Conversations Yet</h3>
-        <p className="text-sm text-zinc-500 max-w-sm">Your customer conversations will appear here.</p>
+      <div className="space-y-4">
+        <div className="flex justify-end">{channelTabs}</div>
+        <div className="flex flex-col items-center justify-center py-20 text-center">
+          <MessageSquare className="h-12 w-12 text-zinc-300 mb-4" />
+          <h3 className="text-lg font-semibold text-zinc-700 mb-1">No Conversations Yet</h3>
+          <p className="text-sm text-zinc-500 max-w-sm">Your customer conversations will appear here.</p>
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="flex gap-0 h-[calc(100vh-120px)] max-w-[1200px] flex-col lg:flex-row">
+    <div className="space-y-3 max-w-[1200px]">
+    <div className="flex justify-end">{channelTabs}</div>
+    <div className="flex gap-0 h-[calc(100vh-170px)] flex-col lg:flex-row">
       <div className="w-full lg:w-80 shrink-0 bg-white rounded-t-2xl lg:rounded-l-2xl lg:rounded-tr-none border border-zinc-200/60 lg:border-r-0 overflow-hidden flex flex-col">
         <div className="p-4 border-b border-zinc-100">
           <div className="relative">
@@ -287,6 +333,7 @@ export default function Messages() {
           <p className="text-sm text-zinc-400">Select a conversation to start</p>
         </div>
       )}
+    </div>
     </div>
   );
 }

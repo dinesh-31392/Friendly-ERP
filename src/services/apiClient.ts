@@ -680,6 +680,16 @@ export async function apiWhatsappSession(): Promise<WhatsAppSession> {
 export async function apiWhatsappConnect(): Promise<{ session: WhatsAppSession; qrcode: string; pairingCode: string }> {
   return request('/api/whatsapp/connect', { method: 'POST', body: JSON.stringify({}) });
 }
+/** Send an attachment from the rep's own linked number. Evolution-only —
+ *  the click-to-chat link cannot carry a file. `base64` is raw (no data: prefix). */
+export async function apiSendWhatsAppMedia(input: {
+  to: string; leadId?: string;
+  mediatype: 'image' | 'document' | 'video' | 'audio';
+  mimetype: string; fileName?: string; caption?: string; base64: string;
+}): Promise<{ delivered: boolean; provider: string; messageId?: string; descriptor: string }> {
+  return request('/api/whatsapp/send-media', { method: 'POST', body: JSON.stringify(input) });
+}
+
 /** One inbox row per lead with WhatsApp history, newest first. */
 export interface WhatsAppConversation {
   leadId: string; name: string; phone: string; project: string; stage: string;

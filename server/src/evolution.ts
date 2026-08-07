@@ -109,17 +109,49 @@ export async function logoutInstance(gw: Gateway, name: string): Promise<void> {
 export async function sendWhatsAppMessage(
   db: PoolClient, gw: Gateway, userId: string, phone: string, message: string,
 ): Promise<{ messageId: string; instanceName: string }> {
+  const session = await requireConnectedSession(db, userId);
+  const digits = String(phone).replace(/\D/g, '');
+  const body = await evoFetch(gw, `/message/sendText/${encodeURIComponent(session)}`, {
+    method: 'POST',
+    body: JSON.stringify({ number: digits, text: message }),
+  });
+  const messageId = String(((body.key as Record<string, unknown>)?.id ?? body.messageId ?? ''));
+  return { messageId, instanceName: session };
+}
+
+/** Shared precondition: the rep must have a session, and it must be live. */
+async function requireConnectedSession(db: PoolClient, userId: string): Promise<string> {
   const { rows } = await db.query(
     `SELECT instance_name, status FROM whatsapp_user_sessions WHERE user_id = $1`, [userId]);
   const session = rows[0];
   if (!session) throw new Error('This user has not linked a WhatsApp session');
   if (session.status !== 'connected') throw new Error('This user\'s WhatsApp session is not connected — scan the QR first');
+  return session.instance_name as string;
+}
 
+export type MediaKind = 'image' | 'document' | 'video' | 'audio';
+
+/**
+ * Send an attachment through the rep's own session. `base64` is the raw file
+ * payload WITHOUT a data: prefix — the gateway rejects the prefixed form.
+ */
+export async function sendWhatsAppMedia(
+  db: PoolClient, gw: Gateway, userId: string, phone: string,
+  file: { mediatype: MediaKind; mimetype: string; fileName?: string; caption?: string; base64: string },
+): Promise<{ messageId: string; instanceName: string }> {
+  const session = await requireConnectedSession(db, userId);
   const digits = String(phone).replace(/\D/g, '');
-  const body = await evoFetch(gw, `/message/sendText/${encodeURIComponent(session.instance_name as string)}`, {
+  const body = await evoFetch(gw, `/message/sendMedia/${encodeURIComponent(session)}`, {
     method: 'POST',
-    body: JSON.stringify({ number: digits, text: message }),
+    body: JSON.stringify({
+      number: digits,
+      mediatype: file.mediatype,
+      mimetype: file.mimetype,
+      caption: file.caption || undefined,
+      fileName: file.fileName || undefined,
+      media: file.base64.replace(/^data:[^;]+;base64,/, ''),
+    }),
   });
   const messageId = String(((body.key as Record<string, unknown>)?.id ?? body.messageId ?? ''));
-  return { messageId, instanceName: session.instance_name as string };
+  return { messageId, instanceName: session };
 }

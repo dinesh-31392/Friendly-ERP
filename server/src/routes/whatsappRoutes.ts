@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { randomBytes } from 'node:crypto';
 import { withTenantContext, platformPool } from '../db.js';
 import { requireAuth } from '../auth.js';
-import { resolveGateway, ensureInstance, requestQr, connectionStatus, logoutInstance, sendWhatsAppMessage } from '../evolution.js';
+import { resolveGateway, ensureInstance, requestQr, connectionStatus, logoutInstance, sendWhatsAppMessage, sendWhatsAppMedia, type MediaKind } from '../evolution.js';
 
 const PROVIDERS = ['click_to_chat', 'meta_cloud_waba', 'evolution'] as const;
 const GRAPH_VERSION = 'v21.0';
@@ -47,11 +47,39 @@ const sessionToApi = (r: Record<string, unknown> | undefined) =>
     ? { instanceName: r.instance_name, status: r.status, phone: r.phone, lastConnectedAt: r.last_connected_at }
     : { instanceName: '', status: 'disconnected', phone: '', lastConnectedAt: null };
 
-/** Extract the human text out of an Evolution message payload. */
+/**
+ * Extract a human-readable line from an Evolution message payload.
+ *
+ * We do NOT store the media itself (there is no blob store) — an attachment is
+ * recorded as a descriptor so the timeline shows WHAT arrived and when. Before
+ * this, a caption-less photo produced an empty string and the message was
+ * dropped entirely, so a customer sending only a picture looked like silence.
+ */
 function messageText(msg: Record<string, unknown> | undefined): string {
   if (!msg) return '';
-  const m = msg as { conversation?: string; extendedTextMessage?: { text?: string }; imageMessage?: { caption?: string }; documentMessage?: { caption?: string } };
-  return m.conversation || m.extendedTextMessage?.text || m.imageMessage?.caption || m.documentMessage?.caption || '';
+  const m = msg as {
+    conversation?: string;
+    extendedTextMessage?: { text?: string };
+    imageMessage?: { caption?: string };
+    videoMessage?: { caption?: string };
+    documentMessage?: { caption?: string; fileName?: string };
+    documentWithCaptionMessage?: { message?: { documentMessage?: { caption?: string; fileName?: string } } };
+    audioMessage?: { ptt?: boolean };
+    stickerMessage?: unknown;
+    locationMessage?: { degreesLatitude?: number; degreesLongitude?: number };
+    contactMessage?: { displayName?: string };
+  };
+  if (m.conversation) return m.conversation;
+  if (m.extendedTextMessage?.text) return m.extendedTextMessage.text;
+  if (m.imageMessage) return m.imageMessage.caption ? `📷 ${m.imageMessage.caption}` : '📷 Photo';
+  if (m.videoMessage) return m.videoMessage.caption ? `🎥 ${m.videoMessage.caption}` : '🎥 Video';
+  const doc = m.documentMessage ?? m.documentWithCaptionMessage?.message?.documentMessage;
+  if (doc) return `📄 ${doc.fileName || 'Document'}${doc.caption ? ` — ${doc.caption}` : ''}`;
+  if (m.audioMessage) return m.audioMessage.ptt ? '🎙️ Voice message' : '🎵 Audio';
+  if (m.stickerMessage) return '🌟 Sticker';
+  if (m.locationMessage) return '📍 Location';
+  if (m.contactMessage) return `👤 Contact${m.contactMessage.displayName ? `: ${m.contactMessage.displayName}` : ''}`;
+  return '';
 }
 
 interface SaveBody { provider?: string; phoneNumberId?: string; accessToken?: string; displayPhone?: string; evolutionUrl?: string; evolutionApiKey?: string }
@@ -361,6 +389,80 @@ export async function whatsappRoutes(app: FastifyInstance): Promise<void> {
           return { delivered: true, provider: 'meta_cloud_waba', messageId };
         } catch (err) {
           return reply.code(502).send({ error: err instanceof Error ? err.message : 'WhatsApp API unreachable', fallbackLink: waLink(digits, req.body.body) });
+        }
+      }),
+  );
+
+  /**
+   * POST /api/whatsapp/send-media — send an attachment from the rep's own
+   * number. Evolution-only: the click-to-chat link cannot carry a file, and
+   * the Meta path needs a hosted media id, so this fails loudly rather than
+   * pretending. The file rides as base64 (10 MB cap; the route's bodyLimit is
+   * raised to cover base64's ~33% inflation).
+   *
+   * The file itself is NOT stored — the ERP has no blob store — so the
+   * timeline records a descriptor ("📄 floorplan.pdf"), the same shape the
+   * webhook writes for inbound attachments.
+   */
+  app.post<{ Body: { to: string; leadId?: string; mediatype: string; mimetype: string; fileName?: string; caption?: string; base64: string } }>(
+    '/api/whatsapp/send-media',
+    {
+      preHandler: requireAuth,
+      bodyLimit: 15 * 1024 * 1024,
+      schema: {
+        body: {
+          type: 'object', required: ['to', 'mediatype', 'mimetype', 'base64'], additionalProperties: false,
+          properties: {
+            to: { type: 'string', minLength: 3, maxLength: 32 },
+            leadId: { type: 'string', pattern: '^[0-9a-fA-F-]{36}$' },
+            mediatype: { type: 'string', enum: ['image', 'document', 'video', 'audio'] },
+            mimetype: { type: 'string', maxLength: 128 },
+            fileName: { type: 'string', maxLength: 200 },
+            caption: { type: 'string', maxLength: 1024 },
+            base64: { type: 'string', minLength: 8, maxLength: 14 * 1024 * 1024 },
+          },
+        },
+      },
+    },
+    async (req, reply) =>
+      withTenantContext(req.ctx, async (db) => {
+        const { rows: [{ allowed }] } = await db.query(`SELECT has_permission('send_messages') AS allowed`);
+        if (!allowed) return reply.code(403).send({ error: 'Missing permission: send_messages' });
+
+        const gw = await resolveGateway(db);
+        if (!gw) return reply.code(503).send({ error: 'Attachments need your own linked WhatsApp — the gateway is not configured' });
+
+        const digits = normalizePhone(req.body.to);
+        try {
+          const sent = await sendWhatsAppMedia(db, gw, req.ctx.userId!, digits, {
+            mediatype: req.body.mediatype as MediaKind,
+            mimetype: req.body.mimetype,
+            fileName: req.body.fileName,
+            caption: req.body.caption,
+            base64: req.body.base64,
+          });
+
+          const icon = req.body.mediatype === 'image' ? '📷'
+            : req.body.mediatype === 'video' ? '🎥'
+            : req.body.mediatype === 'audio' ? '🎵' : '📄';
+          const label = req.body.fileName || (req.body.mediatype === 'image' ? 'Photo' : 'File');
+          const descriptor = `${icon} ${label}${req.body.caption ? ` — ${req.body.caption}` : ''}`;
+
+          let leadId = req.body.leadId ?? null;
+          if (!leadId) {
+            const { rows: match } = await db.query(
+              `SELECT id FROM leads WHERE RIGHT(regexp_replace(phone, '\\D', '', 'g'), 10) = RIGHT($1, 10) LIMIT 1`, [digits]);
+            leadId = match[0]?.id ?? null;
+          }
+          if (leadId) {
+            await db.query(
+              `INSERT INTO lead_activities (tenant_id, lead_id, user_id, type, notes)
+               VALUES (app_current_tenant(), $1, $2, 'whatsapp', $3)`,
+              [leadId, req.ctx.userId || null, `[sent via my WhatsApp] ${descriptor}`.slice(0, 2000)]);
+          }
+          return { delivered: true, provider: 'evolution', messageId: sent.messageId, descriptor };
+        } catch (err) {
+          return reply.code(502).send({ error: err instanceof Error ? err.message : 'Could not send the attachment' });
         }
       }),
   );

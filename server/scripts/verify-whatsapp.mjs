@@ -25,7 +25,7 @@ let pass = 0, fail = 0;
 const ok = (n, c, x = '') => { c ? (pass++, console.log('  ✓ ' + n)) : (fail++, console.log('  ✗ ' + n + (x ? '  -> ' + x : ''))); };
 
 // ── mock Evolution container ────────────────────────────────────────────────
-const calls = { create: [], connect: [], sendText: [], webhookSet: [], logout: [] };
+const calls = { create: [], connect: [], sendText: [], sendMedia: [], webhookSet: [], logout: [] };
 const states = {};   // instanceName -> 'open' | 'connecting' | 'close'
 const mock = http.createServer((req, res) => {
   const send = (code, body) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(body)); };
@@ -51,6 +51,10 @@ const mock = http.createServer((req, res) => {
     if ((m = url.match(/^\/message\/sendText\/(.+)$/)) && req.method === 'POST') {
       calls.sendText.push({ instance: m[1], ...body });
       return send(201, { key: { id: 'MOCK-MSG-' + calls.sendText.length } });
+    }
+    if ((m = url.match(/^\/message\/sendMedia\/(.+)$/)) && req.method === 'POST') {
+      calls.sendMedia.push({ instance: m[1], ...body });
+      return send(201, { key: { id: 'MOCK-MEDIA-' + calls.sendMedia.length } });
     }
     if ((m = url.match(/^\/webhook\/set\/(.+)$/)) && req.method === 'POST') {
       calls.webhookSet.push({ instance: m[1], ...body }); return send(200, {});
@@ -192,6 +196,48 @@ ok('every thread row carries a parseable direction prefix', acts3.every(a => PRE
 const short = await call(adminTok, 'POST', '/api/whatsapp/send', { to: '9876511122', body: 'normalization check' });
 ok('10-digit number auto-prefixed with country code', short.status === 200 && calls.sendText.at(-1)?.number === '919876511122', calls.sendText.at(-1)?.number);
 
+// ── media ───────────────────────────────────────────────────────────────────
+console.log('\n=== MEDIA ===');
+// 1x1 png
+const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+const mediaRes = await call(adminTok, 'POST', '/api/whatsapp/send-media', {
+  to: '+91 98765-11122', leadId: lead.id, mediatype: 'image',
+  mimetype: 'image/png', fileName: 'floorplan.png', caption: '2 BHK layout', base64: PNG,
+});
+ok('media sent via the caller\'s instance', mediaRes.status === 200 && mediaRes.body?.delivered === true,
+  `${mediaRes.status} ${JSON.stringify(mediaRes.body)?.slice(0, 120)}`);
+ok('gateway got mediatype + filename + base64 (no data: prefix)',
+  calls.sendMedia.at(-1)?.mediatype === 'image' &&
+  calls.sendMedia.at(-1)?.fileName === 'floorplan.png' &&
+  !String(calls.sendMedia.at(-1)?.media ?? '').startsWith('data:'),
+  JSON.stringify({ t: calls.sendMedia.at(-1)?.mediatype, f: calls.sendMedia.at(-1)?.fileName }));
+ok('media dispatched through the CALLER\'s instance', calls.sendMedia.at(-1)?.instance === inst1);
+const mediaLog = (await admin.query(
+  `SELECT notes FROM lead_activities WHERE lead_id=$1 AND type='whatsapp' ORDER BY created_at DESC LIMIT 1`, [lead.id])).rows[0];
+ok('attachment logged as a descriptor on the timeline',
+  mediaLog?.notes === '[sent via my WhatsApp] 📷 floorplan.png — 2 BHK layout', mediaLog?.notes);
+const tooBig = await call(adminTok, 'POST', '/api/whatsapp/send-media', {
+  to: '919876511122', mediatype: 'image', mimetype: 'image/png', base64: 'x'.repeat(15 * 1024 * 1024) });
+ok('oversized attachment rejected', tooBig.status === 400 || tooBig.status === 413, `${tooBig.status}`);
+
+// inbound media descriptors — a caption-less photo used to be dropped entirely
+console.log('\n=== INBOUND MEDIA DESCRIPTORS ===');
+const beforeMedia = (await admin.query(`SELECT count(*)::int n FROM lead_activities WHERE lead_id=$1`, [lead.id])).rows[0].n;
+await hook(token1, { event: 'messages.upsert', data: {
+  key: { remoteJid: '919876511122@s.whatsapp.net', fromMe: false }, message: { imageMessage: {} } } });
+await hook(token1, { event: 'messages.upsert', data: {
+  key: { remoteJid: '919876511122@s.whatsapp.net', fromMe: false },
+  message: { documentMessage: { fileName: 'aadhaar.pdf' } } } });
+await hook(token1, { event: 'messages.upsert', data: {
+  key: { remoteJid: '919876511122@s.whatsapp.net', fromMe: false }, message: { audioMessage: { ptt: true } } } });
+const media3 = (await admin.query(
+  `SELECT notes FROM lead_activities WHERE lead_id=$1 AND type='whatsapp' ORDER BY created_at DESC LIMIT 3`, [lead.id])).rows.map(r => r.notes);
+ok('caption-less photo is logged, not dropped', media3.includes('[received] 📷 Photo'), JSON.stringify(media3));
+ok('document logged with its filename', media3.includes('[received] 📄 aadhaar.pdf'), JSON.stringify(media3));
+ok('voice note logged', media3.includes('[received] 🎙️ Voice message'), JSON.stringify(media3));
+ok('all three inbound media rows persisted',
+  (await admin.query(`SELECT count(*)::int n FROM lead_activities WHERE lead_id=$1`, [lead.id])).rows[0].n === beforeMedia + 3);
+
 // ── inbox (Messages page) ───────────────────────────────────────────────────
 console.log('\n=== INBOX / CONVERSATIONS ===');
 const inbox = await call(adminTok, 'GET', '/api/whatsapp/conversations');
@@ -204,8 +250,14 @@ ok('preview strips the direction prefix', !!kk && !/^\[/.test(kk.lastMessage), k
 const dbCount = (await admin.query(
   `SELECT count(*)::int n FROM lead_activities WHERE lead_id=$1 AND type='whatsapp'`, [lead.id])).rows[0].n;
 ok('message count matches the thread', kk?.messageCount === dbCount, `inbox ${kk?.messageCount} vs db ${dbCount}`);
-// last message here was ours ("See you then!" from the phone) → not awaiting
-ok('awaitingReply false when we spoke last', kk?.awaitingReply === false, JSON.stringify({ a: kk?.awaitingReply, m: kk?.lastMessage }));
+// Establish the precondition rather than assuming it — earlier sections may
+// leave either side speaking last.
+await call(adminTok, 'POST', '/api/whatsapp/send', { to: '919876511122', body: 'we spoke last', leadId: lead.id });
+const afterOurs = ((await call(adminTok, 'GET', '/api/whatsapp/conversations')).body?.conversations ?? [])
+  .find(c => c.leadId === lead.id);
+ok('awaitingReply false when we spoke last',
+  afterOurs?.awaitingReply === false && afterOurs?.lastMessage === 'we spoke last',
+  JSON.stringify({ a: afterOurs?.awaitingReply, m: afterOurs?.lastMessage }));
 // a fresh inbound flips it
 await hook(token1, { event: 'messages.upsert', data: {
   key: { remoteJid: '919876511122@s.whatsapp.net', fromMe: false }, message: { conversation: 'One more question' } } });

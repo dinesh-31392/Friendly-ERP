@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Send, ExternalLink, AlertTriangle } from 'lucide-react';
-import { isApiEnabled, apiGetLeadActivities, apiSendWhatsApp } from '../services/apiClient';
+import { Send, ExternalLink, AlertTriangle, Paperclip } from 'lucide-react';
+import { isApiEnabled, apiGetLeadActivities, apiSendWhatsApp, apiSendWhatsAppMedia } from '../services/apiClient';
 import { getByTenant } from '../services/db';
 import { whatsappHref } from '../utils/contact';
 import { activitiesToBubbles, groupByDay, timeLabel, type Bubble } from '../services/whatsappThread';
 import type { Activity } from '../types';
+import toast from 'react-hot-toast';
 
 /**
  * The conversation itself — message list + composer — for one lead. Used by
@@ -28,6 +29,7 @@ export default function WhatsAppThread({ leadId, phone, tenantId, onActivity }: 
   const [sending, setSending] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const optimisticSeq = useRef(0);
+  const fileRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
     if (api) {
@@ -94,6 +96,49 @@ export default function WhatsAppThread({ leadId, phone, tenantId, onActivity }: 
     }
   };
 
+  /** Attachment picker → base64 → /send-media. Sends immediately; a caption is
+   *  whatever is already typed in the composer. */
+  const MAX_MB = 10;
+  const sendFile = async (file: File) => {
+    if (!api) { toast.error('Attachments need the live workspace'); return; }
+    if (file.size > MAX_MB * 1024 * 1024) { toast.error(`Files must be under ${MAX_MB} MB`); return; }
+
+    const mediatype: 'image' | 'video' | 'audio' | 'document' =
+      file.type.startsWith('image/') ? 'image'
+      : file.type.startsWith('video/') ? 'video'
+      : file.type.startsWith('audio/') ? 'audio' : 'document';
+    const icon = mediatype === 'image' ? '📷' : mediatype === 'video' ? '🎥' : mediatype === 'audio' ? '🎵' : '📄';
+    const caption = draft.trim();
+    setDraft('');
+
+    const tempId = `optimistic-${++optimisticSeq.current}`;
+    setBubbles(prev => [...prev, {
+      id: tempId, mine: true, at: new Date().toISOString(), state: 'sending',
+      text: `${icon} ${file.name}${caption ? ` — ${caption}` : ''}`,
+    }]);
+    setSending(true);
+    try {
+      const base64 = await new Promise<string>((resolve, reject) => {
+        const r = new FileReader();
+        r.onload = () => resolve(String(r.result).replace(/^data:[^;]+;base64,/, ''));
+        r.onerror = () => reject(new Error('Could not read that file'));
+        r.readAsDataURL(file);
+      });
+      await apiSendWhatsAppMedia({
+        to: phone, leadId, mediatype, mimetype: file.type || 'application/octet-stream',
+        fileName: file.name, caption: caption || undefined, base64,
+      });
+      setBubbles(prev => prev.map(b => b.id === tempId ? { ...b, state: undefined } : b));
+      load();
+      onActivity?.();
+    } catch (err) {
+      setBubbles(prev => prev.map(b => b.id === tempId ? { ...b, state: 'failed' } : b));
+      toast.error(err instanceof Error ? err.message : 'Could not send the attachment');
+    } finally {
+      setSending(false);
+    }
+  };
+
   return (
     <>
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-3 py-4 space-y-2 bg-[#efeae2]">
@@ -139,6 +184,19 @@ export default function WhatsAppThread({ leadId, phone, tenantId, onActivity }: 
           </p>
         )}
         <div className="flex items-end gap-2">
+          <input
+            ref={fileRef} type="file" className="hidden"
+            onChange={e => { const f = e.target.files?.[0]; if (f) sendFile(f); e.target.value = ''; }}
+          />
+          <button
+            onClick={() => fileRef.current?.click()}
+            disabled={!api || sending}
+            title={api ? 'Attach a photo or document' : 'Attachments need the live workspace'}
+            className="h-10 w-10 shrink-0 rounded-full text-zinc-500 hover:bg-zinc-200 flex items-center justify-center disabled:opacity-40"
+            aria-label="Attach a file"
+          >
+            <Paperclip className="h-4 w-4" />
+          </button>
           <textarea
             value={draft}
             onChange={e => setDraft(e.target.value)}

@@ -1,9 +1,10 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { Search, MessageCircle, ArrowLeft, ExternalLink, RefreshCw } from 'lucide-react';
+import { Search, MessageCircle, ArrowLeft, ExternalLink, RefreshCw, PenSquare } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { isApiEnabled, apiWhatsappConversations, type WhatsAppConversation } from '../services/apiClient';
 import { inboxStamp } from '../services/whatsappThread';
 import WhatsAppThread from './WhatsAppThread';
+import NewChatPicker from './NewChatPicker';
 
 /**
  * WhatsApp inbox — every conversation across all leads in one place, the way
@@ -47,14 +48,40 @@ export default function WhatsAppInbox({ tenantId }: { tenantId: string }) {
       c.lastMessage.toLowerCase().includes(q));
   }, [convs, search]);
 
+  // A conversation started from the picker has no history yet, so it isn't in
+  // `convs` — it lives here until its first message lands.
+  const [draftConv, setDraftConv] = useState<WhatsAppConversation | null>(null);
+  const [picking, setPicking] = useState(false);
+
   // Keep a selection alive across refreshes; default to the newest thread.
+  // A freshly-started chat isn't in `convs` yet, so it must NOT be reset here.
   useEffect(() => {
     if (!convs?.length) return;
+    if (draftConv && draftConv.leadId === selectedId) return;
     if (!selectedId || !convs.some(c => c.leadId === selectedId)) setSelectedId(convs[0].leadId);
-  }, [convs, selectedId]);
+  }, [convs, selectedId, draftConv]);
 
-  const selected = filtered.find(c => c.leadId === selectedId) ?? convs?.find(c => c.leadId === selectedId) ?? null;
+  // Once the first message lands the conversation is real — drop the draft so
+  // the list row becomes the source of truth.
+  useEffect(() => {
+    if (draftConv && convs?.some(c => c.leadId === draftConv.leadId)) setDraftConv(null);
+  }, [convs, draftConv]);
+
+  const selected = (draftConv && draftConv.leadId === selectedId)
+    ? draftConv
+    : filtered.find(c => c.leadId === selectedId) ?? convs?.find(c => c.leadId === selectedId) ?? null;
   const awaiting = (convs ?? []).filter(c => c.awaitingReply).length;
+
+  const startChat = (lead: { id: string; name: string; phone: string; project?: string; stage?: string }) => {
+    setDraftConv({
+      leadId: lead.id, name: lead.name, phone: lead.phone,
+      project: lead.project ?? '', stage: lead.stage ?? '',
+      lastMessage: '', lastAt: new Date().toISOString(),
+      lastFromCustomer: false, awaitingReply: false, messageCount: 0,
+    });
+    setSelectedId(lead.id);
+    setPicking(false);
+  };
 
   if (!isApiEnabled()) {
     return (
@@ -72,19 +99,30 @@ export default function WhatsAppInbox({ tenantId }: { tenantId: string }) {
     return <div className="bg-white rounded-2xl border border-zinc-200/60 p-10 text-center text-sm text-zinc-500">Loading conversations…</div>;
   }
 
-  if (convs?.length === 0) {
+  // Nothing yet AND nothing being drafted — offer the picker right here rather
+  // than sending the user off to the Leads page to start their first chat.
+  if (convs?.length === 0 && !draftConv) {
     return (
-      <div className="bg-white rounded-2xl border border-zinc-200/60 p-10 text-center">
-        <MessageCircle className="h-10 w-10 text-emerald-200 mx-auto mb-3" />
-        <h3 className="text-base font-semibold text-zinc-700">No WhatsApp conversations yet</h3>
-        <p className="text-sm text-zinc-500 mt-1 max-w-md mx-auto">
-          Open any lead and hit <b>WhatsApp</b> to start one — it will appear here, with every message you send and receive.
-        </p>
-        <button onClick={() => navigate('/leads')}
-          className="mt-4 inline-flex items-center gap-1.5 px-4 py-2 bg-emerald-600 text-white rounded-xl text-sm font-semibold hover:bg-emerald-700">
-          Go to Leads <ExternalLink className="h-3.5 w-3.5" />
-        </button>
-      </div>
+      <>
+        <div className="bg-white rounded-2xl border border-zinc-200/60 p-10 text-center">
+          <MessageCircle className="h-10 w-10 text-emerald-200 mx-auto mb-3" />
+          <h3 className="text-base font-semibold text-zinc-700">No WhatsApp conversations yet</h3>
+          <p className="text-sm text-zinc-500 mt-1 max-w-md mx-auto">
+            Start one with any lead — every message you send and receive will appear here.
+          </p>
+          <div className="flex items-center justify-center gap-2 mt-4">
+            <button onClick={() => setPicking(true)}
+              className="inline-flex items-center gap-1.5 px-4 py-2 bg-emerald-600 text-white rounded-xl text-sm font-semibold hover:bg-emerald-700">
+              <PenSquare className="h-3.5 w-3.5" /> Start a chat
+            </button>
+            <button onClick={() => navigate('/leads')}
+              className="inline-flex items-center gap-1.5 px-4 py-2 bg-white border border-zinc-200 text-zinc-600 rounded-xl text-sm font-semibold hover:bg-zinc-50">
+              Go to Leads <ExternalLink className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        </div>
+        {picking && <NewChatPicker onPick={startChat} onClose={() => setPicking(false)} />}
+      </>
     );
   }
 
@@ -103,6 +141,9 @@ export default function WhatsAppInbox({ tenantId }: { tenantId: string }) {
                   {awaiting} awaiting reply
                 </span>
               )}
+              <button onClick={() => setPicking(true)} className="p-1 text-emerald-600 hover:text-emerald-700" aria-label="Start a new chat" title="Start a new chat">
+                <PenSquare className="h-3.5 w-3.5" />
+              </button>
               <button onClick={load} className="p-1 text-zinc-400 hover:text-zinc-600" aria-label="Refresh">
                 <RefreshCw className="h-3.5 w-3.5" />
               </button>
@@ -194,6 +235,8 @@ export default function WhatsAppInbox({ tenantId }: { tenantId: string }) {
           </div>
         )}
       </div>
+
+      {picking && <NewChatPicker onPick={startChat} onClose={() => setPicking(false)} />}
 
       {error && (
         <p className="absolute bottom-2 left-2 text-[11px] text-red-500 bg-white px-2 py-1 rounded-lg shadow">{error}</p>

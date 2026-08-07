@@ -1,17 +1,87 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { useNavigate, Navigate } from 'react-router-dom';
 import {
   Building2, LogOut, Home, FileText, CreditCard, Wrench, Plus,
   Handshake, Users, IndianRupee, CheckCircle2, Clock,
 } from 'lucide-react';
-import { getPortalUser, portalLogout } from '../services/portalService';
+import { getPortalUser, portalLogout, getPortalSession } from '../services/portalService';
+import { isApiEnabled, apiPortalOverview, apiPortalRaiseTicket, apiPortalSubmitLead, type ApiPortalOverview } from '../services/apiClient';
 import { getSchedulesForLead, isOverdue } from '../services/paymentService';
 import { getByTenant, create, update } from '../services/db';
 import { formatCurrency, formatCurrencyFull } from '../utils/format';
 import type {
-  Booking, Unit, Tower, Invoice, Document, Ticket, Lead, Commission, Broker, Project,
+  Booking, Unit, Tower, Invoice, Document, Ticket, Lead, Commission, Broker, Project, Installment, PaymentPlan,
 } from '../types';
 import toast from 'react-hot-toast';
+
+/** The union the page renders — either the customer half or the partner half.
+ *  Demo mode builds it from the local store; API mode from the server overview. */
+type PortalView = {
+  lead?: Lead; bookings?: Booking[]; units?: Unit[]; towers?: Tower[];
+  invoices?: Invoice[]; documents?: Document[]; tickets?: Ticket[];
+  projects: Project[]; schedules?: PaymentPlan[];
+  broker?: Broker; commissions?: Commission[]; referredLeads?: Lead[];
+};
+
+/**
+ * Adapt the server overview to the page's view model. The server already
+ * restricted every list to this account, so nothing is filtered here — this is
+ * shape translation only.
+ *
+ * `invoices` has no server-side table: the Postgres model expresses receivables
+ * as payment_schedules + payments, which arrive as `schedules`. The invoice
+ * card therefore renders empty in API mode rather than showing stale local rows.
+ */
+function mapOverview(o: ApiPortalOverview): PortalView {
+  const projects = (o.projects ?? []).map(p => ({ id: p.id, name: p.name, location: p.location } as Project));
+  if (o.role === 'partner') {
+    return {
+      broker: o.broker ? ({ id: o.broker.id, name: o.broker.name, phone: o.broker.phone, email: o.broker.email } as Broker) : undefined,
+      commissions: (o.commissions ?? []).map(c => ({
+        id: c.id, bookingId: c.bookingId ?? '', amount: c.amountEarned,
+        amountPaid: c.amountPaid, status: c.status,
+      } as unknown as Commission)),
+      referredLeads: (o.referredLeads ?? []).map(l => ({
+        id: l.id, name: l.name, phone: l.phone, project: l.project,
+        stage: l.stage, budget: l.budget, createdAt: l.createdAt,
+      } as Lead)),
+      projects,
+    };
+  }
+  return {
+    lead: o.lead ? ({ id: o.lead.id, name: o.lead.name, project: o.lead.project, stage: o.lead.stage } as Lead) : undefined,
+    bookings: (o.bookings ?? []).map(b => ({
+      id: b.id, unitId: b.unitId ?? '', bookingAmount: b.bookingAmount,
+      totalConsideration: b.totalConsideration, status: b.status,
+    } as unknown as Booking)),
+    units: (o.units ?? []).map(u => ({
+      id: u.id, towerId: u.towerId ?? '', projectId: u.projectId ?? '', unitNumber: u.unitCode,
+      configuration: u.configuration, floor: u.floor, areaSqft: u.areaSqft, status: u.status,
+    } as unknown as Unit)),
+    towers: (o.towers ?? []).map(t => ({ id: t.id, name: t.name, projectId: t.projectId ?? '' } as Tower)),
+    invoices: [],
+    documents: (o.documents ?? []).map(d => ({
+      id: d.id, name: d.name, type: d.type, project: d.project,
+      date: d.docDate, size: d.size, status: d.status, url: d.url ?? undefined,
+    } as unknown as Document)),
+    tickets: (o.tickets ?? []).map(t => ({
+      id: t.id, title: t.title, category: t.category, priority: t.priority,
+      status: t.status, project: t.project, createdAt: t.createdAt,
+    } as unknown as Ticket)),
+    projects,
+    // The page flatMaps plans → installments, so the server's flat schedule is
+    // wrapped in one synthetic plan per booking.
+    schedules: Object.entries(
+      (o.schedule ?? []).reduce((acc, s) => {
+        (acc[s.bookingId] ||= []).push({
+          id: s.id, number: s.sequence, amount: s.amount, dueDate: s.dueDate,
+          status: s.status as Installment['status'], description: s.milestoneName,
+        });
+        return acc;
+      }, {} as Record<string, Installment[]>)
+    ).map(([bookingId, installments]) => ({ id: bookingId, bookingId, installments } as unknown as PaymentPlan)),
+  };
+}
 
 export default function PortalDashboard() {
   const navigate = useNavigate();
@@ -28,8 +98,33 @@ export default function PortalDashboard() {
   const leadId = session?.portalUser.leadId;
   const brokerId = session?.portalUser.brokerId;
 
+  // API mode: the server assembles the caller's own slice (and nothing else) —
+  // every query there is pinned to this account's lead_id / broker_id, so the
+  // ownership filtering below is not the security boundary, the server is.
+  const [apiData, setApiData] = useState<PortalView | null>(null);
+  const [apiLoading, setApiLoading] = useState(isApiEnabled());
+  useEffect(() => {
+    if (!isApiEnabled()) return;
+    const token = getPortalSession()?.token;
+    if (!token) { setApiLoading(false); return; }
+    let cancelled = false;
+    apiPortalOverview(token)
+      .then(o => { if (!cancelled) setApiData(mapOverview(o)); })
+      .catch(() => {
+        if (cancelled) return;
+        // A 401 here means the account was deactivated or the token expired —
+        // drop the local session rather than showing a stale shell.
+        portalLogout();
+        toast.error('Your session has ended — please sign in again');
+        navigate('/portal');
+      })
+      .finally(() => { if (!cancelled) setApiLoading(false); });
+    return () => { cancelled = true; };
+  }, [refreshKey, navigate]);
+
   const data = useMemo(() => {
     if (!session) return null;
+    if (isApiEnabled()) return apiData;
     if (role === 'customer') {
       const lead = getByTenant<Lead>('leads', tenantId).find(l => l.id === leadId);
       const bookings = getByTenant<Booking>('bookings', tenantId).filter(b => b.leadId === leadId);
@@ -66,11 +161,19 @@ export default function PortalDashboard() {
       .filter(l => l.brokerId ? l.brokerId === brokerId : (broker && l.source === broker.name));
     const projects = getByTenant<Project>('projects', tenantId);
     return { broker, commissions, referredLeads, projects };
-  }, [session, role, tenantId, leadId, brokerId, refreshKey]);
+  }, [session, role, tenantId, leadId, brokerId, refreshKey, apiData]);
 
-  if (!session || !data) {
+  if (!session) {
     // Not signed in (or session expired) — bounce to the portal login
     return <Navigate to="/portal" replace />;
+  }
+  if (!data) {
+    // In API mode the first paint happens before the overview lands.
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-zinc-50">
+        <p className="text-sm text-zinc-500">{apiLoading ? 'Loading your portal…' : 'Nothing to show yet.'}</p>
+      </div>
+    );
   }
 
   const { tenant, portalUser } = session;
@@ -82,42 +185,73 @@ export default function PortalDashboard() {
     navigate('/portal');
   };
 
-  const handleRaiseTicket = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleRaiseTicket = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const fd = new FormData(e.currentTarget);
     const title = fd.get('title') as string;
     if (!title || !data.lead) { toast.error('Describe the issue'); return; }
-    create<Ticket>('tickets', {
-      id: '', tenantId, title,
-      leadId: data.lead.id,
-      customer: data.lead.name, project: data.lead.project,
-      category: (fd.get('category') as string) || 'Request',
-      priority: 'medium', status: 'open', assignedTo: '',
-      createdAt: new Date().toISOString(),
-    });
+    const category = (fd.get('category') as string) || 'Request';
+    try {
+      if (isApiEnabled()) {
+        const token = getPortalSession()?.token;
+        if (!token) throw new Error('Your session has ended — please sign in again');
+        // The server takes lead/customer/project from the account, not the body.
+        await apiPortalRaiseTicket(token, { title, category });
+      } else {
+        create<Ticket>('tickets', {
+          id: '', tenantId, title,
+          leadId: data.lead.id,
+          customer: data.lead.name, project: data.lead.project,
+          category, priority: 'medium', status: 'open', assignedTo: '',
+          createdAt: new Date().toISOString(),
+        });
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not submit your request');
+      return;
+    }
     setShowTicketForm(false);
     refresh();
     toast.success('Request submitted — our team will get back to you');
   };
 
-  const handleSubmitLead = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleSubmitLead = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const fd = new FormData(e.currentTarget);
     const name = fd.get('name') as string;
     const phone = fd.get('phone') as string;
     if (!name || !phone || !data.broker) { toast.error('Name and phone are required'); return; }
-    create<Lead>('leads', {
-      id: '', tenantId, name, phone,
-      email: (fd.get('email') as string) || '',
-      source: data.broker.name,     // display attribution
-      brokerId: data.broker.id,     // identity-safe attribution
-      project: (fd.get('project') as string) || data.projects[0]?.name || 'General Enquiry',
-      budget: Number(fd.get('budget')) || 0,
-      configuration: '2 BHK', stage: 'new', priority: 'warm',
-      assignedTo: '', lastContact: new Date().toISOString(), createdAt: new Date().toISOString(),
-    });
-    // Keep the aggregate stat in sync so it isn't double-counted in the UI
-    update<Broker>('brokers', data.broker.id, { leadsReferred: (data.broker.leadsReferred || 0) + 1 });
+    const project = (fd.get('project') as string) || data.projects[0]?.name || 'General Enquiry';
+    try {
+      if (isApiEnabled()) {
+        const token = getPortalSession()?.token;
+        if (!token) throw new Error('Your session has ended — please sign in again');
+        // Attribution is pinned to the caller's own broker record server-side —
+        // a partner cannot credit the referral to anyone else.
+        await apiPortalSubmitLead(token, {
+          name, phone, email: (fd.get('email') as string) || undefined,
+          project, budget: Number(fd.get('budget')) || 0,
+        });
+      } else {
+        create<Lead>('leads', {
+          id: '', tenantId, name, phone,
+          email: (fd.get('email') as string) || '',
+          source: data.broker.name,     // display attribution
+          brokerId: data.broker.id,     // identity-safe attribution
+          project,
+          budget: Number(fd.get('budget')) || 0,
+          configuration: '2 BHK', stage: 'new', priority: 'warm',
+          assignedTo: '', lastContact: new Date().toISOString(), createdAt: new Date().toISOString(),
+        });
+        // Keep the aggregate stat in sync so it isn't double-counted in the UI.
+        // In API mode the count is derived from referredLeads, so there is
+        // nothing to bump.
+        update<Broker>('brokers', data.broker.id, { leadsReferred: (data.broker.leadsReferred || 0) + 1 });
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not submit the lead');
+      return;
+    }
     setShowLeadForm(false);
     refresh();
     toast.success('Lead submitted — thank you! Commission applies on booking.');

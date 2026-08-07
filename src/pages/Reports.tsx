@@ -9,6 +9,8 @@ import { getByTenant } from '../services/db';
 import { useTenantUsers } from '../hooks/useTenantUsers';
 import { getLeadStages } from '../services/metaService';
 import { formatCurrency } from '../utils/format';
+import DateRangeFilter from '../components/DateRangeFilter';
+import { type DateRange, ALL_RANGE, resolveRange, inRange, rangeLabel, rangeSlug } from '../utils/dateRange';
 import type { Lead } from '../types';
 
 const sourceColors: Record<string, string> = {
@@ -26,6 +28,7 @@ export default function Reports() {
   const currency = tenant?.currency || 'INR';
   const isExecutive = user?.role === 'sales_executive';
   const [reportType, setReportType] = useState<'conversion' | 'source' | 'performance' | 'roi'>('conversion');
+  const [dateRange, setDateRange] = useState<DateRange>(ALL_RANGE);
 
   // Marketing spend per source — editable, persisted per tenant. Powers the
   // cost-per-lead / cost-per-closure / ROI analysis.
@@ -45,7 +48,13 @@ export default function Reports() {
   };
 
   const allLeadsData = useMemo(() => getByTenant<Lead>('leads', tenantId), [tenantId]);
-  const leads = useMemo(() => isExecutive ? allLeadsData.filter(l => l.assignedTo === userId) : allLeadsData, [allLeadsData, isExecutive, userId]);
+  const scopedLeads = useMemo(() => isExecutive ? allLeadsData.filter(l => l.assignedTo === userId) : allLeadsData, [allLeadsData, isExecutive, userId]);
+  // Every aggregation below runs on leads received within the selected window.
+  // preset 'all' → leads === scopedLeads, so reports are unchanged by default.
+  const leads = useMemo(() => {
+    const r = resolveRange(dateRange);
+    return scopedLeads.filter(l => inRange(l.createdAt, r));
+  }, [scopedLeads, dateRange]);
   const allUsers = useTenantUsers(tenantId);
 
   // Dynamic conversion data from actual leads
@@ -114,21 +123,22 @@ export default function Reports() {
   /** Export whichever report is on screen as an Excel-safe CSV. */
   const handleExport = () => {
     const today = new Date().toISOString().slice(0, 10);
+    const scope = dateRange.preset === 'all' ? '' : `-${rangeSlug(dateRange)}`;
     if (reportType === 'conversion') {
       if (conversionData.length === 0) { toast.error('No data to export yet'); return; }
-      downloadCsv(`conversion-trend-${today}.csv`, [
+      downloadCsv(`conversion-trend${scope}-${today}.csv`, [
         ['Month', 'Leads', 'Conversions', 'Conversion Rate %'],
         ...conversionData.map(d => [d.month, d.leads, d.conversions, d.rate]),
       ]);
     } else if (reportType === 'source') {
       if (sourceData.length === 0) { toast.error('No data to export yet'); return; }
-      downloadCsv(`lead-sources-${today}.csv`, [
+      downloadCsv(`lead-sources${scope}-${today}.csv`, [
         ['Source', 'Leads'],
         ...sourceData.map(s => [s.name, s.value]),
       ]);
     } else if (reportType === 'performance') {
       if (salesPerformance.length === 0) { toast.error('No data to export yet'); return; }
-      downloadCsv(`team-performance-${today}.csv`, [
+      downloadCsv(`team-performance${scope}-${today}.csv`, [
         ['Rep', 'Leads', 'Bookings', 'Revenue'],
         ...salesPerformance.map(r => [r.name, r.leads, r.bookings, r.revenue]),
       ]);
@@ -141,7 +151,7 @@ export default function Reports() {
       }, {} as Record<string, { leads: number; bookings: number; revenue: number }>);
       const rows = Object.entries(bySource);
       if (rows.length === 0) { toast.error('No data to export yet'); return; }
-      downloadCsv(`marketing-roi-${today}.csv`, [
+      downloadCsv(`marketing-roi${scope}-${today}.csv`, [
         ['Source', 'Spend', 'Leads', 'Bookings', 'Revenue', 'ROI %'],
         ...rows.map(([source, d]) => {
           const spend = spendBySource[source] || 0;
@@ -157,9 +167,15 @@ export default function Reports() {
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h2 className="text-2xl font-bold text-zinc-900">Reports & Analytics</h2>
-          <p className="text-sm text-zinc-500 mt-0.5">Track performance across leads, sales, and inventory.</p>
+          <p className="text-sm text-zinc-500 mt-0.5">
+            Track performance across leads, sales, and inventory.
+            {dateRange.preset !== 'all' && (
+              <span className="text-indigo-600 font-medium"> · {rangeLabel(dateRange)}</span>
+            )}
+          </p>
         </div>
         <div className="flex items-center gap-2">
+          <DateRangeFilter value={dateRange} onChange={setDateRange} align="right" />
           <button onClick={handleExport} className="flex items-center gap-2 px-3 py-2 bg-white border border-zinc-200 rounded-xl text-sm font-medium text-zinc-600 hover:bg-zinc-50 transition-colors">
             <Download className="h-4 w-4" /> Export CSV
           </button>

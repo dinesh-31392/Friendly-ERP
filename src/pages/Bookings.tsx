@@ -4,12 +4,23 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { getByTenant, create, update, remove, logAudit } from '../services/db';
-import type { Booking, BookingStage, Lead, Unit, Invoice, Tower, Quotation, QuotationCharge } from '../types';
+import { isApiEnabled, apiGetBookings, apiGetLeads, apiGetUnits, apiGetTowers, apiGetQuotations } from '../services/apiClient';
+import { createBooking, patchBooking, deleteBooking } from '../services/bookingWrites';
+import { createQuotation, patchQuotation } from '../services/quotationWrites';
+import { patchUnit } from '../services/inventoryWrites';
+import { patchLead } from '../services/leadWrites';
+import type { Booking, BookingStage, Lead, Unit, Invoice, Tower, Quotation, QuotationCharge, Commission, Broker, PaymentPlan } from '../types';
 import { BOOKING_STAGES } from '../types';
 import { formatCurrency, formatCurrencyFull } from '../utils/format';
-import { generatePaymentSchedule, getScheduleForBooking, setInstallmentStatus, isOverdue } from '../services/paymentService';
+import {
+  generatePaymentSchedule, getScheduleForBooking, setInstallmentStatus, isOverdue,
+  fetchApiSchedule, apiPayInstallment, apiDemandInstallment,
+} from '../services/paymentService';
 import { needsApproval } from '../services/approvalService';
-import { postCustomerPayment } from '../services/accountsService';
+import { postCustomerPayment, postPossessionRevenue } from '../services/accountsService';
+import { computeCostSheet, getCostSheetConfig, saveCostSheetConfig, type CostSheetConfig } from '../services/costSheetService';
+import { raiseDemand, recordReceipt, getCustomerLedger } from '../services/demandService';
+import { downloadCsv } from '../utils/csv';
 import toast from 'react-hot-toast';
 
 const stageColors: Record<BookingStage, string> = {
@@ -35,6 +46,9 @@ export default function Bookings() {
   const [selected, setSelected] = useState<Booking | null>(null);
   const [preSelectedLeadId, setPreSelectedLeadId] = useState<string>('');
   const [preSelectedUnitId, setPreSelectedUnitId] = useState<string>('');
+  // Set when a booking is started from an accepted quotation — carries the
+  // quote's negotiated total (incl. approved discount) into the booking value.
+  const [acceptedQuoteTotal, setAcceptedQuoteTotal] = useState<number | null>(null);
   const [view, setView] = useState<'bookings' | 'quotes'>('bookings');
   const [showAddQuote, setShowAddQuote] = useState(false);
   const canQuote = hasPermission('create_quotations');
@@ -52,9 +66,31 @@ export default function Bookings() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshKey]);
 
+  // Feature flag: with an API URL configured, the booking hub (bookings + the
+  // leads/units/towers it references) is read from the Fastify backend
+  // (RLS-scoped). Falls back to localStorage on any API failure so the page
+  // never goes blank. Flag off → identical behavior to before. The financial
+  // satellites (payment schedules, invoices, commissions) stay in localStorage
+  // until their own modules are cut over — see bookingWrites.ts.
+  const [apiData, setApiData] = useState<{ bookings: Booking[]; leads: Lead[]; units: Unit[]; towers: Tower[]; quotations: Quotation[] } | null>(null);
+  useEffect(() => {
+    if (!isApiEnabled()) { setApiData(null); return; }
+    let cancelled = false;
+    Promise.all([apiGetBookings(), apiGetLeads(), apiGetUnits(), apiGetTowers(), apiGetQuotations()])
+      .then(([bookings, leads, units, towers, quotations]) => { if (!cancelled) setApiData({ bookings, leads, units, towers, quotations }); })
+      .catch(() => {
+        if (!cancelled) {
+          setApiData(null);
+          toast.error('API unreachable — showing local data', { id: 'api-fallback' });
+        }
+      });
+    return () => { cancelled = true; };
+  }, [tenantId, refreshKey]);
+
   const bookings = useMemo(
-    () => getByTenant<Booking>('bookings', tenantId).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
-    [tenantId, refreshKey]
+    () => (apiData?.bookings ?? getByTenant<Booking>('bookings', tenantId))
+      .slice().sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
+    [apiData, tenantId, refreshKey]
   );
 
   // Deep linking: listen to search query focus events
@@ -69,41 +105,62 @@ export default function Bookings() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshKey]);
-  const leads = useMemo(() => getByTenant<Lead>('leads', tenantId), [tenantId, refreshKey]);
-  const units = useMemo(() => getByTenant<Unit>('units', tenantId), [tenantId, refreshKey]);
-  const towers = useMemo(() => getByTenant<Tower>('towers', tenantId), [tenantId, refreshKey]);
-  const invoices = useMemo(() => getByTenant<Invoice>('invoices', tenantId), [tenantId, refreshKey]);
+  const leads = useMemo(() => apiData?.leads ?? getByTenant<Lead>('leads', tenantId), [apiData, tenantId, refreshKey]);
+  const units = useMemo(() => apiData?.units ?? getByTenant<Unit>('units', tenantId), [apiData, tenantId, refreshKey]);
+  const towers = useMemo(() => apiData?.towers ?? getByTenant<Tower>('towers', tenantId), [apiData, tenantId, refreshKey]);
+  const paymentPlans = useMemo(() => getByTenant<PaymentPlan>('paymentPlans', tenantId), [tenantId, refreshKey]);
 
   const getLead = (id: string) => leads.find(l => l.id === id);
   const getUnit = (id: string) => units.find(u => u.id === id);
   const getTowerName = (unit?: Unit) => unit ? (towers.find(t => t.id === unit.towerId)?.name || '') : '';
 
-  // Legacy bookings (created before schedules existed) get one generated when
-  // their detail opens — as an effect, never as a side effect of render
+  // The schedule for the open booking. API mode: the server's payment_schedules
+  // rows are the source of truth (fetched, or created from the plan template on
+  // first open). Demo mode: legacy bookings get a localStorage schedule
+  // generated when their detail opens — as an effect, never during render.
+  const [apiSchedule, setApiSchedule] = useState<PaymentPlan | null>(null);
   useEffect(() => {
     if (!selected) return;
+    const totalValue = selected.value || getUnit(selected.unitId)?.price || getLead(selected.leadId)?.budget || 0;
+    if (isApiEnabled()) {
+      let cancelled = false;
+      fetchApiSchedule({
+        tenantId, bookingId: selected.id, leadId: selected.leadId,
+        planLabel: selected.paymentPlan, totalValue, bookingDate: selected.createdAt,
+      })
+        .then(p => { if (!cancelled) setApiSchedule(p); })
+        .catch(() => {
+          if (!cancelled) { setApiSchedule(null); toast.error('Could not load the payment schedule from the server'); }
+        });
+      return () => { cancelled = true; };
+    }
+    setApiSchedule(null);
     if (getScheduleForBooking(tenantId, selected.id)) return;
     const created = generatePaymentSchedule({
       tenantId, bookingId: selected.id, leadId: selected.leadId,
-      planLabel: selected.paymentPlan,
-      totalValue: getUnit(selected.unitId)?.price || getLead(selected.leadId)?.budget || 0,
+      planLabel: selected.paymentPlan, totalValue,
       bookingDate: selected.createdAt,
     });
     if (created) refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected?.id]);
+  }, [selected?.id, refreshKey]);
 
-  // Collections summary
-  const collected = invoices.filter(i => i.status === 'Paid').reduce((s, i) => s + i.amount, 0);
-  const outstanding = invoices.filter(i => i.status === 'Pending' || i.status === 'Overdue').reduce((s, i) => s + i.amount, 0);
-  const totalBookingValue = bookings.reduce((s, b) => s + (getLead(b.leadId)?.budget || 0), 0);
+  // Collections summary. The payment SCHEDULE is the single source of truth for a
+  // booking's collections (the token invoice is a document that posts through the
+  // schedule, not independently), so total from installments — not invoices —
+  // otherwise money collected via the schedule shows ₹0 "Collected".
+  const collected = paymentPlans.reduce((s, p) => s + p.installments.filter(i => i.status === 'paid').reduce((a, i) => a + i.amount, 0), 0);
+  const outstanding = paymentPlans.reduce((s, p) => s + p.installments.filter(i => i.status !== 'paid').reduce((a, i) => a + i.amount, 0), 0);
+  // One value basis for the whole module — same as the schedule and the broker
+  // commission (unit price, or the accepted quote total stored on the booking).
+  const totalBookingValue = bookings.reduce((s, b) => s + (b.value || getUnit(b.unitId)?.price || getLead(b.leadId)?.budget || 0), 0);
 
   const audit = (action: string, id: string, details: string) => {
     if (!user) return;
     logAudit({ tenantId, userId: user.id, userName: user.name, action, entity: 'booking', entityId: id, details });
   };
 
-  const handleAdd = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleAdd = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (!canCreate) { toast.error('No permission'); return; }
     const fd = new FormData(e.currentTarget);
@@ -117,17 +174,34 @@ export default function Bookings() {
       return;
     }
 
-    const created = create<Booking>('bookings', {
-      id: '', tenantId, leadId, unitId,
-      amount: Number(fd.get('amount')) || 0,
-      paymentPlan: (fd.get('paymentPlan') as string) || '30-70',
-      stage: 'reservation',
-      createdAt: new Date().toISOString(),
-    });
-    // Lock the unit and move the lead
-    update<Unit>('units', unitId, { status: 'booked', bookedBy: leadId });
-    update<Lead>('leads', leadId, { stage: 'booked', lastContact: new Date().toISOString() });
-    
+    // ONE basis for the whole booking — the schedule, the broker commission and
+    // the KPIs all read booking.value, so they can never disagree. It's the
+    // accepted quotation's negotiated total when booked from a quote (so approved
+    // discounts survive), otherwise the unit price (lead.budget is only a
+    // last-resort fallback for units with no price).
+    const bookingValue = acceptedQuoteTotal || unit.price || lead.budget;
+
+    // Booking hub goes to the server (API mode) or localStorage (demo). The unit
+    // lock and lead move ride the already-server-backed units/leads dispatchers.
+    // If any of these fail, surface it and stop before the localStorage
+    // satellites so we don't leave an orphaned schedule/invoice.
+    let created: Booking;
+    try {
+      created = await createBooking({
+        tenantId, leadId, unitId,
+        amount: Number(fd.get('amount')) || 0,
+        value: bookingValue,
+        paymentPlan: (fd.get('paymentPlan') as string) || '30-70',
+        stage: 'reservation',
+        createdAt: new Date().toISOString(),
+      });
+      await patchUnit(unitId, { status: 'booked', bookedBy: leadId });
+      await patchLead(leadId, { stage: 'booked', lastContact: new Date().toISOString() });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not create booking');
+      return;
+    }
+
     // Create Lead Activities
     create<any>('activities', {
       id: '', tenantId, leadId, userId: user?.id || '', type: 'status_change',
@@ -135,20 +209,17 @@ export default function Bookings() {
       createdAt: new Date().toISOString(),
     });
 
-    // ONE basis for the whole booking. lead.budget is the buyer's self-reported
-    // figure captured at intake; unit.price is what was actually booked, and the
-    // two routinely differ. The schedule and the broker commission below must
-    // agree, or the partner is paid on a number that contradicts the payment plan
-    // recorded against the same booking.
-    const bookingValue = unit.price || lead.budget;
-
-    // Auto-generate the full installment schedule (sales → cash-flow bridge)
-    generatePaymentSchedule({
-      tenantId, bookingId: created.id, leadId,
-      planLabel: (fd.get('paymentPlan') as string) || '30-70',
-      totalValue: bookingValue,
-      actor: user ? { id: user.id, name: user.name } : undefined,
-    });
+    // Auto-generate the full installment schedule (sales → cash-flow bridge).
+    // API mode skips this — the server schedule is created when the booking's
+    // detail first opens (fetchApiSchedule), keeping one source of truth.
+    if (!isApiEnabled()) {
+      generatePaymentSchedule({
+        tenantId, bookingId: created.id, leadId,
+        planLabel: (fd.get('paymentPlan') as string) || '30-70',
+        totalValue: bookingValue,
+        actor: user ? { id: user.id, name: user.name } : undefined,
+      });
+    }
 
     // Auto-generate invoice
     const tokenAmount = Number(fd.get('amount')) || 300000;
@@ -193,16 +264,37 @@ export default function Bookings() {
     setShowAdd(false);
     setPreSelectedLeadId('');
     setPreSelectedUnitId('');
+    setAcceptedQuoteTotal(null);
     refresh();
     toast.success(`Unit ${unit.number} booked for ${lead.name}`);
   };
 
-  const handleStageAdvance = (b: Booking, next: BookingStage) => {
+  const handleStageAdvance = async (b: Booking, next: BookingStage) => {
     if (!canManage) { toast.error('No permission'); return; }
-    update<Booking>('bookings', b.id, { stage: next });
+    const unit = getUnit(b.unitId);
+    try {
+      await patchBooking(b.id, { stage: next });
+      // Completing the sale marks the unit sold (server-backed units API).
+      if (next === 'completed' && unit) await patchUnit(b.unitId, { status: 'sold' });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not update booking');
+      return;
+    }
     if (next === 'completed') {
-      const unit = getUnit(b.unitId);
-      if (unit) update<Unit>('units', b.unitId, { status: 'sold' });
+      // Possession → recognize revenue: move the customer advance (net of the
+      // GST already parked as a liability) into Sales.
+      if (unit) {
+        const cs = computeCostSheet(unit, getCostSheetConfig(tenantId), { applyPlc });
+        const value = b.value || cs.total || unit.price || 0;
+        const gstTotal = cs.total > 0 ? Math.round(value * (cs.gst / cs.total)) : 0;
+        try {
+          await postPossessionRevenue({
+            tenantId, netRevenue: value - gstTotal,
+            narration: `Revenue recognized on possession — ${getLead(b.leadId)?.name || 'customer'} · unit ${unit.number}`,
+            projectId: getLead(b.leadId)?.projectId, sourceId: b.id, actor,
+          });
+        } catch { /* ledger posting is best-effort; the sale still completes */ }
+      }
       audit('sell', b.id, `Booking completed — unit ${unit?.number || ''} marked Sold`);
     } else {
       audit('update', b.id, `Booking moved to ${BOOKING_STAGES.find(s => s.id === next)?.label}`);
@@ -212,30 +304,84 @@ export default function Bookings() {
     toast.success(`Moved to ${BOOKING_STAGES.find(s => s.id === next)?.label}`);
   };
 
-  const handleCancel = (b: Booking) => {
+  const handleCancel = async (b: Booking) => {
     if (!canManage) { toast.error('No permission'); return; }
-    if (!confirm('Cancel this booking? The unit will be released back to Available.')) return;
+    const lead = getLead(b.leadId);
     const unit = getUnit(b.unitId);
-    remove('bookings', b.id);
-    if (unit && unit.status !== 'sold') update<Unit>('units', b.unitId, { status: 'available', bookedBy: undefined });
-    audit('delete', b.id, `Cancelled booking for ${getLead(b.leadId)?.name || 'lead'} — unit ${unit?.number || ''} released`);
+
+    // Guard: if money was already collected it has posted cash + income to the
+    // ledger. Silently cancelling would leave that revenue booked for a dead
+    // sale — that must go through a refund/reversal first, not a cancel.
+    const plan = getScheduleForBooking(tenantId, b.id);
+    const hasCollections = !!plan?.installments.some(i => i.status === 'paid')
+      || getByTenant<Invoice>('invoices', tenantId)
+        .some(i => i.leadId === b.leadId && i.type === 'Booking Token' && i.status === 'Paid');
+    if (hasCollections) {
+      toast.error('This booking has collected payments — reverse/refund them first so the ledger stays balanced.');
+      return;
+    }
+    if (!confirm('Cancel this booking? The unit is released and the token invoice, payment schedule, and any pending commission are reversed.')) return;
+
+    // Delete the booking + release the unit + move the lead back — all on the
+    // server-backed dispatchers. Bail before the localStorage reversals if the
+    // core writes fail, so we don't reverse satellites for a booking that's
+    // still live.
+    try {
+      await deleteBooking(b.id);
+      if (unit && unit.status !== 'sold') await patchUnit(b.unitId, { status: 'available', bookedBy: undefined });
+      if (lead) await patchLead(b.leadId, { stage: 'negotiation', lastContact: new Date().toISOString() });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not cancel booking');
+      return;
+    }
+
+    // Reverse the create cascade (handleAdd) so nothing is left orphaned. These
+    // financial satellites live in localStorage until their modules are cut over.
+    // 1) payment schedule — it feeds fund-flow projected inflows
+    if (plan) remove('paymentPlans', plan.id);
+    // 2) the unpaid token invoice(s) for this lead — else it sits in Outstanding
+    getByTenant<Invoice>('invoices', tenantId)
+      .filter(i => i.leadId === b.leadId && i.type === 'Booking Token' && i.status !== 'Paid')
+      .forEach(i => remove('invoices', i.id));
+    if (lead) {
+      // 3) the pending broker commission + the closed-count handleAdd incremented
+      getByTenant<Commission>('commissions', tenantId)
+        .filter(c => c.leadName === lead.name && c.project === lead.project && c.status === 'pending')
+        .forEach(c => {
+          remove('commissions', c.id);
+          const broker = getByTenant<Broker>('brokers', tenantId).find(x => x.id === c.brokerId);
+          if (broker) update<Broker>('brokers', broker.id, { bookingsClosed: Math.max(0, (broker.bookingsClosed || 0) - 1) });
+        });
+    }
+
+    audit('delete', b.id, `Cancelled booking for ${lead?.name || 'lead'} — unit ${unit?.number || ''} released; token invoice, schedule and pending commission reversed`);
     setSelected(null);
     refresh();
-    toast.success('Booking cancelled, unit released');
+    toast.success('Booking cancelled — unit released and linked records reversed');
   };
 
   // Spec matrix: a sales executive cancels by REQUEST only — a booking
   // manager confirms (which releases the unit) or dismisses.
-  const requestCancel = (b: Booking) => {
-    update<Booking>('bookings', b.id, { cancelRequested: true });
+  const requestCancel = async (b: Booking) => {
+    try {
+      await patchBooking(b.id, { cancelRequested: true });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not request cancellation');
+      return;
+    }
     audit('update', b.id, `Cancellation requested for ${getLead(b.leadId)?.name || 'lead'}'s booking — awaiting manager approval`);
     setSelected(prev => prev && prev.id === b.id ? { ...prev, cancelRequested: true } : prev);
     refresh();
     toast.success('Cancellation requested — a booking manager must approve it');
   };
 
-  const dismissCancelRequest = (b: Booking) => {
-    update<Booking>('bookings', b.id, { cancelRequested: false });
+  const dismissCancelRequest = async (b: Booking) => {
+    try {
+      await patchBooking(b.id, { cancelRequested: false });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not dismiss request');
+      return;
+    }
     audit('update', b.id, 'Cancellation request dismissed — booking stands');
     setSelected(prev => prev && prev.id === b.id ? { ...prev, cancelRequested: false } : prev);
     refresh();
@@ -247,22 +393,38 @@ export default function Bookings() {
 
   // ── Quotations ─────────────────────────────────────────────────────────────
   const quotations = useMemo(
-    () => getByTenant<Quotation>('quotations', tenantId)
-      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
-    [tenantId, refreshKey]
+    () => (apiData?.quotations ?? getByTenant<Quotation>('quotations', tenantId))
+      .slice().sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
+    [apiData, tenantId, refreshKey]
   );
   const isExpired = (q: Quotation) => q.status === 'sent' && new Date(q.validUntil).getTime() < Date.now();
   const [quoteCharges, setQuoteCharges] = useState<QuotationCharge[]>([]);
   const [quoteUnitId, setQuoteUnitId] = useState('');
   const [quoteDiscount, setQuoteDiscount] = useState('');
+  // Structured cost-sheet state: per-tenant rate card + a PLC toggle + whether
+  // the rate editor is open. The engine auto-fills quoteCharges from the unit.
+  const [csConfig, setCsConfig] = useState<CostSheetConfig>(() => getCostSheetConfig(tenantId));
+  const [applyPlc, setApplyPlc] = useState(false);
+  const [showRates, setShowRates] = useState(false);
   const quoteUnit = units.find(u => u.id === quoteUnitId);
   const quoteBase = quoteUnit?.price || 0;
+
+  /** Regenerate the structured cost sheet for the chosen unit into quoteCharges. */
+  const generateCostSheet = (unit: Unit | undefined, cfg: CostSheetConfig, plc: boolean) => {
+    if (!unit) { setQuoteCharges([]); return; }
+    setQuoteCharges(computeCostSheet(unit, cfg, { applyPlc: plc }).lines);
+  };
+  // Auto-build the cost sheet whenever the unit or a rate/PLC input changes.
+  useEffect(() => {
+    if (quoteUnit) generateCostSheet(quoteUnit, csConfig, applyPlc);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [quoteUnitId, applyPlc, csConfig]);
   const quoteChargesTotal = quoteCharges.reduce((s, c) => s + c.amount, 0);
   const quoteDiscountNum = Number(quoteDiscount) || 0;
   const quoteTotal = quoteBase + quoteChargesTotal - quoteDiscountNum;
   const discountNeedsApproval = quoteDiscountNum > 0 && needsApproval(tenantId, 'discount', quoteDiscountNum);
 
-  const handleAddQuote = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleAddQuote = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const fd = new FormData(e.currentTarget);
     const leadId = fd.get('leadId') as string;
@@ -271,17 +433,23 @@ export default function Bookings() {
     // Discount routing: above the configured threshold the quote parks in
     // pending_approval unless the creator holds approve_discounts themselves.
     const parked = discountNeedsApproval && !canApproveDiscount;
-    const created = create<Quotation>('quotations', {
-      id: '', tenantId, leadId, unitId: quoteUnit.id,
-      baseAmount: quoteBase,
-      charges: quoteCharges.filter(c => c.label.trim() && c.amount > 0),
-      discountAmount: quoteDiscountNum,
-      discountApprovedBy: discountNeedsApproval && canApproveDiscount ? actor.id : undefined,
-      totalAmount: quoteTotal,
-      validUntil: (fd.get('validUntil') as string) || new Date(Date.now() + 15 * 86400000).toISOString().slice(0, 10),
-      status: parked ? 'pending_approval' : 'draft',
-      createdBy: actor.id, createdAt: new Date().toISOString(),
-    });
+    let created: Quotation;
+    try {
+      created = await createQuotation({
+        tenantId, leadId, unitId: quoteUnit.id,
+        baseAmount: quoteBase,
+        charges: quoteCharges.filter(c => c.label.trim() && c.amount > 0),
+        discountAmount: quoteDiscountNum,
+        discountApprovedBy: discountNeedsApproval && canApproveDiscount ? actor.id : undefined,
+        totalAmount: quoteTotal,
+        validUntil: (fd.get('validUntil') as string) || new Date(Date.now() + 15 * 86400000).toISOString().slice(0, 10),
+        status: parked ? 'pending_approval' : 'draft',
+        createdBy: actor.id, createdAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not create quotation');
+      return;
+    }
     audit('create', created.id, `Quotation for ${getLead(leadId)?.name} — unit ${quoteUnit.number} at ${formatCurrency(quoteTotal, currency)}${parked ? ' (discount awaiting approval)' : ''}`);
     setShowAddQuote(false);
     setQuoteCharges([]); setQuoteUnitId(''); setQuoteDiscount('');
@@ -289,29 +457,42 @@ export default function Bookings() {
     toast.success(parked ? 'Quotation created — discount needs approval before sending' : 'Quotation created');
   };
 
-  const approveQuoteDiscount = (q: Quotation) => {
-    update<Quotation>('quotations', q.id, { status: 'draft', discountApprovedBy: actor.id });
+  const approveQuoteDiscount = async (q: Quotation) => {
+    try {
+      await patchQuotation(q.id, { status: 'draft', discountApprovedBy: actor.id });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not approve discount');
+      return;
+    }
     audit('update', q.id, `Approved ${formatCurrency(q.discountAmount, currency)} discount on quotation for ${getLead(q.leadId)?.name}`);
     refresh();
     toast.success('Discount approved — quote can be sent');
   };
 
-  const setQuoteStatus = (q: Quotation, status: Quotation['status'], msg: string) => {
-    update<Quotation>('quotations', q.id, { status });
+  const setQuoteStatus = async (q: Quotation, status: Quotation['status'], msg: string): Promise<boolean> => {
+    try {
+      await patchQuotation(q.id, { status });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not update quotation');
+      return false;
+    }
     audit('update', q.id, `Quotation for ${getLead(q.leadId)?.name} → ${status}`);
     refresh();
     toast.success(msg);
+    return true;
   };
 
-  const acceptQuote = (q: Quotation) => {
+  const acceptQuote = async (q: Quotation) => {
     const unit = getUnit(q.unitId);
     if (!unit || unit.status === 'booked' || unit.status === 'sold') {
       toast.error('That unit is no longer available — re-quote on another unit');
       return;
     }
-    setQuoteStatus(q, 'accepted', 'Quotation accepted — complete the booking');
+    // Only carry the quote into the booking flow once the accept actually persisted.
+    if (!(await setQuoteStatus(q, 'accepted', 'Quotation accepted — complete the booking'))) return;
     setPreSelectedLeadId(q.leadId);
     setPreSelectedUnitId(q.unitId);
+    setAcceptedQuoteTotal(q.totalAmount);   // carry the negotiated total into the booking
     setView('bookings');
     setShowAdd(true);
   };
@@ -332,7 +513,7 @@ export default function Bookings() {
             </button>
           </div>
           {view === 'bookings' && canCreate && (
-            <button onClick={() => setShowAdd(true)} className="flex items-center gap-2 px-4 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 transition-colors shadow-sm">
+            <button onClick={() => { setAcceptedQuoteTotal(null); setPreSelectedLeadId(''); setPreSelectedUnitId(''); setShowAdd(true); }} className="flex items-center gap-2 px-4 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 transition-colors shadow-sm">
               <Plus className="h-4 w-4" /> New Booking
             </button>
           )}
@@ -472,7 +653,7 @@ export default function Bookings() {
         const unit = getUnit(selected.unitId);
         const currentIdx = BOOKING_STAGES.findIndex(s => s.id === selected.stage);
         // Read-only here — generation happens in the effect above
-        const schedule = getScheduleForBooking(tenantId, selected.id);
+        const schedule = isApiEnabled() ? apiSchedule : getScheduleForBooking(tenantId, selected.id);
         const paidAmount = schedule ? schedule.installments.filter(i => i.status === 'paid').reduce((s, i) => s + i.amount, 0) : 0;
         const totalAmount = schedule ? schedule.installments.reduce((s, i) => s + i.amount, 0) : 0;
         return (
@@ -532,32 +713,75 @@ export default function Bookings() {
                         <div className="flex-1 min-w-0">
                           <p className="text-xs font-medium text-zinc-800">{inst.description}</p>
                           <p className={`text-[10px] ${overdue ? 'text-red-500 font-semibold' : 'text-zinc-400'}`}>
-                            {overdue ? '⚠ Overdue — was due ' : 'Due '}
-                            {new Date(inst.dueDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
+                            {inst.trigger === 'construction_milestone'
+                              ? <>🏗 On milestone: {inst.milestoneLabel}{inst.status === 'demanded' && inst.demandedDate ? ` · demanded ${new Date(inst.demandedDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}` : ''}</>
+                              : <>{overdue ? '⚠ Overdue — was due ' : 'Due '}{new Date(inst.dueDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}</>}
                           </p>
                         </div>
                         <p className="text-xs font-semibold text-zinc-900">{formatCurrency(inst.amount, currency)}</p>
                         {inst.status === 'paid' ? (
                           <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700">Paid</span>
                         ) : canManage ? (
-                          <button
-                            onClick={() => {
-                              setInstallmentStatus(schedule, inst.id, 'paid', user ? { id: user.id, name: user.name } : undefined);
-                              // Cash in → ledger (cash-basis income recognition)
-                              postCustomerPayment({
-                                tenantId, amount: inst.amount,
-                                narration: `Collection — installment #${inst.number} from ${lead?.name || 'customer'} (${lead?.project || 'booking'})`,
-                                sourceId: selected.id, projectId: lead?.projectId, actor,
-                              });
-                              refresh();
-                              toast.success(`Installment #${inst.number} marked paid`);
-                            }}
-                            className="text-[10px] font-semibold px-2 py-1 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700"
-                          >
-                            Mark Paid
-                          </button>
+                          <div className="flex items-center gap-1.5">
+                            {inst.status === 'demanded' && <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-orange-100 text-orange-700">Demanded</span>}
+                            {inst.status === 'pending' && inst.trigger === 'construction_milestone' && (
+                              <button
+                                onClick={async () => {
+                                  if (isApiEnabled()) {
+                                    // Server flips the row to demanded (DB 'invoiced'); the
+                                    // effect re-fetches the schedule on refresh.
+                                    try { await apiDemandInstallment(inst); }
+                                    catch (err) { toast.error(err instanceof Error ? err.message : 'Could not raise the demand'); return; }
+                                  } else {
+                                    raiseDemand(tenantId, schedule, inst.id, actor);
+                                  }
+                                  refresh();
+                                  toast.success(`Demand raised for installment #${inst.number}`);
+                                }}
+                                className="text-[10px] font-semibold px-2 py-1 rounded-lg bg-orange-50 text-orange-700 hover:bg-orange-100 border border-orange-200"
+                              >Raise Demand</button>
+                            )}
+                            <button
+                              onClick={async () => {
+                                if (isApiEnabled()) {
+                                  // Server records the receipt and flips the row to paid —
+                                  // abort on failure so the ledger never posts a phantom
+                                  // collection.
+                                  try { await apiPayInstallment(inst); }
+                                  catch (err) { toast.error(err instanceof Error ? err.message : 'Could not record the payment'); return; }
+                                } else {
+                                  setInstallmentStatus(schedule, inst.id, 'paid', user ? { id: user.id, name: user.name } : undefined);
+                                  recordReceipt(tenantId, schedule, inst);   // buyer-ledger credit
+                                }
+                                // Cash in → ledger. Real-estate GAAP: the receipt is a customer
+                                // advance (deferred), and its GST slice is an output-tax liability —
+                                // revenue is recognized only at possession. Derive the GST slice of
+                                // this installment from the unit's cost sheet.
+                                const unitForGst = getUnit(selected.unitId);
+                                let gstAmount = 0;
+                                if (unitForGst) {
+                                  const cs = computeCostSheet(unitForGst, getCostSheetConfig(tenantId), { applyPlc });
+                                  if (cs.total > 0) gstAmount = Math.round(inst.amount * (cs.gst / cs.total));
+                                }
+                                try {
+                                  await postCustomerPayment({
+                                    tenantId, amount: inst.amount, gstAmount,
+                                    narration: `Collection — installment #${inst.number} from ${lead?.name || 'customer'} (${lead?.project || 'booking'})`,
+                                    sourceId: selected.id, projectId: lead?.projectId, actor,
+                                  });
+                                } catch (err) {
+                                  toast.error(err instanceof Error ? err.message : 'Marked paid, but posting to the ledger failed');
+                                }
+                                refresh();
+                                toast.success(`Installment #${inst.number} marked paid`);
+                              }}
+                              className="text-[10px] font-semibold px-2 py-1 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700"
+                            >
+                              Mark Paid
+                            </button>
+                          </div>
                         ) : (
-                          <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${overdue ? 'bg-red-50 text-red-600' : 'bg-amber-50 text-amber-700'}`}>{overdue ? 'Overdue' : 'Pending'}</span>
+                          <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${inst.status === 'demanded' ? 'bg-orange-100 text-orange-700' : overdue ? 'bg-red-50 text-red-600' : 'bg-amber-50 text-amber-700'}`}>{inst.status === 'demanded' ? 'Demanded' : overdue ? 'Overdue' : 'Pending'}</span>
                         )}
                       </div>
                     );
@@ -565,6 +789,69 @@ export default function Bookings() {
                 </div>
               </div>
               )}
+
+              {/* Statement of Account — buyer ledger (demands raised vs receipts) */}
+              {(() => {
+                const soa = getCustomerLedger(tenantId, { bookingId: selected.id });
+                const demandedUnpaid = schedule?.installments.filter(i => i.status === 'demanded') || [];
+                const overdueAmt = demandedUnpaid.reduce((s, i) => s + i.amount, 0);
+                const oldestDays = demandedUnpaid.length
+                  ? Math.max(...demandedUnpaid.map(i => Math.floor((Date.now() - new Date(i.demandedDate || i.dueDate).getTime()) / 86400000)))
+                  : 0;
+                return (
+                  <div className="mb-5">
+                    <div className="flex items-center justify-between mb-2">
+                      <p className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">Statement of Account</p>
+                      {soa.rows.length > 0 && (
+                        <button
+                          onClick={() => downloadCsv(`statement-${(lead?.name || 'buyer').replace(/\s+/g, '-').toLowerCase()}-${new Date().toISOString().slice(0, 10)}.csv`, [
+                            ['Date', 'Description', 'Demand', 'Receipt', 'Balance'],
+                            ...soa.rows.map(r => [new Date(r.date).toLocaleDateString('en-IN'), r.description, r.debit || '', r.credit || '', r.balance]),
+                            ['', 'TOTAL', soa.demanded, soa.received, soa.balance],
+                          ])}
+                          className="text-[11px] font-semibold text-indigo-600 hover:text-indigo-700"
+                        >⬇ Download</button>
+                      )}
+                    </div>
+                    <div className="grid grid-cols-3 gap-2 mb-2">
+                      <div className="bg-zinc-50 rounded-lg p-2.5"><p className="text-[10px] text-zinc-500 uppercase">Demanded</p><p className="text-sm font-semibold text-zinc-900 mt-0.5">{formatCurrency(soa.demanded, currency)}</p></div>
+                      <div className="bg-emerald-50 rounded-lg p-2.5"><p className="text-[10px] text-emerald-600 uppercase">Received</p><p className="text-sm font-semibold text-emerald-700 mt-0.5">{formatCurrency(soa.received, currency)}</p></div>
+                      <div className={`rounded-lg p-2.5 ${soa.balance > 0 ? 'bg-amber-50' : 'bg-zinc-50'}`}><p className={`text-[10px] uppercase ${soa.balance > 0 ? 'text-amber-600' : 'text-zinc-500'}`}>Balance due</p><p className={`text-sm font-semibold mt-0.5 ${soa.balance > 0 ? 'text-amber-700' : 'text-zinc-900'}`}>{formatCurrency(soa.balance, currency)}</p></div>
+                    </div>
+                    {overdueAmt > 0 && (
+                      <p className="text-[11px] text-red-600 font-medium mb-2">⚠ {formatCurrency(overdueAmt, currency)} demanded &amp; unpaid · oldest {oldestDays} day{oldestDays === 1 ? '' : 's'}</p>
+                    )}
+                    {soa.rows.length === 0 ? (
+                      <p className="text-xs text-zinc-400 bg-zinc-50 rounded-xl p-3">No statement entries yet — demands raised and payments received will appear here.</p>
+                    ) : (
+                      <div className="max-h-40 overflow-y-auto border border-zinc-100 rounded-xl">
+                        <table className="w-full text-[11px]">
+                          <thead className="bg-zinc-50/70 text-zinc-500">
+                            <tr>
+                              <th className="text-left px-3 py-1.5 font-semibold">Date</th>
+                              <th className="text-left px-3 py-1.5 font-semibold">Particulars</th>
+                              <th className="text-right px-3 py-1.5 font-semibold">Demand</th>
+                              <th className="text-right px-3 py-1.5 font-semibold">Receipt</th>
+                              <th className="text-right px-3 py-1.5 font-semibold">Balance</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-zinc-50">
+                            {soa.rows.map(r => (
+                              <tr key={r.id}>
+                                <td className="px-3 py-1.5 text-zinc-500 whitespace-nowrap">{new Date(r.date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}</td>
+                                <td className="px-3 py-1.5 text-zinc-700">{r.description}</td>
+                                <td className="px-3 py-1.5 text-right text-zinc-700">{r.debit ? formatCurrency(r.debit, currency) : '—'}</td>
+                                <td className="px-3 py-1.5 text-right text-emerald-700">{r.credit ? formatCurrency(r.credit, currency) : '—'}</td>
+                                <td className="px-3 py-1.5 text-right font-semibold text-zinc-900">{formatCurrency(r.balance, currency)}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
 
               <div className="flex gap-2">
                 {canManage && currentIdx < BOOKING_STAGES.length - 1 && (
@@ -639,7 +926,49 @@ export default function Bookings() {
               </div>
 
               <div>
-                <label className="block text-xs font-semibold text-zinc-500 uppercase mb-1">Additional Charges</label>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="block text-xs font-semibold text-zinc-500 uppercase">Cost Sheet</label>
+                  <div className="flex items-center gap-3">
+                    <label className="flex items-center gap-1.5 text-[11px] font-medium text-zinc-600 cursor-pointer">
+                      <input type="checkbox" checked={applyPlc} onChange={e => setApplyPlc(e.target.checked)} className="h-3.5 w-3.5 rounded border-zinc-300 text-indigo-600" /> PLC
+                    </label>
+                    <button type="button" onClick={() => quoteUnit && generateCostSheet(quoteUnit, csConfig, applyPlc)} disabled={!quoteUnit} className="text-[11px] font-semibold text-indigo-600 hover:text-indigo-700 disabled:text-zinc-300">⚡ Auto-generate</button>
+                    <button type="button" onClick={() => setShowRates(s => !s)} className="text-[11px] font-medium text-zinc-500 hover:text-zinc-700">{showRates ? 'Hide rates' : 'Edit rates'}</button>
+                  </div>
+                </div>
+
+                {/* Editable per-tenant rate card */}
+                {showRates && (
+                  <div className="grid grid-cols-2 gap-2 mb-3 p-3 bg-indigo-50/40 border border-indigo-100 rounded-xl">
+                    {([
+                      ['floorRiseRatePerSqft', 'Floor rise ₹/sqft/floor'],
+                      ['plcPerSqft', 'PLC ₹/sqft'],
+                      ['ifmsPerSqft', 'IFMS ₹/sqft'],
+                      ['carParkCharge', 'Car park ₹'],
+                      ['clubMembership', 'Club ₹'],
+                      ['gstPercent', 'GST %'],
+                      ['stampDutyPercent', 'Stamp duty %'],
+                      ['registrationPercent', 'Registration %'],
+                    ] as const).map(([k, label]) => (
+                      <label key={k} className="text-[11px] text-zinc-500">
+                        {label}
+                        <input type="number" min="0" value={csConfig[k]} onChange={e => setCsConfig(c => ({ ...c, [k]: Number(e.target.value) || 0 }))}
+                          className="w-full mt-0.5 px-2 py-1.5 bg-white border border-zinc-200 rounded-lg text-xs" />
+                      </label>
+                    ))}
+                    <button type="button" onClick={() => { saveCostSheetConfig(tenantId, csConfig); toast.success('Rate card saved'); }}
+                      className="col-span-2 py-1.5 bg-indigo-600 text-white rounded-lg text-[11px] font-semibold hover:bg-indigo-700">Save rate card for all quotes</button>
+                  </div>
+                )}
+
+                {/* Base price row (read-only) */}
+                {quoteUnit && (
+                  <div className="flex justify-between px-3 py-2 mb-2 bg-zinc-100 rounded-lg text-sm">
+                    <span className="text-zinc-600 font-medium">Basic Sale Price · {quoteUnit.area} sqft</span>
+                    <span className="font-semibold text-zinc-900">{formatCurrencyFull(quoteBase, currency)}</span>
+                  </div>
+                )}
+
                 <div className="space-y-2">
                   {quoteCharges.map((c, i) => (
                     <div key={i} className="flex gap-2">

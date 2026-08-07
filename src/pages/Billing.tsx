@@ -1,15 +1,17 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import {
   IndianRupee, Download, Filter, Search, CheckCircle, Clock, AlertTriangle,
   Plus, X, Trash2, Receipt, Landmark, PiggyBank, ArrowUpRight, ShieldCheck,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { getByTenant, create, update, remove, logAudit } from '../services/db';
+import { isApiEnabled } from '../services/apiClient';
 import { isBillOverdue, projectActuals, formatPoNumber } from '../services/procurementService';
-import { isFilingOverdue, markFiled } from '../services/complianceService';
+import { isFilingOverdue, markFiled, nextDueDate } from '../services/complianceService';
 import { needsApproval } from '../services/approvalService';
-import { postVendorBillApproved, postApPayment, postCustomerPayment, postTaxRemitted, statutoryLiability } from '../services/accountsService';
-import type { Invoice, InvoiceStatus, Lead, Vendor, VendorBill, VendorBillStatus, Project, ProjectBudget, PurchaseOrder, ComplianceItem, FilingFrequency, PaymentMade, PaymentMode } from '../types';
+import * as billingWrites from '../services/billingWrites';
+import { postVendorBillApproved, postApPayment, postCustomerPayment, postTaxRemitted, statutoryLiability, hydrateLedger } from '../services/accountsService';
+import type { Invoice, InvoiceStatus, Lead, Vendor, VendorBill, VendorBillStatus, Project, ProjectBudget, PurchaseOrder, ComplianceItem, FilingFrequency, PaymentMade, PaymentMode, JournalEntry } from '../types';
 import { BUDGET_CATEGORIES, FILING_AUTHORITIES, PAYMENT_MODES } from '../types';
 import { formatCurrency } from '../utils/format';
 import { downloadCsv } from '../utils/csv';
@@ -40,6 +42,16 @@ export default function Billing() {
   const [refreshKey, setRefreshKey] = useState(0);
   const refresh = () => setRefreshKey(k => k + 1);
 
+  // API mode: hydrate the server ledger into the read-cache on mount, then
+  // refresh so the ledger-derived figures (statutory liability, postings) reflect
+  // server-authoritative data on a direct reload. No-op in demo mode.
+  useEffect(() => {
+    if (!isApiEnabled() || !tenantId) return;
+    let cancelled = false;
+    hydrateLedger(tenantId).then(() => { if (!cancelled) refresh(); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [tenantId]);
+
   const [tab, setTab] = useState<Tab>('receivables');
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<InvoiceStatus | 'all'>('all');
@@ -51,6 +63,20 @@ export default function Billing() {
   const canApproveBills = hasPermission('approve_vendor_bills');
   const actor = user ? { id: user.id, name: user.name } : { id: '', name: 'System' };
 
+  // API mode: bills, compliance filings and budgets come from the server;
+  // localStorage stays the demo path and the fallback when the API is down.
+  const [apiData, setApiData] = useState<Awaited<ReturnType<typeof billingWrites.fetchBillingData>>>(null);
+  useEffect(() => {
+    if (!isApiEnabled()) { setApiData(null); return; }
+    let cancelled = false;
+    billingWrites.fetchBillingData(tenantId)
+      .then(d => { if (!cancelled) setApiData(d); })
+      .catch(() => {
+        if (!cancelled) { setApiData(null); toast.error('API unreachable — showing local data', { id: 'api-fallback' }); }
+      });
+    return () => { cancelled = true; };
+  }, [tenantId, refreshKey]);
+
   const invoices = useMemo(
     () => getByTenant<Invoice>('invoices', tenantId).sort((a, b) =>
       new Date(b.date).getTime() - new Date(a.date).getTime()
@@ -60,23 +86,26 @@ export default function Billing() {
   const leads = useMemo(() => getByTenant<Lead>('leads', tenantId), [tenantId, refreshKey]);
   const vendors = useMemo(() => getByTenant<Vendor>('vendors', tenantId), [tenantId, refreshKey]);
   const bills = useMemo(
-    () => getByTenant<VendorBill>('vendorBills', tenantId).sort((a, b) =>
+    () => (apiData?.bills ?? getByTenant<VendorBill>('vendorBills', tenantId)).slice().sort((a, b) =>
       new Date(b.billDate).getTime() - new Date(a.billDate).getTime()
     ),
-    [tenantId, refreshKey]
+    [apiData, tenantId, refreshKey]
   );
   const projects = useMemo(() => getByTenant<Project>('projects', tenantId), [tenantId, refreshKey]);
-  const budgets = useMemo(() => getByTenant<ProjectBudget>('projectBudgets', tenantId), [tenantId, refreshKey]);
+  const budgets = useMemo(
+    () => apiData?.budgets ?? getByTenant<ProjectBudget>('projectBudgets', tenantId),
+    [apiData, tenantId, refreshKey]
+  );
   const pos = useMemo(() => getByTenant<PurchaseOrder>('purchaseOrders', tenantId), [tenantId, refreshKey]);
   const filings = useMemo(
-    () => getByTenant<ComplianceItem>('complianceItems', tenantId).sort((a, b) => {
+    () => (apiData?.compliance ?? getByTenant<ComplianceItem>('complianceItems', tenantId)).slice().sort((a, b) => {
       // Pending first (by due date), filed history after (most recent first)
       if ((a.status === 'pending') !== (b.status === 'pending')) return a.status === 'pending' ? -1 : 1;
       return a.status === 'pending'
         ? new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime()
         : new Date(b.filedAt || 0).getTime() - new Date(a.filedAt || 0).getTime();
     }),
-    [tenantId, refreshKey]
+    [apiData, tenantId, refreshKey]
   );
 
   const vendorName = (id: string) => vendors.find(v => v.id === id)?.name || '—';
@@ -141,19 +170,31 @@ export default function Billing() {
     toast.success('Invoice created');
   };
 
-  const handleStatusChange = (id: string, status: InvoiceStatus) => {
+  const handleStatusChange = async (id: string, status: InvoiceStatus) => {
     if (!canManage) { toast.error('You do not have permission to update invoices'); return; }
     const inv = invoices.find(i => i.id === id);
     update<Invoice>('invoices', id, { status });
-    // Cash landing → ledger. Only on the transition INTO Paid, never twice.
-    if (status === 'Paid' && inv && inv.status !== 'Paid') {
-      postCustomerPayment({
-        tenantId, amount: inv.amount,
-        narration: `Collection — ${inv.type} from ${inv.leadName} (${inv.project})`,
-        sourceId: inv.id,
-        projectId: leads.find(l => l.id === inv.leadId)?.projectId,
-        actor,
-      });
+    // Cash landing → ledger, but ONCE. Skip 'Booking Token' invoices: those are
+    // collected and posted through the booking's payment schedule (the single
+    // ledger source), so posting here too would double-count the same money.
+    // And guard against a Paid→Pending→Paid cycle re-booking income by checking
+    // whether this invoice already posted a customer payment.
+    if (status === 'Paid' && inv && inv.status !== 'Paid' && inv.type !== 'Booking Token') {
+      const alreadyPosted = getByTenant<JournalEntry>('journalEntries', tenantId)
+        .some(j => j.sourceType === 'customer_payment' && j.sourceId === inv.id);
+      if (!alreadyPosted) {
+        try {
+          await postCustomerPayment({
+            tenantId, amount: inv.amount,
+            narration: `Collection — ${inv.type} from ${inv.leadName} (${inv.project})`,
+            sourceId: inv.id,
+            projectId: leads.find(l => l.id === inv.leadId)?.projectId,
+            actor,
+          });
+        } catch (err) {
+          toast.error(err instanceof Error ? err.message : 'Payment recorded, but posting to the ledger failed');
+        }
+      }
     }
     refresh();
     toast.success(`Marked as ${status}`);
@@ -161,6 +202,13 @@ export default function Billing() {
 
   const handleDelete = (id: string) => {
     if (!canManage) { toast.error('You do not have permission to delete invoices'); return; }
+    const inv = invoices.find(i => i.id === id);
+    // A paid invoice has posted cash + income to the ledger; deleting it would
+    // strand those entries. Reverse the payment first.
+    if (inv?.status === 'Paid') {
+      toast.error('A paid invoice has posted to the ledger — reverse the payment before deleting.');
+      return;
+    }
     if (!confirm('Delete this invoice?')) return;
     remove('invoices', id);
     refresh();
@@ -168,7 +216,7 @@ export default function Billing() {
   };
 
   // ── Vendor bills (AP) ──────────────────────────────────────────────────────
-  const handleAddBill = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleAddBill = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const fd = new FormData(e.currentTarget);
     const vendorId = fd.get('vendorId') as string;
@@ -177,25 +225,31 @@ export default function Billing() {
     if (!(amount > 0)) { toast.error('Amount is required'); return; }
     const poId = (fd.get('poId') as string) || undefined;
     const po = pos.find(p => p.id === poId);
-    const created = create<VendorBill>('vendorBills', {
-      id: '', tenantId, vendorId, poId,
-      projectId: (fd.get('projectId') as string) || po?.projectId || undefined,
-      billNumber: (fd.get('billNumber') as string) || '',
-      category: (fd.get('category') as string) || 'Materials',
-      amount,
-      billDate: (fd.get('billDate') as string) || new Date().toISOString().slice(0, 10),
-      dueDate: (fd.get('dueDate') as string) || new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10),
-      status: 'pending',
-      notes: (fd.get('notes') as string) || '',
-      createdAt: new Date().toISOString(),
-    });
+    let created: VendorBill;
+    try {
+      created = await billingWrites.createBill({
+        id: '', tenantId, vendorId, poId,
+        projectId: (fd.get('projectId') as string) || po?.projectId || undefined,
+        billNumber: (fd.get('billNumber') as string) || '',
+        category: (fd.get('category') as string) || 'Materials',
+        amount,
+        billDate: (fd.get('billDate') as string) || new Date().toISOString().slice(0, 10),
+        dueDate: (fd.get('dueDate') as string) || new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10),
+        status: 'pending',
+        notes: (fd.get('notes') as string) || '',
+        createdAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not record the bill');
+      return;
+    }
     audit('create', 'vendor_bill', created.id, `Recorded bill ${created.billNumber || created.id.slice(0, 6)} from ${vendorName(vendorId)} — ${formatCurrency(amount, currency)}`);
     setShowAddBill(false);
     refresh();
     toast.success('Vendor bill recorded');
   };
 
-  const approveBill = (bill: VendorBill) => {
+  const approveBill = async (bill: VendorBill) => {
     if (!canManage) { toast.error('You do not have permission to update bills'); return; }
     // Configurable threshold (Settings → Approvals): big bills need the
     // approve_vendor_bills grant, small ones the maker can clear alone.
@@ -203,54 +257,71 @@ export default function Billing() {
       toast.error('This bill is above the approval threshold — only a vendor-bill approver can approve it.');
       return;
     }
-    update<VendorBill>('vendorBills', bill.id, { status: 'approved' });
-    postVendorBillApproved(bill, actor);
+    try { await billingWrites.setBillStatus(bill, 'approved'); }
+    catch (err) { toast.error(err instanceof Error ? err.message : 'Could not approve the bill'); return; }
+    try {
+      await postVendorBillApproved(bill, actor);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Bill approved, but posting to the ledger failed');
+    }
     audit('update', 'vendor_bill', bill.id, `Approved bill ${bill.billNumber || bill.id.slice(0, 6)} — posted to ledger`);
     refresh();
     toast.success('Bill approved and posted');
   };
 
-  const handlePayBill = (e: React.FormEvent<HTMLFormElement>) => {
+  const handlePayBill = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (!payingBill) return;
     const fd = new FormData(e.currentTarget);
-    const payment = create<PaymentMade>('paymentsMade', {
-      id: '', tenantId, vendorId: payingBill.vendorId, vendorBillId: payingBill.id,
-      amount: payingBill.amount,
-      date: (fd.get('date') as string) || new Date().toISOString().slice(0, 10),
-      mode: (fd.get('mode') as PaymentMode) || 'bank_transfer',
-      reference: (fd.get('reference') as string) || '',
-      paidBy: actor.id, createdAt: new Date().toISOString(),
-    });
-    update<VendorBill>('vendorBills', payingBill.id, { status: 'paid', paidAt: new Date().toISOString() });
-    postApPayment(payment, `Paid vendor bill ${payingBill.billNumber || payingBill.id.slice(0, 6)} to ${vendorName(payingBill.vendorId)}`, payingBill.projectId, actor);
+    let payment: PaymentMade;
+    try {
+      // In API mode the server records the receipt AND flips the bill to paid,
+      // so the settlement is one transaction; demo mode does both locally.
+      payment = await billingWrites.recordApPayment({
+        id: '', tenantId, vendorId: payingBill.vendorId, vendorBillId: payingBill.id,
+        amount: payingBill.amount,
+        date: (fd.get('date') as string) || new Date().toISOString().slice(0, 10),
+        mode: (fd.get('mode') as PaymentMode) || 'bank_transfer',
+        reference: (fd.get('reference') as string) || '',
+        paidBy: actor.id, createdAt: new Date().toISOString(),
+      });
+      if (!isApiEnabled()) await billingWrites.setBillStatus(payingBill, 'paid');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not record the payment');
+      return;
+    }
+    try {
+      await postApPayment(payment, `Paid vendor bill ${payingBill.billNumber || payingBill.id.slice(0, 6)} to ${vendorName(payingBill.vendorId)}`, payingBill.projectId, actor);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Payment recorded, but posting to the ledger failed');
+    }
     audit('payment', 'vendor_bill', payingBill.id, `Paid ${formatCurrency(payingBill.amount, currency)} (${payment.mode}${payment.reference ? ` · ${payment.reference}` : ''})`);
     setPayingBill(null);
     refresh();
     toast.success('Payment recorded and posted');
   };
 
-  const deleteBill = (bill: VendorBill) => {
+  const deleteBill = async (bill: VendorBill) => {
+    // Approving/paying a bill posts to the ledger (expense/AP, then AP/cash);
+    // deleting it would leave those journal entries dangling. Reverse first.
+    if (bill.status === 'approved' || bill.status === 'paid') {
+      toast.error('This bill has posted to the ledger — reverse it before deleting.');
+      return;
+    }
     if (!confirm('Delete this vendor bill?')) return;
-    remove('vendorBills', bill.id);
+    try { await billingWrites.deleteBill(bill); }
+    catch (err) { toast.error(err instanceof Error ? err.message : 'Could not delete the bill'); return; }
     audit('delete', 'vendor_bill', bill.id, `Deleted bill ${bill.billNumber || bill.id.slice(0, 6)}`);
     refresh();
     toast.success('Bill deleted');
   };
 
   // ── Budgets ────────────────────────────────────────────────────────────────
-  const setBudgetLine = (category: string, value: number) => {
+  const setBudgetLine = async (category: string, value: number) => {
     if (!budgetProject) return;
     const existing = projectBudgetLines.find(b => b.category === category);
-    if (existing) {
-      if (value <= 0) remove('projectBudgets', existing.id);
-      else update<ProjectBudget>('projectBudgets', existing.id, { budgeted: value });
-    } else if (value > 0) {
-      create<ProjectBudget>('projectBudgets', {
-        id: '', tenantId, projectId: budgetProject.id, category, budgeted: value,
-        createdAt: new Date().toISOString(),
-      });
-    }
+    try { await billingWrites.setBudget(tenantId, budgetProject.id, category, value, existing); }
+    catch (err) { toast.error(err instanceof Error ? err.message : 'Could not save the budget'); return; }
     refresh();
   };
 
@@ -269,53 +340,82 @@ export default function Billing() {
   };
 
   // ── Compliance filings ─────────────────────────────────────────────────────
-  const handleAddFiling = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleAddFiling = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const fd = new FormData(e.currentTarget);
     const title = (fd.get('title') as string)?.trim();
     const dueDate = fd.get('dueDate') as string;
     if (!title || !dueDate) { toast.error('Title and due date are required'); return; }
     const amount = Number(fd.get('amount'));
-    const created = create<ComplianceItem>('complianceItems', {
-      id: '', tenantId, title,
-      authority: (fd.get('authority') as string) || 'Other',
-      dueDate,
-      frequency: (fd.get('frequency') as FilingFrequency) || 'one_time',
-      projectId: (fd.get('projectId') as string) || undefined,
-      ...(amount > 0 ? { amount } : {}),
-      notes: (fd.get('notes') as string) || '',
-      status: 'pending',
-      createdAt: new Date().toISOString(),
-    });
+    let created: ComplianceItem;
+    try {
+      created = await billingWrites.createCompliance({
+        id: '', tenantId, title,
+        authority: (fd.get('authority') as string) || 'Other',
+        dueDate,
+        frequency: (fd.get('frequency') as FilingFrequency) || 'one_time',
+        projectId: (fd.get('projectId') as string) || undefined,
+        ...(amount > 0 ? { amount } : {}),
+        notes: (fd.get('notes') as string) || '',
+        status: 'pending',
+        createdAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not track the filing');
+      return;
+    }
     audit('create', 'compliance_item', created.id, `Tracked filing "${title}" due ${dueDate}`);
     setShowAddFiling(false);
     refresh();
     toast.success('Filing tracked');
   };
 
-  const handleMarkFiled = (item: ComplianceItem) => {
+  const handleMarkFiled = async (item: ComplianceItem) => {
     if (!user) return;
-    const next = markFiled(item, { id: user.id, name: user.name });
+    let next: { dueDate: string } | null = null;
+    if (isApiEnabled()) {
+      // Mark this period filed, then roll the recurring filing forward by
+      // creating the next period's row (markFiled does both in demo mode).
+      try {
+        await billingWrites.setComplianceStatus(item, 'filed', user.id);
+        const nextDue = nextDueDate(item.dueDate, item.frequency);
+        if (nextDue) {
+          await billingWrites.createCompliance({ ...item, id: '', dueDate: nextDue, status: 'pending', filedAt: undefined, filedBy: undefined, paidAt: undefined });
+          next = { dueDate: nextDue };
+        }
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : 'Could not mark the filing filed');
+        return;
+      }
+    } else {
+      next = markFiled(item, { id: user.id, name: user.name });
+    }
     refresh();
     toast.success(next ? `Filed — next ${item.title} tracked for ${new Date(next.dueDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}` : 'Marked filed');
   };
 
-  const deleteFiling = (item: ComplianceItem) => {
+  const deleteFiling = async (item: ComplianceItem) => {
     if (!confirm(`Stop tracking "${item.title}"?`)) return;
-    remove('complianceItems', item.id);
+    try { await billingWrites.deleteCompliance(item); }
+    catch (err) { toast.error(err instanceof Error ? err.message : 'Could not remove the filing'); return; }
     refresh();
     toast.success('Filing removed');
   };
 
   /** Remitting a filed tax amount clears the statutory-liability account. */
-  const handlePayFiling = (item: ComplianceItem) => {
+  const handlePayFiling = async (item: ComplianceItem) => {
     if (!user || !item.amount) return;
-    update<ComplianceItem>('complianceItems', item.id, { status: 'paid', paidAt: new Date().toISOString() });
-    postTaxRemitted({
-      tenantId, amount: item.amount,
-      narration: `Tax remitted — ${item.title} (${item.authority})`,
-      sourceId: item.id, actor,
-    });
+    try { await billingWrites.setComplianceStatus(item, 'paid', user.id); }
+    catch (err) { toast.error(err instanceof Error ? err.message : 'Could not mark the filing paid'); return; }
+    try {
+      await postTaxRemitted({
+        tenantId, amount: item.amount,
+        narration: `Tax remitted — ${item.title} (${item.authority})`,
+        sourceId: item.id, actor,
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Marked paid, but posting to the ledger failed');
+    }
     audit('payment', 'compliance_item', item.id, `Remitted ${formatCurrency(item.amount, currency)} for "${item.title}"`);
     refresh();
     toast.success('Tax payment posted to the ledger');

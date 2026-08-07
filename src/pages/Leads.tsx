@@ -12,12 +12,16 @@ import type { Lead, LeadStage, Note, Activity, Task, Priority, User as UserType 
 import { leadScoreBand, explainLeadScore, LOST_REASONS } from '../types';
 import { getLeadStages, getLeadSources, getConfigurations, type StageDef } from '../services/metaService';
 import { formatCurrency, currencySymbol } from '../utils/format';
-import { telHref, whatsappHref, mailtoHref } from '../utils/contact';
+import { telHref, mailtoHref } from '../utils/contact';
+import { whatsappSend } from '../services/whatsappService';
 import { toCsv } from '../utils/csv';
 import { inviteCustomer, portalPath } from '../services/portalService';
 import { isApiEnabled, apiGetLeads } from '../services/apiClient';
 import { createLead, patchLead, deleteLead as removeLead, patchLeads, deleteLeads } from '../services/leadWrites';
 import { useTenantUsers } from '../hooks/useTenantUsers';
+import DateRangeFilter from '../components/DateRangeFilter';
+import { type DateRange, ALL_RANGE, resolveRange, inRange, rangeSlug, rangeLabel } from '../utils/dateRange';
+import { qualificationBadge } from '../services/chatbotService';
 import {
   getCallingMode, setCallingMode, initiateCloudCall,
   CALL_STATUSES, type CallingMode, type CallStatus,
@@ -111,6 +115,7 @@ export default function Leads() {
   const [search, setSearch] = useState('');
   const [selectedLead, setSelectedLead] = useState<Lead | null>(null);
   const [filterStage, setFilterStage] = useState<LeadStage | 'all'>('all');
+  const [dateRange, setDateRange] = useState<DateRange>(ALL_RANGE);
   const [showAddModal, setShowAddModal] = useState(false);
   const [noteInput, setNoteInput] = useState('');
   const [refreshKey, setRefreshKey] = useState(0);
@@ -126,6 +131,8 @@ export default function Leads() {
   // Per-user preference; the post-call modal forces duration/status logging.
   const [callingMode, setCallingModeState] = useState<CallingMode>(() => getCallingMode(user?.id || ''));
   const [callLogModal, setCallLogModal] = useState<{ mode: CallingMode; leadId: string; leadName: string } | null>(null);
+  // Site-visit scheduler: holds the chosen date/time while the modal is open.
+  const [visitModal, setVisitModal] = useState<{ date: string; time: string } | null>(null);
   const toggleCallingMode = (mode: CallingMode) => {
     setCallingModeState(mode);
     setCallingMode(user?.id || '', mode);
@@ -198,9 +205,13 @@ export default function Leads() {
 
   const refresh = () => setRefreshKey(k => k + 1);
 
+  // Resolve the active date window once per change; leads are filtered by their
+  // received date (createdAt).
+  const resolvedRange = useMemo(() => resolveRange(dateRange), [dateRange]);
   const filteredLeads = leads.filter(l => {
     if (filterStage !== 'all' && l.stage !== filterStage) return false;
     if (search && !l.name.toLowerCase().includes(search.toLowerCase()) && !l.phone.includes(search)) return false;
+    if (!inRange(l.createdAt, resolvedRange)) return false;
     return true;
   });
 
@@ -611,6 +622,7 @@ export default function Leads() {
           
           {/* Action Buttons - Stack on mobile, row on desktop */}
           <div className="flex items-center gap-2 flex-wrap lg:flex-nowrap">
+            <DateRangeFilter value={dateRange} onChange={setDateRange} align="right" />
             <button className="flex items-center gap-2 px-3 py-2.5 bg-white border border-zinc-200 rounded-xl text-sm font-medium text-zinc-600 hover:bg-zinc-50 transition-colors">
               <Filter className="h-4 w-4" /> Filters
             </button>
@@ -622,9 +634,10 @@ export default function Leads() {
                 const blob = new Blob([csv], { type: 'text/csv' });
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement('a');
-                a.href = url; a.download = `leads-${new Date().toISOString().split('T')[0]}.csv`; a.click();
+                const rangePart = dateRange.preset === 'all' ? '' : `-${rangeSlug(dateRange)}`;
+                a.href = url; a.download = `leads${rangePart}-${new Date().toISOString().split('T')[0]}.csv`; a.click();
                 URL.revokeObjectURL(url);
-                toast.success('Leads exported to CSV');
+                toast.success(`Exported ${filteredLeads.length} lead${filteredLeads.length === 1 ? '' : 's'} to CSV`);
               }}
               className="flex items-center gap-2 px-3 py-2.5 bg-white border border-zinc-200 rounded-xl text-sm font-medium text-zinc-600 hover:bg-zinc-50 transition-colors"
             >
@@ -685,6 +698,20 @@ export default function Leads() {
         {apiLeads !== null && (
           <div className="flex items-center gap-2 bg-indigo-50 border border-indigo-200 text-indigo-700 rounded-xl px-3 py-2 mb-4 text-xs font-medium">
             ⚡ Live server data — leads are stored in PostgreSQL with tenant isolation (RLS) and permissions enforced in the database. Creates, edits and deletes are saved to the server.
+          </div>
+        )}
+
+        {/* Active date-filter summary */}
+        {dateRange.preset !== 'all' && (
+          <div className="flex items-center gap-2 flex-wrap bg-white border border-zinc-200 rounded-xl px-3 py-2 mb-4 text-xs">
+            <Calendar className="h-3.5 w-3.5 text-indigo-500" />
+            <span className="font-medium text-zinc-600">Received: <span className="text-indigo-700">{rangeLabel(dateRange)}</span></span>
+            <span className="text-zinc-400">·</span>
+            <span className="text-zinc-500">{filteredLeads.length} lead{filteredLeads.length === 1 ? '' : 's'}</span>
+            <button
+              onClick={() => setDateRange(ALL_RANGE)}
+              className="ml-1 text-indigo-600 hover:text-indigo-800 underline underline-offset-2"
+            >Clear</button>
           </div>
         )}
 
@@ -1160,6 +1187,36 @@ export default function Leads() {
               </div>
             </div>
 
+            {/* Chatbot qualification snapshot + custom answers (only when captured) */}
+            {(selectedLead.qualification || (selectedLead.customFields && Object.keys(selectedLead.customFields).length > 0)) && (
+              <div className="space-y-2.5 bg-indigo-50/40 rounded-2xl p-3.5 border border-indigo-100">
+                <div className="flex items-center justify-between">
+                  <p className="text-[10px] font-bold text-indigo-400 uppercase tracking-wider">Captured via {selectedLead.source}</p>
+                  {selectedLead.qualification && (() => {
+                    const b = qualificationBadge(selectedLead.qualification.status);
+                    return <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${b.color}`}>{b.label} · {selectedLead.qualification.score}/100</span>;
+                  })()}
+                </div>
+                {selectedLead.qualification?.reasons?.length ? (
+                  <ul className="space-y-1">
+                    {selectedLead.qualification.reasons.map((r, i) => (
+                      <li key={i} className="text-xs text-zinc-600 flex items-start gap-1.5"><span className="text-indigo-400 mt-0.5">•</span>{r}</li>
+                    ))}
+                  </ul>
+                ) : null}
+                {selectedLead.customFields && Object.keys(selectedLead.customFields).length > 0 && (
+                  <div className="pt-1 border-t border-indigo-100/70 space-y-1">
+                    {Object.entries(selectedLead.customFields).map(([k, v]) => (
+                      <div key={k} className="flex justify-between gap-3 text-xs">
+                        <span className="text-zinc-400 capitalize">{k.replace(/_/g, ' ')}</span>
+                        <span className="text-zinc-700 font-medium text-right">{v}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Synced Workspace Actions */}
             <div className="space-y-2 bg-zinc-50/50 rounded-2xl p-3.5 border border-zinc-100">
               <p className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider mb-2">Synced Actions</p>
@@ -1193,17 +1250,26 @@ export default function Leads() {
                   <Phone className="h-4 w-4" /> {callingMode === 'API_CLOUD' ? 'Cloud Call' : 'Call'}
                 </button>
                 <button
-                  onClick={() => {
-                    audit('whatsapp_log', selectedLead.id, `Opened WhatsApp chat with ${selectedLead.name}`);
+                  onClick={async () => {
+                    // Brand-voice greeting prefilled, dispatched through whichever
+                    // WhatsApp provider the tenant runs (free click-to-chat by
+                    // default; Meta Business API when configured — server-side).
+                    const greeting = `Hi ${selectedLead.name.split(' ')[0]}, this is ${user?.name || 'your advisor'} from ${tenant?.name || 'our team'} regarding ${selectedLead.project}. Is this a good time to chat?`;
+                    const out = await whatsappSend({ tenantId, phone: selectedLead.phone, text: greeting });
+                    audit('whatsapp_log', selectedLead.id, out.delivered
+                      ? `Sent WhatsApp to ${selectedLead.name} via Business API`
+                      : `Opened WhatsApp chat with ${selectedLead.name} (${out.provider})`);
                     create<Activity>('activities', {
                       id: '', tenantId, leadId: selectedLead.id, userId, type: 'whatsapp',
-                      description: `WhatsApp conversation opened with ${selectedLead.name}`,
+                      description: out.delivered
+                        ? `WhatsApp sent to ${selectedLead.name} via Business API`
+                        : `WhatsApp conversation opened with ${selectedLead.name}`,
                       createdAt: new Date().toISOString(),
                     });
                     refresh();
-                    // Open WhatsApp with a brand-voice greeting prefilled
-                    const greeting = `Hi ${selectedLead.name.split(' ')[0]}, this is ${user?.name || 'your advisor'} from ${tenant?.name || 'our team'} regarding ${selectedLead.project}. Is this a good time to chat?`;
-                    window.open(whatsappHref(selectedLead.phone, greeting), '_blank', 'noopener');
+                    if (out.delivered) toast.success('Message sent via WhatsApp Business API');
+                    else if (out.link) window.open(out.link, '_blank', 'noopener');
+                    if (out.error) toast(`WhatsApp API unavailable — opened a chat instead`);
                   }}
                   className="flex-1 flex items-center justify-center gap-1.5 py-2 bg-green-50 text-green-700 rounded-xl text-sm font-medium hover:bg-green-100 transition-colors"
                 >
@@ -1233,27 +1299,10 @@ export default function Leads() {
               <div className="grid grid-cols-2 gap-2 mt-2">
                 <button
                   onClick={() => {
-                    const title = `Site Visit - ${selectedLead.name}`;
-                    const tomorrow = new Date(Date.now() + 86400000);
-                    tomorrow.setHours(11, 0, 0, 0);
-                    
-                    // Create Calendar Event / Task
-                    create<Task>('tasks', {
-                      id: '', tenantId, userId,
-                      title, description: `Guided tour of ${selectedLead.project} with ${selectedLead.name}`,
-                      dueDate: tomorrow.toISOString(),
-                      priority: 'hot', status: 'pending', category: 'visit'
-                    });
-
-                    // Update Lead Stage and Log Activity
-                    handleStageChange(selectedLead.id, 'visit_scheduled');
-                    create<Activity>('activities', {
-                      id: '', tenantId, leadId: selectedLead.id, userId, type: 'visit',
-                      description: `Site visit scheduled for ${tomorrow.toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}`,
-                      createdAt: new Date().toISOString(),
-                    });
-                    audit('schedule_visit', selectedLead.id, `Scheduled site visit calendar event for ${selectedLead.name}`);
-                    toast.success('Site visit scheduled & added to Calendar');
+                    // Open the date/time picker prefilled with tomorrow 11:00.
+                    const t = new Date(Date.now() + 86400000);
+                    const date = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
+                    setVisitModal({ date, time: '11:00' });
                   }}
                   className="flex items-center justify-center gap-1.5 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-xl text-xs font-semibold transition-all border border-indigo-100/50"
                 >
@@ -1338,10 +1387,16 @@ export default function Leads() {
 
               {(hasPermission('manage_leads') || hasPermission('manage_own_leads')) && (
                 <button
-                  onClick={() => {
+                  onClick={async () => {
                     if (!selectedLead.email) { toast.error('Add an email address to this lead first'); return; }
                     if (!user || !tenant) return;
-                    const creds = inviteCustomer(tenantId, selectedLead, { id: user.id, name: user.name });
+                    let creds;
+                    try {
+                      creds = await inviteCustomer(tenantId, selectedLead, { id: user.id, name: user.name });
+                    } catch (err) {
+                      toast.error(err instanceof Error ? err.message : 'Could not grant portal access');
+                      return;
+                    }
                     const shareText = `Your ${tenant.name} portal access:\n${window.location.origin}${portalPath(tenant)}\nEmail: ${creds.email}\nPassword: ${creds.password}`;
                     navigator.clipboard?.writeText(shareText).catch(() => {});
                     toast.success(
@@ -1407,6 +1462,68 @@ export default function Leads() {
           </div>
         </div>
       </>
+      )}
+
+      {/* Schedule Site Visit — pick a specific date & time */}
+      {visitModal && selectedLead && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-[60] flex items-center justify-center p-4" onClick={() => setVisitModal(null)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 animate-fade-in" onClick={e => e.stopPropagation()}>
+            <h3 className="text-lg font-semibold text-zinc-900 flex items-center gap-2 mb-1">
+              <Calendar className="h-4 w-4 text-indigo-600" /> Schedule Site Visit
+            </h3>
+            <p className="text-xs text-zinc-500 mb-4">{selectedLead.name} · {selectedLead.project}</p>
+            <form
+              onSubmit={e => {
+                e.preventDefault();
+                const when = new Date(`${visitModal.date}T${visitModal.time}`);
+                if (Number.isNaN(when.getTime())) { toast.error('Please pick a valid date and time'); return; }
+                if (when.getTime() < Date.now()) { toast.error('Pick a future date and time'); return; }
+
+                create<Task>('tasks', {
+                  id: '', tenantId, userId,
+                  title: `Site Visit - ${selectedLead.name}`,
+                  description: `Guided tour of ${selectedLead.project} with ${selectedLead.name}`,
+                  dueDate: when.toISOString(),
+                  priority: 'hot', status: 'pending', category: 'visit',
+                });
+                handleStageChange(selectedLead.id, 'visit_scheduled');
+                const label = when.toLocaleString('en-IN', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+                create<Activity>('activities', {
+                  id: '', tenantId, leadId: selectedLead.id, userId, type: 'visit',
+                  description: `Site visit scheduled for ${label}`,
+                  createdAt: new Date().toISOString(),
+                });
+                audit('schedule_visit', selectedLead.id, `Scheduled site visit for ${selectedLead.name} on ${label}`);
+                toast.success(`Site visit scheduled for ${label}`);
+                setVisitModal(null);
+              }}
+            >
+              <div className="grid grid-cols-2 gap-3 mb-4">
+                <div>
+                  <label className="block text-xs font-medium text-zinc-500 mb-1">Date</label>
+                  <input
+                    type="date" required value={visitModal.date}
+                    min={new Date().toISOString().split('T')[0]}
+                    onChange={e => setVisitModal(v => v && { ...v, date: e.target.value })}
+                    className="w-full px-3 py-2 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-zinc-500 mb-1">Time</label>
+                  <input
+                    type="time" required value={visitModal.time}
+                    onChange={e => setVisitModal(v => v && { ...v, time: e.target.value })}
+                    className="w-full px-3 py-2 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
+                  />
+                </div>
+              </div>
+              <div className="flex gap-2">
+                <button type="button" onClick={() => setVisitModal(null)} className="flex-1 py-2.5 rounded-xl text-sm font-medium text-zinc-600 bg-zinc-100 hover:bg-zinc-200 transition-colors">Cancel</button>
+                <button type="submit" className="flex-1 py-2.5 rounded-xl text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 transition-colors">Schedule Visit</button>
+              </div>
+            </form>
+          </div>
+        </div>
       )}
 
       {/* Add Lead Modal */}

@@ -1,14 +1,15 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import {
   Truck, Package, ShoppingCart, Wrench, Plus, X, Trash2, Star,
   AlertTriangle, ArrowDownToLine, ArrowUpFromLine, CalendarClock, Building2,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { getByTenant, create, update, remove, logAudit } from '../services/db';
+import { getByTenant, logAudit } from '../services/db';
 import {
-  poTotal, nextPoNumber, formatPoNumber, stockOnHand, lowStockMaterials,
-  receiveAgainstPo, machinesDueForService,
+  poTotal, nextPoNumber, formatPoNumber, stockOnHandFrom, lowStockFrom, machinesDueFrom,
 } from '../services/procurementService';
+import { isApiEnabled } from '../services/apiClient';
+import * as procWrites from '../services/procurementWrites';
 import { formatCurrency } from '../utils/format';
 import type {
   Project, User, Vendor, PurchaseOrder, PurchaseOrderLine, Material,
@@ -52,26 +53,40 @@ export default function Procurement() {
   const [receiveQty, setReceiveQty] = useState<Record<string, string>>({});
   const [draftLines, setDraftLines] = useState<DraftLine[]>([emptyLine()]);
 
+  // API mode: the server owns all five procurement datasets; localStorage
+  // remains the demo path and the fallback when the API is unreachable.
+  const [apiData, setApiData] = useState<Awaited<ReturnType<typeof procWrites.fetchProcurementData>>>(null);
+  useEffect(() => {
+    if (!isApiEnabled()) { setApiData(null); return; }
+    let cancelled = false;
+    procWrites.fetchProcurementData(tenantId)
+      .then(d => { if (!cancelled) setApiData(d); })
+      .catch(() => {
+        if (!cancelled) { setApiData(null); toast.error('API unreachable — showing local data', { id: 'api-fallback' }); }
+      });
+    return () => { cancelled = true; };
+  }, [tenantId, refreshKey]);
+
   const vendors = useMemo(
-    () => getByTenant<Vendor>('vendors', tenantId).sort((a, b) => a.name.localeCompare(b.name)),
-    [tenantId, refreshKey]
+    () => (apiData?.vendors ?? getByTenant<Vendor>('vendors', tenantId)).slice().sort((a, b) => a.name.localeCompare(b.name)),
+    [apiData, tenantId, refreshKey]
   );
   const pos = useMemo(
-    () => getByTenant<PurchaseOrder>('purchaseOrders', tenantId).sort((a, b) => b.number - a.number),
-    [tenantId, refreshKey]
+    () => (apiData?.pos ?? getByTenant<PurchaseOrder>('purchaseOrders', tenantId)).slice().sort((a, b) => b.number - a.number),
+    [apiData, tenantId, refreshKey]
   );
   const materials = useMemo(
-    () => getByTenant<Material>('materials', tenantId).sort((a, b) => a.name.localeCompare(b.name)),
-    [tenantId, refreshKey]
+    () => (apiData?.materials ?? getByTenant<Material>('materials', tenantId)).slice().sort((a, b) => a.name.localeCompare(b.name)),
+    [apiData, tenantId, refreshKey]
   );
   const txns = useMemo(
-    () => getByTenant<StockTransaction>('stockTxns', tenantId)
-      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
-    [tenantId, refreshKey]
+    () => (apiData?.txns ?? getByTenant<StockTransaction>('stockTxns', tenantId))
+      .slice().sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
+    [apiData, tenantId, refreshKey]
   );
   const machines = useMemo(
-    () => getByTenant<Machine>('machines', tenantId).sort((a, b) => a.name.localeCompare(b.name)),
-    [tenantId, refreshKey]
+    () => (apiData?.machines ?? getByTenant<Machine>('machines', tenantId)).slice().sort((a, b) => a.name.localeCompare(b.name)),
+    [apiData, tenantId, refreshKey]
   );
   const projects = useMemo(() => getByTenant<Project>('projects', tenantId), [tenantId, refreshKey]);
   const users = useMemo(() => getByTenant<User>('users', tenantId).filter(u => u.active), [tenantId, refreshKey]);
@@ -88,47 +103,56 @@ export default function Procurement() {
   const activeVendors = vendors.filter(v => v.status === 'active').length;
   const openPos = pos.filter(p => p.status === 'approved' || p.status === 'partially_received' || p.status === 'pending_approval');
   const openPoValue = openPos.reduce((s, p) => s + poTotal(p), 0);
-  const lowStock = lowStockMaterials(tenantId);
-  const serviceDue = machinesDueForService(tenantId);
+  const lowStock = lowStockFrom(materials, txns);
+  const serviceDue = machinesDueFrom(machines);
 
   // ── Vendors ────────────────────────────────────────────────────────────────
-  const handleAddVendor = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleAddVendor = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const fd = new FormData(e.currentTarget);
     const name = (fd.get('name') as string)?.trim();
     const phone = (fd.get('phone') as string)?.trim();
     if (!name || !phone) { toast.error('Name and phone are required'); return; }
-    const created = create<Vendor>('vendors', {
-      id: '', tenantId, name,
-      category: (fd.get('category') as string) || 'Other',
-      contactPerson: (fd.get('contactPerson') as string) || '',
-      phone, email: (fd.get('email') as string) || '',
-      gst: (fd.get('gst') as string) || '',
-      address: (fd.get('address') as string) || '',
-      status: 'active',
-      createdAt: new Date().toISOString(),
-    });
+    let created: Vendor;
+    try {
+      created = await procWrites.createVendor({
+        id: '', tenantId, name,
+        category: (fd.get('category') as string) || 'Other',
+        contactPerson: (fd.get('contactPerson') as string) || '',
+        phone, email: (fd.get('email') as string) || '',
+        gst: (fd.get('gst') as string) || '',
+        address: (fd.get('address') as string) || '',
+        status: 'active',
+        createdAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not add the vendor');
+      return;
+    }
     audit('create', 'vendor', created.id, `Added vendor "${name}" (${created.category})`);
     setShowAddVendor(false);
     refresh();
     toast.success('Vendor added');
   };
 
-  const rateVendor = (v: Vendor, rating: number) => {
-    update<Vendor>('vendors', v.id, { rating: v.rating === rating ? undefined : rating });
+  const rateVendor = async (v: Vendor, rating: number) => {
+    try { await procWrites.setVendorRating(v, v.rating === rating ? undefined : rating); }
+    catch (err) { toast.error(err instanceof Error ? err.message : 'Could not save the rating'); return; }
     refresh();
   };
 
-  const toggleVendor = (v: Vendor) => {
-    update<Vendor>('vendors', v.id, { status: v.status === 'active' ? 'inactive' : 'active' });
+  const toggleVendor = async (v: Vendor) => {
+    try { await procWrites.setVendorStatus(v, v.status === 'active' ? 'inactive' : 'active'); }
+    catch (err) { toast.error(err instanceof Error ? err.message : 'Could not update the vendor'); return; }
     audit('update', 'vendor', v.id, `Marked vendor "${v.name}" ${v.status === 'active' ? 'inactive' : 'active'}`);
     refresh();
   };
 
-  const deleteVendor = (v: Vendor) => {
+  const deleteVendor = async (v: Vendor) => {
     if (pos.some(p => p.vendorId === v.id)) { toast.error('This vendor has purchase orders — mark them inactive instead'); return; }
     if (!confirm(`Delete vendor "${v.name}"?`)) return;
-    remove('vendors', v.id);
+    try { await procWrites.deleteVendor(v); }
+    catch (err) { toast.error(err instanceof Error ? err.message : 'Could not delete the vendor'); return; }
     audit('delete', 'vendor', v.id, `Deleted vendor "${v.name}"`);
     refresh();
     toast.success('Vendor deleted');
@@ -147,7 +171,7 @@ export default function Procurement() {
       : { materialId: '' });
   };
 
-  const handleAddPo = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleAddPo = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (!user) return;
     const fd = new FormData(e.currentTarget);
@@ -161,15 +185,21 @@ export default function Procurement() {
         qty: Number(l.qty), rate: Number(l.rate) || 0, receivedQty: 0,
       }));
     if (lines.length === 0) { toast.error('Add at least one line with a description and quantity'); return; }
-    const created = create<PurchaseOrder>('purchaseOrders', {
-      id: '', tenantId, number: nextPoNumber(tenantId), vendorId,
-      projectId: (fd.get('projectId') as string) || undefined,
-      status: 'pending_approval', lines,
-      expectedDate: (fd.get('expectedDate') as string) || undefined,
-      notes: (fd.get('notes') as string) || '',
-      createdBy: user.id,
-      createdAt: new Date().toISOString(),
-    });
+    let created: PurchaseOrder;
+    try {
+      created = await procWrites.createPo({
+        id: '', tenantId, number: nextPoNumber(tenantId), vendorId,
+        projectId: (fd.get('projectId') as string) || undefined,
+        status: 'pending_approval', lines,
+        expectedDate: (fd.get('expectedDate') as string) || undefined,
+        notes: (fd.get('notes') as string) || '',
+        createdBy: user.id,
+        createdAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not raise the PO');
+      return;
+    }
     audit('create', 'purchase_order', created.id, `Raised ${formatPoNumber(created.number)} on ${vendorName(vendorId)} — ${formatCurrency(poTotal(created), currency)}`);
     setShowAddPo(false);
     setDraftLines([emptyLine()]);
@@ -177,30 +207,34 @@ export default function Procurement() {
     toast.success(`${formatPoNumber(created.number)} raised`);
   };
 
-  const approvePo = (po: PurchaseOrder) => {
+  const approvePo = async (po: PurchaseOrder) => {
     if (!user) return;
-    update<PurchaseOrder>('purchaseOrders', po.id, { status: 'approved', approvedBy: user.id, approvedAt: new Date().toISOString() });
+    try { await procWrites.decidePo(po, 'approved', user.id); }
+    catch (err) { toast.error(err instanceof Error ? err.message : 'Could not approve the PO'); return; }
     audit('update', 'purchase_order', po.id, `Approved ${formatPoNumber(po.number)}`);
     refresh();
     toast.success('PO approved');
   };
 
-  const cancelPo = (po: PurchaseOrder) => {
+  const cancelPo = async (po: PurchaseOrder) => {
     if (!confirm(`Cancel ${formatPoNumber(po.number)}?`)) return;
-    update<PurchaseOrder>('purchaseOrders', po.id, { status: 'cancelled' });
+    try { await procWrites.decidePo(po, 'cancelled', user?.id || ''); }
+    catch (err) { toast.error(err instanceof Error ? err.message : 'Could not cancel the PO'); return; }
     audit('update', 'purchase_order', po.id, `Cancelled ${formatPoNumber(po.number)}`);
     refresh();
     toast.success('PO cancelled');
   };
 
-  const handleReceive = () => {
+  const handleReceive = async () => {
     if (!receivingPo || !user) return;
     const receipts = receivingPo.lines
       .map(l => ({ lineId: l.id, qty: Number(receiveQty[l.id]) || 0 }))
       .filter(r => r.qty > 0);
     if (receipts.length === 0) { toast.error('Enter a received quantity on at least one line'); return; }
-    const result = receiveAgainstPo(receivingPo, receipts, { id: user.id, name: user.name });
-    if (!result) { toast.error('Nothing to receive'); return; }
+    let ok = false;
+    try { ok = await procWrites.receivePo(receivingPo, receipts, { id: user.id, name: user.name }); }
+    catch (err) { toast.error(err instanceof Error ? err.message : 'Could not record the receipt'); return; }
+    if (!ok) { toast.error('Nothing to receive'); return; }
     setReceivingPo(null);
     setReceiveQty({});
     refresh();
@@ -208,25 +242,31 @@ export default function Procurement() {
   };
 
   // ── Materials & stock ──────────────────────────────────────────────────────
-  const handleAddMaterial = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleAddMaterial = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const fd = new FormData(e.currentTarget);
     const name = (fd.get('name') as string)?.trim();
     if (!name) { toast.error('Material name is required'); return; }
-    const created = create<Material>('materials', {
-      id: '', tenantId, name,
-      category: (fd.get('category') as string) || 'Other',
-      unit: (fd.get('unit') as string) || 'nos',
-      reorderLevel: Number(fd.get('reorderLevel')) || 0,
-      createdAt: new Date().toISOString(),
-    });
+    let created: Material;
+    try {
+      created = await procWrites.createMaterial({
+        id: '', tenantId, name,
+        category: (fd.get('category') as string) || 'Other',
+        unit: (fd.get('unit') as string) || 'nos',
+        reorderLevel: Number(fd.get('reorderLevel')) || 0,
+        createdAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not add the material');
+      return;
+    }
     audit('create', 'material', created.id, `Added material "${name}"`);
     setShowAddMaterial(false);
     refresh();
     toast.success('Material added');
   };
 
-  const handleMovement = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleMovement = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (!user || !showMovement) return;
     const fd = new FormData(e.currentTarget);
@@ -235,23 +275,29 @@ export default function Procurement() {
     if (!materialId || !(qty > 0)) { toast.error('Pick a material and a positive quantity'); return; }
     const projectId = (fd.get('projectId') as string) || undefined;
     if (showMovement === 'outward') {
-      const onHand = stockOnHand(tenantId, materialId, projectId);
+      const onHand = stockOnHandFrom(txns, materialId, projectId);
       if (qty > onHand) {
         toast.error(`Only ${onHand} ${materials.find(m => m.id === materialId)?.unit || ''} on hand at ${projectName(projectId)}`);
         return;
       }
     }
-    const created = create<StockTransaction>('stockTxns', {
-      id: '', tenantId, materialId, projectId,
-      type: showMovement, qty,
-      rate: showMovement === 'inward' ? Number(fd.get('rate')) || undefined : undefined,
-      vendorId: showMovement === 'inward' ? (fd.get('vendorId') as string) || undefined : undefined,
-      reference: (fd.get('reference') as string) || '',
-      notes: (fd.get('notes') as string) || '',
-      createdBy: user.id,
-      date: (fd.get('date') as string) || new Date().toISOString().slice(0, 10),
-      createdAt: new Date().toISOString(),
-    });
+    let created: StockTransaction;
+    try {
+      created = await procWrites.createStockTxn({
+        id: '', tenantId, materialId, projectId,
+        type: showMovement, qty,
+        rate: showMovement === 'inward' ? Number(fd.get('rate')) || undefined : undefined,
+        vendorId: showMovement === 'inward' ? (fd.get('vendorId') as string) || undefined : undefined,
+        reference: (fd.get('reference') as string) || '',
+        notes: (fd.get('notes') as string) || '',
+        createdBy: user.id,
+        date: (fd.get('date') as string) || new Date().toISOString().slice(0, 10),
+        createdAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not record the movement');
+      return;
+    }
     audit('create', 'stock_transaction', created.id,
       `${showMovement === 'inward' ? 'Inward' : 'Issued'} ${qty} × ${materialName(materialId)} @ ${projectName(projectId)}`);
     setShowMovement(null);
@@ -259,50 +305,60 @@ export default function Procurement() {
     toast.success(showMovement === 'inward' ? 'Stock received' : 'Material issued');
   };
 
-  const deleteMaterial = (m: Material) => {
+  const deleteMaterial = async (m: Material) => {
     if (txns.some(t => t.materialId === m.id)) { toast.error('This material has stock movements — it cannot be deleted'); return; }
     if (!confirm(`Delete material "${m.name}"?`)) return;
-    remove('materials', m.id);
+    try { await procWrites.deleteMaterial(m); }
+    catch (err) { toast.error(err instanceof Error ? err.message : 'Could not delete the material'); return; }
     refresh();
     toast.success('Material deleted');
   };
 
   // ── Machinery ──────────────────────────────────────────────────────────────
-  const handleAddMachine = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleAddMachine = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const fd = new FormData(e.currentTarget);
     const name = (fd.get('name') as string)?.trim();
     if (!name) { toast.error('Machine name is required'); return; }
-    const created = create<Machine>('machines', {
-      id: '', tenantId, name,
-      category: (fd.get('category') as string) || 'Other',
-      registrationNo: (fd.get('registrationNo') as string) || '',
-      ownership: (fd.get('ownership') as 'owned' | 'rented') || 'owned',
-      projectId: (fd.get('projectId') as string) || undefined,
-      status: 'on_site',
-      nextServiceDate: (fd.get('nextServiceDate') as string) || undefined,
-      createdAt: new Date().toISOString(),
-    });
+    let created: Machine;
+    try {
+      created = await procWrites.createMachine({
+        id: '', tenantId, name,
+        category: (fd.get('category') as string) || 'Other',
+        registrationNo: (fd.get('registrationNo') as string) || '',
+        ownership: (fd.get('ownership') as 'owned' | 'rented') || 'owned',
+        projectId: (fd.get('projectId') as string) || undefined,
+        status: 'on_site',
+        nextServiceDate: (fd.get('nextServiceDate') as string) || undefined,
+        createdAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not add the machine');
+      return;
+    }
     audit('create', 'machine', created.id, `Added ${created.category.toLowerCase()} "${name}"`);
     setShowAddMachine(false);
     refresh();
     toast.success('Machine added');
   };
 
-  const setMachineStatus = (m: Machine, status: MachineStatus) => {
-    update<Machine>('machines', m.id, { status });
+  const setMachineStatus = async (m: Machine, status: MachineStatus) => {
+    try { await procWrites.patchMachine(m, { status }); }
+    catch (err) { toast.error(err instanceof Error ? err.message : 'Could not update the machine'); return; }
     refresh();
   };
 
-  const moveMachine = (m: Machine, projectId: string) => {
-    update<Machine>('machines', m.id, { projectId: projectId || undefined });
+  const moveMachine = async (m: Machine, projectId: string) => {
+    try { await procWrites.patchMachine(m, { projectId: projectId || undefined }); }
+    catch (err) { toast.error(err instanceof Error ? err.message : 'Could not move the machine'); return; }
     audit('update', 'machine', m.id, `Moved "${m.name}" to ${projectName(projectId || undefined)}`);
     refresh();
   };
 
-  const deleteMachine = (m: Machine) => {
+  const deleteMachine = async (m: Machine) => {
     if (!confirm(`Delete "${m.name}"?`)) return;
-    remove('machines', m.id);
+    try { await procWrites.deleteMachine(m); }
+    catch (err) { toast.error(err instanceof Error ? err.message : 'Could not delete the machine'); return; }
     audit('delete', 'machine', m.id, `Deleted machine "${m.name}"`);
     refresh();
     toast.success('Machine removed');
@@ -585,7 +641,7 @@ export default function Procurement() {
                   </thead>
                   <tbody>
                     {materials.map(m => {
-                      const onHand = stockOnHand(tenantId, m.id);
+                      const onHand = stockOnHandFrom(txns, m.id);
                       const low = m.reorderLevel > 0 && onHand <= m.reorderLevel;
                       return (
                         <tr key={m.id} className="border-b border-zinc-50 hover:bg-zinc-50/30 transition-colors">

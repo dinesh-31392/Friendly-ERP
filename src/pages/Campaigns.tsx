@@ -1,9 +1,11 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import {
   Megaphone, Plus, X, Send, Clock, CheckCircle2, FileText, Trash2, Calendar, Copy,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { getByTenant, create, update, remove, logAudit } from '../services/db';
+import { getByTenant, logAudit } from '../services/db';
+import { isApiEnabled, apiGetCampaigns, apiGetTemplates } from '../services/apiClient';
+import { createCampaign, patchCampaign, deleteCampaign, createTemplate, deleteTemplate } from '../services/campaignWrites';
 import { localeFor } from '../utils/format';
 import type { Campaign, Template } from '../types';
 import toast from 'react-hot-toast';
@@ -27,11 +29,30 @@ export default function Campaigns() {
   const [showTemplate, setShowTemplate] = useState(false);
   const [selected, setSelected] = useState<Campaign | null>(null);
 
+  // Feature flag: with an API URL configured, campaigns + templates are read
+  // from the Fastify backend (RLS-scoped). Falls back to localStorage on any API
+  // failure so the page never goes blank. Flag off → identical behavior.
+  const [apiData, setApiData] = useState<{ campaigns: Campaign[]; templates: Template[] } | null>(null);
+  useEffect(() => {
+    if (!isApiEnabled()) { setApiData(null); return; }
+    let cancelled = false;
+    Promise.all([apiGetCampaigns(), apiGetTemplates()])
+      .then(([campaigns, templates]) => { if (!cancelled) setApiData({ campaigns, templates }); })
+      .catch(() => {
+        if (!cancelled) {
+          setApiData(null);
+          toast.error('API unreachable — showing local data', { id: 'api-fallback' });
+        }
+      });
+    return () => { cancelled = true; };
+  }, [tenantId, refreshKey]);
+
   const campaigns = useMemo(
-    () => getByTenant<Campaign>('campaigns', tenantId).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
-    [tenantId, refreshKey]
+    () => (apiData?.campaigns ?? getByTenant<Campaign>('campaigns', tenantId))
+      .slice().sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
+    [apiData, tenantId, refreshKey]
   );
-  const templates = useMemo(() => getByTenant<Template>('templates', tenantId), [tenantId, refreshKey]);
+  const templates = useMemo(() => apiData?.templates ?? getByTenant<Template>('templates', tenantId), [apiData, tenantId, refreshKey]);
   const channels = tenant?.channels || ['WhatsApp', 'Email', 'SMS'];
 
   const audit = (action: string, id: string, details: string) => {
@@ -48,7 +69,7 @@ export default function Campaigns() {
 
   const canManage = hasPermission('manage_campaigns');
 
-  const handleAdd = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleAdd = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (!canManage) { toast.error('You do not have permission to manage campaigns'); return; }
     const fd = new FormData(e.currentTarget);
@@ -56,55 +77,76 @@ export default function Campaigns() {
     const content = fd.get('content') as string;
     if (!name || !content) { toast.error('Name and content are required'); return; }
     const scheduledAt = fd.get('scheduledAt') as string;
-    const created = create<Campaign>('campaigns', {
-      id: '', tenantId, name,
-      type: (fd.get('type') as string) || 'Broadcast',
-      status: scheduledAt ? 'scheduled' : 'draft',
-      audience: (fd.get('audience') as string) || 'All leads',
-      channel: (fd.get('channel') as string) || channels[0],
-      content,
-      scheduledAt: scheduledAt ? new Date(scheduledAt).toISOString() : undefined,
-      createdAt: new Date().toISOString(),
-    });
+    let created: Campaign;
+    try {
+      created = await createCampaign({
+        tenantId, name,
+        type: (fd.get('type') as string) || 'Broadcast',
+        status: scheduledAt ? 'scheduled' : 'draft',
+        audience: (fd.get('audience') as string) || 'All leads',
+        channel: (fd.get('channel') as string) || channels[0],
+        content,
+        scheduledAt: scheduledAt ? new Date(scheduledAt).toISOString() : undefined,
+        createdAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not create campaign');
+      return;
+    }
     audit('create', created.id, `Created campaign "${name}"`);
     setShowAdd(false);
     refresh();
     toast.success('Campaign created');
   };
 
-  const handleSend = (c: Campaign) => {
+  const handleSend = async (c: Campaign) => {
     if (!canManage) { toast.error('You do not have permission to send campaigns'); return; }
     if (!confirm(`Send campaign "${c.name}" to ${c.audience} via ${c.channel}?`)) return;
-    update<Campaign>('campaigns', c.id, { status: 'sent', sentAt: new Date().toISOString() });
+    try {
+      await patchCampaign(c.id, { status: 'sent', sentAt: new Date().toISOString() });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not send campaign');
+      return;
+    }
     audit('send', c.id, `Sent campaign "${c.name}" via ${c.channel}`);
     setSelected(null);
     refresh();
     toast.success('Campaign sent');
   };
 
-  const handleDelete = (c: Campaign) => {
+  const handleDelete = async (c: Campaign) => {
     if (!canManage) { toast.error('You do not have permission to delete campaigns'); return; }
     if (!confirm(`Delete campaign "${c.name}"?`)) return;
-    remove('campaigns', c.id);
+    try {
+      await deleteCampaign(c.id);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not delete campaign');
+      return;
+    }
     audit('delete', c.id, `Deleted campaign "${c.name}"`);
     setSelected(null);
     refresh();
     toast.success('Campaign deleted');
   };
 
-  const handleAddTemplate = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleAddTemplate = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (!canManage) { toast.error('You do not have permission to manage templates'); return; }
     const fd = new FormData(e.currentTarget);
     const name = fd.get('name') as string;
     const content = fd.get('content') as string;
     if (!name || !content) { toast.error('Name and content required'); return; }
-    create<Template>('templates', {
-      id: '', tenantId, name,
-      category: (fd.get('category') as string) || 'General',
-      channel: (fd.get('channel') as string) || channels[0],
-      content, createdAt: new Date().toISOString(),
-    });
+    try {
+      await createTemplate({
+        tenantId, name,
+        category: (fd.get('category') as string) || 'General',
+        channel: (fd.get('channel') as string) || channels[0],
+        content, createdAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not save template');
+      return;
+    }
     setShowTemplate(false);
     refresh();
     toast.success('Template saved');
@@ -206,7 +248,7 @@ export default function Campaigns() {
                 </div>
                 <div className="flex gap-1">
                   <button onClick={() => { navigator.clipboard.writeText(t.content); toast.success('Copied'); }} className="p-1.5 rounded-lg hover:bg-zinc-100 text-zinc-400 hover:text-indigo-600"><Copy className="h-4 w-4" /></button>
-                  <button onClick={() => { remove('templates', t.id); refresh(); toast.success('Template deleted'); }} className="p-1.5 rounded-lg hover:bg-red-50 text-zinc-400 hover:text-red-500"><Trash2 className="h-4 w-4" /></button>
+                  <button onClick={async () => { try { await deleteTemplate(t.id); } catch (err) { toast.error(err instanceof Error ? err.message : 'Could not delete template'); return; } refresh(); toast.success('Template deleted'); }} className="p-1.5 rounded-lg hover:bg-red-50 text-zinc-400 hover:text-red-500"><Trash2 className="h-4 w-4" /></button>
                 </div>
               </div>
               <p className="text-xs text-zinc-600 leading-relaxed bg-zinc-50 rounded-lg p-3">{t.content}</p>

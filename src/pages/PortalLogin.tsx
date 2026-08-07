@@ -1,7 +1,8 @@
 import { useState, useMemo } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Building2, Mail, Lock, ArrowRight, Home, Handshake } from 'lucide-react';
-import { portalLogin, findTenantBySlug } from '../services/portalService';
+import { portalLogin, portalLoginApi, findTenantBySlug } from '../services/portalService';
+import { isApiEnabled } from '../services/apiClient';
 import toast from 'react-hot-toast';
 
 export default function PortalLogin() {
@@ -19,11 +20,13 @@ export default function PortalLogin() {
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
 
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!email || !password) { toast.error('Enter your email and password'); return; }
     setLoading(true);
-    const result = portalLogin(email, password, builderSlug || undefined);
+    const result = isApiEnabled()
+      ? await portalLoginApi(email, password, builderSlug || undefined)
+      : portalLogin(email, password, builderSlug || undefined);
     setLoading(false);
     if ('error' in result) {
       toast.error(result.error);

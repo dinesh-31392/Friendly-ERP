@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Building2, Plus, Search, MapPin, Users, TrendingUp,
@@ -8,7 +8,9 @@ import {
 import { useAuth } from '../context/AuthContext';
 import { getEffectiveLimits, withinLimit, isModuleEnabled } from '../services/planService';
 import { projectProgress, projectHealth, nextMilestone, HEALTH_META } from '../services/executionService';
-import { getByTenant, create, update, remove, logAudit } from '../services/db';
+import { getByTenant, logAudit } from '../services/db';
+import { isApiEnabled, apiGetProjects } from '../services/apiClient';
+import { createProject, patchProject, deleteProject } from '../services/projectWrites';
 import { formatCurrency, currencySymbol } from '../utils/format';
 import type { Project, Lead, Unit, ProjectStatus, Tower } from '../types';
 import { PROJECT_STATUSES } from '../types';
@@ -30,11 +32,30 @@ export default function Projects() {
   const [showAddModal, setShowAddModal] = useState(false);
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
 
+  // Feature flag: with an API URL configured, projects are read from the
+  // Fastify backend (RLS-scoped). Falls back to localStorage on any API failure
+  // so the page never goes blank. Flag off → identical behavior to before.
+  const [apiProjects, setApiProjects] = useState<Project[] | null>(null);
+  useEffect(() => {
+    if (!isApiEnabled()) { setApiProjects(null); return; }
+    let cancelled = false;
+    apiGetProjects()
+      .then(rows => { if (!cancelled) setApiProjects(rows); })
+      .catch(() => {
+        if (!cancelled) {
+          setApiProjects(null);
+          toast.error('API unreachable — showing local data', { id: 'api-fallback' });
+        }
+      });
+    return () => { cancelled = true; };
+  }, [tenantId, refreshKey]);
+
   const projects = useMemo(() => {
-    return getByTenant<Project>('projects', tenantId).sort((a, b) =>
+    const source = apiProjects ?? getByTenant<Project>('projects', tenantId);
+    return [...source].sort((a, b) =>
       new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
     );
-  }, [tenantId, refreshKey]);
+  }, [apiProjects, tenantId, refreshKey]);
 
   const allLeads = useMemo(() => getByTenant<Lead>('leads', tenantId), [tenantId, refreshKey]);
   const allUnits = useMemo(() => getByTenant<Unit>('units', tenantId), [tenantId, refreshKey]);
@@ -69,7 +90,7 @@ export default function Projects() {
     };
   };
 
-  const handleAddProject = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleAddProject = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const fd = new FormData(e.currentTarget);
     const name = fd.get('name') as string;
@@ -83,38 +104,44 @@ export default function Projects() {
       return;
     }
 
-    const created = create<Project>('projects', {
-      id: '', tenantId, name, location,
-      type: (fd.get('type') as string) || 'Residential',
-      status: (fd.get('status') as ProjectStatus) || 'pre_launch',
-      reraNumber: (fd.get('reraNumber') as string) || '',
-      totalUnits: Number(fd.get('totalUnits')) || 0,
-      availableUnits: Number(fd.get('totalUnits')) || 0,
-      priceRange: [Number(fd.get('minPrice')) || 0, Number(fd.get('maxPrice')) || 0],
-      launchDate: (fd.get('launchDate') as string) || '',
-      completionDate: (fd.get('completionDate') as string) || '',
-      description: (fd.get('description') as string) || '',
-      createdAt: new Date().toISOString(),
-    });
-
-    if (user) logAudit({ tenantId, userId: user.id, userName: user.name, action: 'create', entity: 'project', entityId: created.id, details: `Created project "${name}"` });
-    setShowAddModal(false);
-    refresh();
-    toast.success('Project created successfully');
+    const totalUnits = Number(fd.get('totalUnits')) || 0;
+    try {
+      const created = await createProject({
+        tenantId, name, location,
+        type: (fd.get('type') as string) || 'Residential',
+        status: (fd.get('status') as ProjectStatus) || 'pre_launch',
+        reraNumber: (fd.get('reraNumber') as string) || '',
+        totalUnits,
+        // Demo store keeps a static count; in API mode availableUnits is computed
+        // server-side from live unit inventory and this value is ignored.
+        availableUnits: totalUnits,
+        priceRange: [Number(fd.get('minPrice')) || 0, Number(fd.get('maxPrice')) || 0],
+        launchDate: (fd.get('launchDate') as string) || '',
+        completionDate: (fd.get('completionDate') as string) || '',
+        description: (fd.get('description') as string) || '',
+        createdAt: new Date().toISOString(),
+      });
+      if (user) logAudit({ tenantId, userId: user.id, userName: user.name, action: 'create', entity: 'project', entityId: created.id, details: `Created project "${name}"` });
+      setShowAddModal(false);
+      refresh();
+      toast.success('Project created successfully');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not create project');
+    }
   };
 
-  const handleDeleteProject = (projectId: string) => {
+  const handleDeleteProject = async (projectId: string) => {
     if (!confirm('Are you sure? This will delete the project along with its towers and units. Leads will be kept.')) return;
-    // Cascade: remove towers and their units so no orphaned records remain
-    const projectTowers = allTowers.filter(t => t.projectId === projectId);
-    const towerIds = new Set(projectTowers.map(t => t.id));
-    allUnits.filter(u => towerIds.has(u.towerId)).forEach(u => remove('units', u.id));
-    projectTowers.forEach(t => remove('towers', t.id));
-    remove('projects', projectId);
-    if (user) logAudit({ tenantId, userId: user.id, userName: user.name, action: 'delete', entity: 'project', entityId: projectId, details: 'Deleted project' });
-    if (selectedProject?.id === projectId) setSelectedProject(null);
-    refresh();
-    toast.success('Project deleted');
+    try {
+      // API mode cascades server-side via FKs; demo mode cascades in the helper.
+      await deleteProject(projectId, tenantId);
+      if (user) logAudit({ tenantId, userId: user.id, userName: user.name, action: 'delete', entity: 'project', entityId: projectId, details: 'Deleted project' });
+      if (selectedProject?.id === projectId) setSelectedProject(null);
+      refresh();
+      toast.success('Project deleted');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not delete project');
+    }
   };
 
   const statusColors: Record<ProjectStatus, string> = {
@@ -506,12 +533,16 @@ export default function Projects() {
                       <p className="text-xs text-zinc-500 mt-0.5">A public landing page that captures enquiries straight into your pipeline.</p>
                     </div>
                     <button
-                      onClick={() => {
-                        update<Project>('projects', selectedProject.id, { micrositePublished: !published });
-                        if (user) logAudit({ tenantId, userId: user.id, userName: user.name, action: 'update', entity: 'project', entityId: selectedProject.id, details: `${published ? 'Unpublished' : 'Published'} microsite for "${selectedProject.name}"` });
-                        setSelectedProject({ ...selectedProject, micrositePublished: !published });
-                        refresh();
-                        toast.success(published ? 'Microsite unpublished' : 'Microsite is now live');
+                      onClick={async () => {
+                        try {
+                          await patchProject(selectedProject.id, { micrositePublished: !published });
+                          if (user) logAudit({ tenantId, userId: user.id, userName: user.name, action: 'update', entity: 'project', entityId: selectedProject.id, details: `${published ? 'Unpublished' : 'Published'} microsite for "${selectedProject.name}"` });
+                          setSelectedProject({ ...selectedProject, micrositePublished: !published });
+                          refresh();
+                          toast.success(published ? 'Microsite unpublished' : 'Microsite is now live');
+                        } catch (err) {
+                          toast.error(err instanceof Error ? err.message : 'Could not update microsite');
+                        }
                       }}
                       className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${published ? 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100' : 'bg-indigo-600 text-white hover:bg-indigo-700'}`}
                     >

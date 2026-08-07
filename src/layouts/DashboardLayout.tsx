@@ -17,36 +17,73 @@ import InstallAppButton from '../components/InstallAppButton';
 import ErrorBoundary from '../components/ErrorBoundary';
 import type { Lead, Task, Ticket, Conversation, SiteTask, PurchaseOrder, Vendor, Material, Employee } from '../types';
 
-const navItems = [
-  { to: '/', icon: LayoutDashboard, label: 'Dashboard', permission: 'view_dashboard' },
-  { to: '/bd', icon: Handshake, label: 'Business Dev', permission: 'view_bd' },
-  { to: '/land', icon: Map, label: 'Land Acquisition', permission: 'view_land' },
-  { to: '/leads', icon: Users, label: 'Leads', permission: 'view_leads' },
-  { to: '/projects', icon: Building2, label: 'Projects', permission: 'view_projects' },
-  { to: '/execution', icon: HardHat, label: 'Site Execution', permission: 'view_execution' },
-  { to: '/procurement', icon: Truck, label: 'Procurement', permission: 'view_procurement' },
-  { to: '/hr', icon: UserCheck, label: 'HR & Workforce', permission: 'view_hr' },
-  { to: '/inventory', icon: Building2, label: 'Inventory', permission: 'view_inventory' },
-  { to: '/bookings', icon: BookOpenCheck, label: 'Bookings', permission: 'view_bookings' },
-  { to: '/sales-performance', icon: TrendingUp, label: 'Sales Performance', permission: 'view_sales_performance' },
-  { to: '/ai-studio', icon: Brain, label: 'AI Studio', permission: 'use_ai_studio' },
-  { to: '/campaigns', icon: Megaphone, label: 'Campaigns', permission: 'view_campaigns' },
-  { to: '/calendar', icon: Calendar, label: 'Calendar', permission: 'view_calendar' },
-  { to: '/reports', icon: BarChart3, label: 'Reports', permission: 'view_reports' },
+// ── Navigation model ─────────────────────────────────────────────────────────
+// The ERP outgrew a flat list (20+ destinations). Items are now grouped into
+// modules that map to the real-estate/construction lifecycle. Each group is a
+// collapsible dropdown; standalone items (Dashboard, Platform, Settings) render
+// as direct links. Every leaf keeps its `permission` so RBAC + per-tenant module
+// toggles filter exactly as before — an empty group simply disappears.
+interface NavLeaf { to: string; icon: React.ElementType; label: string; permission: string }
+interface NavGroupDef { id: string; label: string; icon: React.ElementType; children: NavLeaf[] }
+
+const DASHBOARD_ITEM: NavLeaf = { to: '/', icon: LayoutDashboard, label: 'Dashboard', permission: 'view_dashboard' };
+const PLATFORM_ITEM: NavLeaf = { to: '/platform', icon: Globe, label: 'Platform Control', permission: 'view_platform' };
+const SETTINGS_ITEM: NavLeaf = { to: '/settings', icon: Settings, label: 'Settings', permission: 'manage_settings' };
+
+const NAV_GROUPS: NavGroupDef[] = [
+  {
+    id: 'bizdev', label: 'Business Development', icon: Map, children: [
+      { to: '/bd', icon: Handshake, label: 'Business Dev', permission: 'view_bd' },
+      { to: '/land', icon: Map, label: 'Land Acquisition', permission: 'view_land' },
+    ],
+  },
+  {
+    id: 'sales', label: 'Sales & CRM', icon: Users, children: [
+      { to: '/leads', icon: Users, label: 'Leads', permission: 'view_leads' },
+      { to: '/bookings', icon: BookOpenCheck, label: 'Bookings', permission: 'view_bookings' },
+      { to: '/sales-performance', icon: TrendingUp, label: 'Sales Performance', permission: 'view_sales_performance' },
+      { to: '/campaigns', icon: Megaphone, label: 'Campaigns', permission: 'view_campaigns' },
+      { to: '/brokers', icon: Handshake, label: 'Channel Partners', permission: 'view_brokers' },
+    ],
+  },
+  {
+    id: 'delivery', label: 'Projects & Delivery', icon: Building2, children: [
+      { to: '/projects', icon: Building2, label: 'Projects', permission: 'view_projects' },
+      { to: '/inventory', icon: Package, label: 'Inventory', permission: 'view_inventory' },
+      { to: '/execution', icon: HardHat, label: 'Site Execution', permission: 'view_execution' },
+      { to: '/procurement', icon: Truck, label: 'Procurement', permission: 'view_procurement' },
+    ],
+  },
+  {
+    id: 'finance', label: 'Finance', icon: CreditCard, children: [
+      { to: '/billing', icon: CreditCard, label: 'Billing & Payments', permission: 'view_finance' },
+      { to: '/accounts', icon: Scale, label: 'Accounts & Ledger', permission: 'view_accounts' },
+    ],
+  },
+  {
+    id: 'workforce', label: 'Workforce', icon: UserCheck, children: [
+      { to: '/hr', icon: UserCheck, label: 'HR & Workforce', permission: 'view_hr' },
+    ],
+  },
+  {
+    id: 'engagement', label: 'Engagement', icon: MessageSquare, children: [
+      { to: '/messages', icon: MessageSquare, label: 'Messages', permission: 'view_messages' },
+      { to: '/service', icon: Wrench, label: 'Service', permission: 'view_service' },
+      { to: '/documents', icon: FileText, label: 'Documents', permission: 'view_documents' },
+      { to: '/calendar', icon: Calendar, label: 'Calendar', permission: 'view_calendar' },
+    ],
+  },
+  {
+    id: 'intelligence', label: 'Intelligence', icon: BarChart3, children: [
+      { to: '/reports', icon: BarChart3, label: 'Reports', permission: 'view_reports' },
+      { to: '/ai-studio', icon: Brain, label: 'AI Studio', permission: 'use_ai_studio' },
+    ],
+  },
 ];
 
-const secondaryNav = [
-  { to: '/messages', icon: MessageSquare, label: 'Messages', permission: 'view_messages' },
-  { to: '/documents', icon: FileText, label: 'Documents', permission: 'view_documents' },
-  { to: '/billing', icon: CreditCard, label: 'Billing', permission: 'view_finance' },
-  { to: '/accounts', icon: Scale, label: 'Accounts & Ledger', permission: 'view_accounts' },
-  { to: '/service', icon: Wrench, label: 'Service', permission: 'view_service' },
-  { to: '/brokers', icon: Handshake, label: 'Partners', permission: 'view_brokers' },
-  { to: '/settings', icon: Settings, label: 'Settings', permission: 'manage_settings' },
-];
-
-const platformNav = [
-  { to: '/platform', icon: Globe, label: 'Platform Control', permission: 'view_platform' },
+// Flat list for page-title lookup (every reachable destination).
+const ALL_NAV_LEAVES: NavLeaf[] = [
+  DASHBOARD_ITEM, ...NAV_GROUPS.flatMap(g => g.children), PLATFORM_ITEM, SETTINGS_ITEM,
 ];
 
 // The demo role switcher only walks THIS workspace's role model. super_admin /
@@ -73,6 +110,11 @@ export default function DashboardLayout() {
   const [roleMenuOpen, setRoleMenuOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  // Single-open accordion: at most ONE module dropdown is expanded at a time.
+  // Opening a group collapses whichever was open; the group holding the current
+  // route is auto-opened (effect below). `null` = every group collapsed.
+  const [openGroup, setOpenGroup] = useState<string | null>(null);
+  const toggleGroup = (id: string) => setOpenGroup(prev => (prev === id ? null : id));
   const [notifOpen, setNotifOpen] = useState(false);
   // Demo-mode notice: shown when no backend is configured (data lives only in
   // this browser). Dismiss is per-session, so it re-appears on a fresh load —
@@ -264,19 +306,133 @@ export default function DashboardLayout() {
     setMobileSidebarOpen(false);
   }, [location.pathname]);
 
+  // Accordion auto-expand: navigating into a module opens ITS dropdown and
+  // collapses any other — so a deep link or reload lands with only the active
+  // group open. Standalone routes (Dashboard/Settings) leave the open group as
+  // the user left it rather than snapping everything shut.
+  useEffect(() => {
+    const group = NAV_GROUPS.find(g => g.children.some(c => c.to === location.pathname));
+    if (group) setOpenGroup(group.id);
+  }, [location.pathname]);
+
   const getPageTitle = () => {
-    const all = [...navItems, ...secondaryNav, ...platformNav];
-    const found = all.find(n => n.to === location.pathname);
+    const found = ALL_NAV_LEAVES.find(n => n.to === location.pathname);
     return found ? found.label : 'Dashboard';
   };
 
-  // Module toggles: the super admin can disable modules per tenant; a
-  // disabled module disappears for every role in that workspace (nav route
-  // key is the path minus the leading slash — moduleOn is defined above).
+  // Module toggles: the super admin can disable modules per tenant; a disabled
+  // module disappears for every role in that workspace (route key = path minus
+  // the leading slash — moduleOn is defined above). A leaf shows only when the
+  // user holds its permission AND its module is enabled.
   const navModuleOn = (to: string) => to === '/' || moduleOn(to.replace('/', ''));
-  const allowedNav = navItems.filter(n => hasPermission(n.permission) && navModuleOn(n.to));
-  const allowedSecondary = secondaryNav.filter(n => hasPermission(n.permission) && (n.to === '/settings' || navModuleOn(n.to)));
-  const allowedPlatform = platformNav.filter(n => hasPermission(n.permission));
+  const canSee = (leaf: NavLeaf) => hasPermission(leaf.permission) && navModuleOn(leaf.to);
+
+  // Per-destination live badge counts (already gated by moduleOn where computed).
+  const badgeFor = (to: string): number => {
+    switch (to) {
+      case '/leads': return newLeads;
+      case '/messages': return unreadMessages;
+      case '/service': return openTickets;
+      case '/calendar': return pendingTasks;
+      case '/execution': return overdueSiteTasks.length;
+      case '/procurement': return lowStock.length + pendingPoApprovals.length;
+      case '/billing': return dueFilings.length;
+      default: return 0;
+    }
+  };
+  // Leads is an informational count (indigo); everything else is an alert (red).
+  const badgeTone = (to: string): 'indigo' | 'red' => (to === '/leads' ? 'indigo' : 'red');
+
+  // Only groups with at least one visible child are shown.
+  const visibleGroups = NAV_GROUPS
+    .map(g => ({ ...g, children: g.children.filter(canSee) }))
+    .filter(g => g.children.length > 0);
+
+  // ── Nav renderers ──────────────────────────────────────────────────────────
+  const badgePill = (count: number, tone: 'indigo' | 'red') =>
+    count > 0 ? (
+      <span className={`ml-auto shrink-0 text-[11px] font-semibold px-2 py-0.5 rounded-full ${tone === 'indigo' ? 'bg-indigo-100 text-indigo-600' : 'bg-red-100 text-red-600'}`}>
+        {count > 99 ? '99+' : count}
+      </span>
+    ) : null;
+
+  const cornerDot = (count: number, tone: 'indigo' | 'red') =>
+    count > 0 ? (
+      <span className={`absolute top-1 right-1 h-4 min-w-4 px-1 text-white text-[9px] font-bold rounded-full flex items-center justify-center ${tone === 'indigo' ? 'bg-indigo-500' : 'bg-red-500'}`}>
+        {count > 9 ? '9+' : count}
+      </span>
+    ) : null;
+
+  // A single destination link. `indented` nests it under an expanded group.
+  const renderLeaf = (item: NavLeaf, indented: boolean) => {
+    const count = badgeFor(item.to);
+    const tone = badgeTone(item.to);
+    return (
+      <NavLink
+        key={item.to}
+        to={item.to}
+        title={sidebarCollapsed ? item.label : undefined}
+        className={({ isActive }) =>
+          `flex items-center gap-3 rounded-lg transition-all text-sm font-medium relative
+          ${sidebarCollapsed ? 'justify-center px-0 py-2.5' : indented ? 'px-3 py-2' : 'px-3 py-2.5'}
+          ${isActive ? 'bg-indigo-50 text-indigo-700' : 'text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900'}`
+        }
+      >
+        <item.icon className={`${indented && !sidebarCollapsed ? 'h-4 w-4' : 'h-5 w-5'} shrink-0`} />
+        {!sidebarCollapsed && <span className="truncate">{item.label}</span>}
+        {!sidebarCollapsed && badgePill(count, tone)}
+        {sidebarCollapsed && cornerDot(count, tone)}
+      </NavLink>
+    );
+  };
+
+  // A collapsible module group. A group with one visible child collapses to a
+  // plain link (a one-item dropdown is just clutter).
+  const renderGroup = (group: NavGroupDef) => {
+    if (group.children.length === 1) return renderLeaf(group.children[0], false);
+    const isOpen = openGroup === group.id;
+    const hasActive = group.children.some(c => c.to === location.pathname);
+    const groupBadge = group.children.reduce((s, c) => s + badgeFor(c.to), 0);
+    const GroupIcon = group.icon;
+
+    // Collapsed icon rail: clicking expands the sidebar and opens this group,
+    // which sidesteps the flyout-clipping problem an overflow-y-auto nav has.
+    if (sidebarCollapsed) {
+      return (
+        <button
+          key={group.id}
+          title={group.label}
+          onClick={() => { setSidebarCollapsed(false); setOpenGroup(group.id); }}
+          className={`relative flex items-center justify-center w-full px-0 py-2.5 rounded-lg transition-all
+            ${hasActive ? 'bg-indigo-50 text-indigo-700' : 'text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900'}`}
+        >
+          <GroupIcon className="h-5 w-5 shrink-0" />
+          {cornerDot(groupBadge, 'red')}
+        </button>
+      );
+    }
+
+    return (
+      <div key={group.id}>
+        <button
+          onClick={() => toggleGroup(group.id)}
+          aria-expanded={isOpen}
+          className={`flex items-center gap-3 w-full px-3 py-2.5 rounded-lg text-sm font-medium transition-all
+            ${hasActive && !isOpen ? 'text-indigo-700 bg-indigo-50/60' : 'text-zinc-700 hover:bg-zinc-100'}`}
+        >
+          <GroupIcon className="h-5 w-5 shrink-0" />
+          <span className="flex-1 text-left truncate">{group.label}</span>
+          {!isOpen && badgePill(groupBadge, 'red')}
+          <ChevronDown className={`h-4 w-4 text-zinc-400 shrink-0 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
+        </button>
+        {isOpen && (
+          <div className="mt-1 mb-1 ml-[26px] pl-2 border-l border-zinc-200 space-y-0.5">
+            {group.children.map(c => renderLeaf(c, true))}
+          </div>
+        )}
+      </div>
+    );
+  };
 
   // SaaS banners: trial countdown + super-admin support (impersonation) mode
   const daysLeft = trialDaysLeft(tenant);
@@ -310,87 +466,40 @@ export default function DashboardLayout() {
           )}
         </div>
 
-        {/* Nav */}
+        {/* Nav — grouped ERP modules with collapsible dropdowns */}
         <nav className="flex-1 overflow-y-auto px-3 py-4 space-y-1">
-          <p className={`text-[11px] font-medium text-zinc-400 uppercase tracking-wider mb-2 ${sidebarCollapsed ? 'text-center' : 'px-3'}`}>
-            {sidebarCollapsed ? '' : 'Main'}
-          </p>
-          {allowedNav.map(item => {
-            const badge = item.to === '/leads' && newLeads > 0 ? newLeads : null;
-            return (
-              <NavLink
-                key={item.to}
-                to={item.to}
-                className={({ isActive }) =>
-                  `flex items-center gap-3 rounded-lg transition-all text-sm font-medium group relative
-                  ${sidebarCollapsed ? 'justify-center px-0 py-2.5' : 'px-3 py-2.5'}
-                  ${isActive ? 'bg-indigo-50 text-indigo-700' : 'text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900'}`
-                }
-              >
-                <item.icon className="h-5 w-5 shrink-0" />
-                {!sidebarCollapsed && <span>{item.label}</span>}
-                {badge && !sidebarCollapsed && (
-                  <span className="ml-auto bg-indigo-100 text-indigo-600 text-[11px] font-semibold px-2 py-0.5 rounded-full">{badge}</span>
-                )}
-                {badge && sidebarCollapsed && (
-                  <span className="absolute -top-0.5 -right-0.5 h-4 w-4 bg-indigo-500 text-white text-[9px] font-bold rounded-full flex items-center justify-center">{badge}</span>
-                )}
-              </NavLink>
-            );
-          })}
+          {/* Dashboard (standalone) */}
+          {canSee(DASHBOARD_ITEM) && renderLeaf(DASHBOARD_ITEM, false)}
 
-          {allowedSecondary.length > 0 && (
-            <>
-              <p className={`text-[11px] font-medium text-zinc-400 uppercase tracking-wider mb-2 mt-6 ${sidebarCollapsed ? 'text-center' : 'px-3'}`}>
-                {sidebarCollapsed ? '' : 'Workspace'}
-              </p>
-              {allowedSecondary.map(item => {
-                const badge = item.to === '/messages' && unreadMessages > 0 ? unreadMessages : item.to === '/service' && openTickets > 0 ? openTickets : null;
-                return (
-                  <NavLink
-                    key={item.to}
-                    to={item.to}
-                    className={({ isActive }) =>
-                      `flex items-center gap-3 rounded-lg transition-all text-sm font-medium relative
-                      ${sidebarCollapsed ? 'justify-center px-0 py-2.5' : 'px-3 py-2.5'}
-                      ${isActive ? 'bg-indigo-50 text-indigo-700' : 'text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900'}`
-                    }
-                  >
-                    <item.icon className="h-5 w-5 shrink-0" />
-                    {!sidebarCollapsed && <span>{item.label}</span>}
-                    {badge && !sidebarCollapsed && (
-                      <span className="ml-auto bg-red-100 text-red-600 text-[11px] font-semibold px-2 py-0.5 rounded-full">{badge}</span>
-                    )}
-                    {badge && sidebarCollapsed && (
-                      <span className="absolute -top-0.5 -right-0.5 h-4 w-4 bg-red-500 text-white text-[9px] font-bold rounded-full flex items-center justify-center">{badge}</span>
-                    )}
-                  </NavLink>
-                );
-              })}
-            </>
+          {/* Module groups */}
+          {visibleGroups.length > 0 && (
+            <p className={`text-[11px] font-medium text-zinc-400 uppercase tracking-wider mb-1 mt-4 ${sidebarCollapsed ? 'sr-only' : 'px-3'}`}>
+              Modules
+            </p>
           )}
+          {visibleGroups.map(renderGroup)}
 
-          {allowedPlatform.length > 0 && (
-            <>
-              <p className={`text-[11px] font-medium text-zinc-400 uppercase tracking-wider mb-2 mt-6 ${sidebarCollapsed ? 'text-center' : 'px-3'}`}>
-                {sidebarCollapsed ? '' : 'Platform'}
-              </p>
-              {allowedPlatform.map(item => (
-                <NavLink
-                  key={item.to}
-                  to={item.to}
-                  className={({ isActive }) =>
-                    `flex items-center gap-3 rounded-lg transition-all text-sm font-medium
-                    ${sidebarCollapsed ? 'justify-center px-0 py-2.5' : 'px-3 py-2.5'}
-                    ${isActive ? 'bg-zinc-900 text-white' : 'text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900'}`
-                  }
-                >
-                  <item.icon className="h-5 w-5 shrink-0" />
-                  {!sidebarCollapsed && <span>{item.label}</span>}
-                </NavLink>
-              ))}
-            </>
+          {/* System (standalone, bottom) */}
+          {(hasPermission(PLATFORM_ITEM.permission) || hasPermission(SETTINGS_ITEM.permission)) && (
+            <p className={`text-[11px] font-medium text-zinc-400 uppercase tracking-wider mb-1 mt-4 ${sidebarCollapsed ? 'sr-only' : 'px-3'}`}>
+              System
+            </p>
           )}
+          {hasPermission(PLATFORM_ITEM.permission) && (
+            <NavLink
+              to={PLATFORM_ITEM.to}
+              title={sidebarCollapsed ? PLATFORM_ITEM.label : undefined}
+              className={({ isActive }) =>
+                `flex items-center gap-3 rounded-lg transition-all text-sm font-medium
+                ${sidebarCollapsed ? 'justify-center px-0 py-2.5' : 'px-3 py-2.5'}
+                ${isActive ? 'bg-zinc-900 text-white' : 'text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900'}`
+              }
+            >
+              <Globe className="h-5 w-5 shrink-0" />
+              {!sidebarCollapsed && <span className="truncate">{PLATFORM_ITEM.label}</span>}
+            </NavLink>
+          )}
+          {hasPermission(SETTINGS_ITEM.permission) && renderLeaf(SETTINGS_ITEM, false)}
         </nav>
 
         {/* User */}

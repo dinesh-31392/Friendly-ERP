@@ -1,14 +1,13 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import {
   UserCheck, Users, MapPin, CalendarDays, Wallet, Plus, X, Trash2,
   CheckCircle2, LogOut, Building2, AlertTriangle,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { getByTenant, create, update, remove, logAudit } from '../services/db';
-import {
-  todayKey, monthKey, attendanceFor, pendingLeaves, onLeave, leaveDays,
-  buildPayrollItems,
-} from '../services/hrService';
+import { getByTenant, logAudit } from '../services/db';
+import { todayKey, monthKey, leaveDays, buildPayrollItemsFrom } from '../services/hrService';
+import { isApiEnabled } from '../services/apiClient';
+import * as hrWrites from '../services/hrWrites';
 import { formatCurrency, formatCurrencyFull } from '../utils/format';
 import type {
   Project, Employee, EmployeeType, AttendanceRecord, LeaveRequest, LeaveType,
@@ -44,25 +43,43 @@ export default function HR() {
   const [payrollMonth, setPayrollMonth] = useState(monthKey());
   const [checkingIn, setCheckingIn] = useState<string | null>(null);
 
+  // API mode: the server is the source of truth for all four HR datasets;
+  // localStorage stays the demo path AND the fallback if the API is down.
+  const [apiData, setApiData] = useState<Awaited<ReturnType<typeof hrWrites.fetchHrData>>>(null);
+  useEffect(() => {
+    if (!isApiEnabled()) { setApiData(null); return; }
+    let cancelled = false;
+    hrWrites.fetchHrData(tenantId)
+      .then(d => { if (!cancelled) setApiData(d); })
+      .catch(() => {
+        if (!cancelled) { setApiData(null); toast.error('API unreachable — showing local data', { id: 'api-fallback' }); }
+      });
+    return () => { cancelled = true; };
+  }, [tenantId, refreshKey]);
+
   const employees = useMemo(
-    () => getByTenant<Employee>('employees', tenantId).sort((a, b) => a.name.localeCompare(b.name)),
-    [tenantId, refreshKey]
+    () => (apiData?.employees ?? getByTenant<Employee>('employees', tenantId)).slice().sort((a, b) => a.name.localeCompare(b.name)),
+    [apiData, tenantId, refreshKey]
   );
   const projects = useMemo(() => getByTenant<Project>('projects', tenantId), [tenantId, refreshKey]);
-  const dayRecords = useMemo(
-    () => attendanceFor(tenantId, attendanceDate),
-    [tenantId, attendanceDate, refreshKey]
+  const allAttendance = useMemo(
+    () => apiData?.attendance ?? getByTenant<AttendanceRecord>('attendance', tenantId),
+    [apiData, tenantId, refreshKey]
   );
+  const dayRecords = useMemo(() => allAttendance.filter(a => a.date === attendanceDate), [allAttendance, attendanceDate]);
   const leaves = useMemo(
-    () => getByTenant<LeaveRequest>('leaveRequests', tenantId)
-      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
-    [tenantId, refreshKey]
+    () => (apiData?.leaves ?? getByTenant<LeaveRequest>('leaveRequests', tenantId))
+      .slice().sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
+    [apiData, tenantId, refreshKey]
   );
   const payrollRuns = useMemo(
-    () => getByTenant<PayrollRun>('payrollRuns', tenantId).sort((a, b) => b.month.localeCompare(a.month)),
-    [tenantId, refreshKey]
+    () => (apiData?.payrollRuns ?? getByTenant<PayrollRun>('payrollRuns', tenantId)).slice().sort((a, b) => b.month.localeCompare(a.month)),
+    [apiData, tenantId, refreshKey]
   );
-  const onLeaveToday = useMemo(() => onLeave(tenantId, attendanceDate), [tenantId, attendanceDate, refreshKey]);
+  const onLeaveToday = useMemo(
+    () => new Set(leaves.filter(l => l.status === 'approved' && l.from <= attendanceDate && attendanceDate <= l.to).map(l => l.employeeId)),
+    [leaves, attendanceDate]
+  );
 
   const activeEmployees = employees.filter(e => e.active);
   const empName = (id: string) => employees.find(e => e.id === id)?.name || '—';
@@ -72,12 +89,12 @@ export default function HR() {
   };
 
   // KPIs
-  const presentToday = attendanceFor(tenantId, todayKey()).length;
-  const pending = pendingLeaves(tenantId).length;
+  const presentToday = allAttendance.filter(a => a.date === todayKey()).length;
+  const pending = leaves.filter(l => l.status === 'pending').length;
   const contractCount = activeEmployees.filter(e => e.type === 'contract_worker').length;
 
   // ── Employees ──────────────────────────────────────────────────────────────
-  const handleAddEmployee = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleAddEmployee = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const fd = new FormData(e.currentTarget);
     const name = (fd.get('name') as string)?.trim();
@@ -85,37 +102,45 @@ export default function HR() {
     if (!name || !phone) { toast.error('Name and phone are required'); return; }
     const type = (fd.get('type') as EmployeeType) || 'staff';
     const pay = Number(fd.get('pay')) || 0;
-    const created = create<Employee>('employees', {
-      id: '', tenantId, name, phone,
-      email: (fd.get('email') as string) || '',
-      designation: (fd.get('designation') as string) || (type === 'staff' ? 'Staff' : 'Worker'),
-      department: (fd.get('department') as string) || 'Other',
-      type,
-      projectId: (fd.get('projectId') as string) || undefined,
-      monthlySalary: type === 'staff' ? pay : undefined,
-      dailyWage: type === 'contract_worker' ? pay : undefined,
-      joinDate: (fd.get('joinDate') as string) || todayKey(),
-      active: true,
-      createdAt: new Date().toISOString(),
-    });
+    let created: Employee;
+    try {
+      created = await hrWrites.createEmployee({
+        id: '', tenantId, name, phone,
+        email: (fd.get('email') as string) || '',
+        designation: (fd.get('designation') as string) || (type === 'staff' ? 'Staff' : 'Worker'),
+        department: (fd.get('department') as string) || 'Other',
+        type,
+        projectId: (fd.get('projectId') as string) || undefined,
+        monthlySalary: type === 'staff' ? pay : undefined,
+        dailyWage: type === 'contract_worker' ? pay : undefined,
+        joinDate: (fd.get('joinDate') as string) || todayKey(),
+        active: true,
+        createdAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not add the employee');
+      return;
+    }
     audit('create', 'employee', created.id, `Added ${type === 'staff' ? 'employee' : 'contract worker'} "${name}"`);
     setShowAddEmployee(false);
     refresh();
     toast.success('Employee added');
   };
 
-  const toggleEmployee = (emp: Employee) => {
-    update<Employee>('employees', emp.id, { active: !emp.active });
+  const toggleEmployee = async (emp: Employee) => {
+    try { await hrWrites.setEmployeeActive(emp, !emp.active); }
+    catch (err) { toast.error(err instanceof Error ? err.message : 'Could not update the employee'); return; }
     audit('update', 'employee', emp.id, `Marked "${emp.name}" ${emp.active ? 'inactive' : 'active'}`);
     refresh();
   };
 
-  const deleteEmployee = (emp: Employee) => {
-    const hasHistory = getByTenant<AttendanceRecord>('attendance', tenantId).some(a => a.employeeId === emp.id)
+  const deleteEmployee = async (emp: Employee) => {
+    const hasHistory = allAttendance.some(a => a.employeeId === emp.id)
       || leaves.some(l => l.employeeId === emp.id);
     if (hasHistory) { toast.error('This person has attendance or leave history — mark them inactive instead'); return; }
     if (!confirm(`Delete "${emp.name}"?`)) return;
-    remove('employees', emp.id);
+    try { await hrWrites.deleteEmployee(emp); }
+    catch (err) { toast.error(err instanceof Error ? err.message : 'Could not delete the employee'); return; }
     audit('delete', 'employee', emp.id, `Deleted employee "${emp.name}"`);
     refresh();
     toast.success('Employee removed');
@@ -127,15 +152,21 @@ export default function HR() {
   const checkIn = (emp: Employee) => {
     if (recordFor(emp.id)) return;
     setCheckingIn(emp.id);
-    const finish = (lat?: number, lng?: number) => {
-      create<AttendanceRecord>('attendance', {
-        id: '', tenantId, employeeId: emp.id, date: attendanceDate,
-        checkIn: new Date().toISOString(),
-        projectId: emp.projectId,
-        lat, lng,
-        method: lat !== undefined ? 'geo' : 'manual',
-        createdAt: new Date().toISOString(),
-      });
+    const finish = async (lat?: number, lng?: number) => {
+      try {
+        await hrWrites.markAttendance({
+          id: '', tenantId, employeeId: emp.id, date: attendanceDate,
+          checkIn: new Date().toISOString(),
+          projectId: emp.projectId,
+          lat, lng,
+          method: lat !== undefined ? 'geo' : 'manual',
+          createdAt: new Date().toISOString(),
+        });
+      } catch (err) {
+        setCheckingIn(null);
+        toast.error(err instanceof Error ? err.message : 'Could not record the check-in');
+        return;
+      }
       audit('create', 'attendance', emp.id, `Checked in ${emp.name}${lat !== undefined ? ' (geo-tagged)' : ''} — ${attendanceDate}`);
       setCheckingIn(null);
       refresh();
@@ -150,24 +181,26 @@ export default function HR() {
     } else finish();
   };
 
-  const checkOut = (emp: Employee) => {
+  const checkOut = async (emp: Employee) => {
     const rec = recordFor(emp.id);
     if (!rec || rec.checkOut) return;
-    update<AttendanceRecord>('attendance', rec.id, { checkOut: new Date().toISOString() });
+    try { await hrWrites.checkOutAttendance(rec, new Date().toISOString()); }
+    catch (err) { toast.error(err instanceof Error ? err.message : 'Could not record the check-out'); return; }
     refresh();
     toast.success(`${emp.name} checked out`);
   };
 
-  const undoAttendance = (emp: Employee) => {
+  const undoAttendance = async (emp: Employee) => {
     const rec = recordFor(emp.id);
     if (!rec) return;
-    remove('attendance', rec.id);
+    try { await hrWrites.removeAttendance(rec); }
+    catch (err) { toast.error(err instanceof Error ? err.message : 'Could not remove the entry'); return; }
     audit('delete', 'attendance', emp.id, `Removed attendance entry for ${emp.name} — ${attendanceDate}`);
     refresh();
   };
 
   // ── Leave ──────────────────────────────────────────────────────────────────
-  const handleLeaveRequest = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleLeaveRequest = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const fd = new FormData(e.currentTarget);
     const employeeId = fd.get('employeeId') as string;
@@ -175,26 +208,30 @@ export default function HR() {
     const to = (fd.get('to') as string) || from;
     if (!employeeId || !from) { toast.error('Pick an employee and a start date'); return; }
     if (to < from) { toast.error('End date is before the start date'); return; }
-    const created = create<LeaveRequest>('leaveRequests', {
-      id: '', tenantId, employeeId,
-      type: (fd.get('type') as LeaveType) || 'casual',
-      from, to, days: leaveDays(from, to),
-      reason: (fd.get('reason') as string) || '',
-      status: 'pending',
-      createdAt: new Date().toISOString(),
-    });
+    let created: LeaveRequest;
+    try {
+      created = await hrWrites.createLeave({
+        id: '', tenantId, employeeId,
+        type: (fd.get('type') as LeaveType) || 'casual',
+        from, to, days: leaveDays(from, to),
+        reason: (fd.get('reason') as string) || '',
+        status: 'pending',
+        createdAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not submit the leave request');
+      return;
+    }
     audit('create', 'leave_request', created.id, `Leave requested for ${empName(employeeId)} (${created.days}d ${created.type})`);
     setShowLeaveForm(false);
     refresh();
     toast.success('Leave request submitted');
   };
 
-  const decideLeave = (req: LeaveRequest, approved: boolean) => {
+  const decideLeave = async (req: LeaveRequest, approved: boolean) => {
     if (!user) return;
-    update<LeaveRequest>('leaveRequests', req.id, {
-      status: approved ? 'approved' : 'rejected',
-      decidedBy: user.id, decidedAt: new Date().toISOString(),
-    });
+    try { await hrWrites.decideLeave(req, approved, user.id); }
+    catch (err) { toast.error(err instanceof Error ? err.message : 'Could not update the leave request'); return; }
     audit('update', 'leave_request', req.id, `${approved ? 'Approved' : 'Rejected'} ${req.days}d ${req.type} leave for ${empName(req.employeeId)}`);
     refresh();
     toast.success(approved ? 'Leave approved' : 'Leave rejected');
@@ -203,30 +240,22 @@ export default function HR() {
   // ── Payroll ────────────────────────────────────────────────────────────────
   const currentRun = payrollRuns.find(r => r.month === payrollMonth);
 
-  const preparePayroll = () => {
-    const items = buildPayrollItems(tenantId, payrollMonth);
+  const preparePayroll = async () => {
+    const items = buildPayrollItemsFrom(employees, allAttendance, payrollMonth);
     if (items.length === 0) { toast.error('No active employees with a salary or wage set'); return; }
     if (currentRun && currentRun.status === 'processed') { toast.error('This month is already processed'); return; }
-    if (currentRun) {
-      update<PayrollRun>('payrollRuns', currentRun.id, { items });
-      toast.success('Draft refreshed from latest attendance');
-    } else {
-      create<PayrollRun>('payrollRuns', {
-        id: '', tenantId, month: payrollMonth, status: 'draft', items,
-        createdAt: new Date().toISOString(),
-      });
-      toast.success(`Payroll draft prepared for ${payrollMonth}`);
-    }
+    try { await hrWrites.savePayrollDraft(tenantId, payrollMonth, items, currentRun); }
+    catch (err) { toast.error(err instanceof Error ? err.message : 'Could not prepare the payroll draft'); return; }
+    toast.success(currentRun ? 'Draft refreshed from latest attendance' : `Payroll draft prepared for ${payrollMonth}`);
     audit('create', 'payroll_run', payrollMonth, `Prepared payroll draft for ${payrollMonth} (${items.length} people)`);
     refresh();
   };
 
-  const processPayroll = () => {
+  const processPayroll = async () => {
     if (!currentRun || !user) return;
     if (!confirm(`Mark ${payrollMonth} payroll as processed? The run locks after this.`)) return;
-    update<PayrollRun>('payrollRuns', currentRun.id, {
-      status: 'processed', processedBy: user.id, processedAt: new Date().toISOString(),
-    });
+    try { await hrWrites.processPayrollRun(currentRun, user.id); }
+    catch (err) { toast.error(err instanceof Error ? err.message : 'Could not process the payroll'); return; }
     audit('update', 'payroll_run', currentRun.id, `Processed ${payrollMonth} payroll — ${formatCurrency(currentRun.items.reduce((s, i) => s + i.gross, 0), currency)} gross`);
     refresh();
     toast.success('Payroll processed');

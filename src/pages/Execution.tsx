@@ -6,7 +6,7 @@ import {
   ArrowUpRight, ArrowDownRight, Link2, Ban, Image as ImageIcon,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { getByTenant, create, update, remove, logAudit } from '../services/db';
+import { getByTenant, logAudit } from '../services/db';
 import {
   projectProgress, nextMilestone, projectHealth, HEALTH_META, unmetDependencies,
   nextRfiNumber, nextChangeOrderNumber, changeOrderImpact,
@@ -14,6 +14,9 @@ import {
 } from '../services/executionService';
 import { compressImage } from '../utils/image';
 import { formatCurrency } from '../utils/format';
+import { raiseConstructionDemands } from '../services/demandService';
+import { isApiEnabled } from '../services/apiClient';
+import * as execWrites from '../services/executionWrites';
 import type {
   Project, User, SiteTask, SiteTaskStatus, ProgressUpdate, Rfi, ChangeOrder,
   Inspection, InspectionType, InspectionItem, InspectionItemResult,
@@ -70,32 +73,49 @@ export default function Execution() {
   const project = projects.find(p => p.id === projectId);
   const selectProject = (id: string) => setSearchParams(id ? { project: id } : {});
 
-  const allTasks = useMemo(() => getByTenant<SiteTask>('siteTasks', tenantId), [tenantId, refreshKey]);
+  // API mode: the server owns all five execution datasets; localStorage stays
+  // the demo path and the fallback when the API is unreachable.
+  const [apiData, setApiData] = useState<Awaited<ReturnType<typeof execWrites.fetchExecutionData>>>(null);
+  useEffect(() => {
+    if (!isApiEnabled()) { setApiData(null); return; }
+    let cancelled = false;
+    execWrites.fetchExecutionData(tenantId)
+      .then(d => { if (!cancelled) setApiData(d); })
+      .catch(() => {
+        if (!cancelled) { setApiData(null); toast.error('API unreachable — showing local data', { id: 'api-fallback' }); }
+      });
+    return () => { cancelled = true; };
+  }, [tenantId, refreshKey]);
+
+  const allTasks = useMemo(
+    () => apiData?.tasks ?? getByTenant<SiteTask>('siteTasks', tenantId),
+    [apiData, tenantId, refreshKey]
+  );
   const tasks = useMemo(
     () => allTasks.filter(t => t.projectId === projectId)
       .sort((a, b) => new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime()),
     [allTasks, projectId]
   );
   const updates = useMemo(
-    () => getByTenant<ProgressUpdate>('progressUpdates', tenantId)
+    () => (apiData?.updates ?? getByTenant<ProgressUpdate>('progressUpdates', tenantId))
       .filter(u => u.projectId === projectId)
       .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()),
-    [tenantId, projectId, refreshKey]
+    [apiData, tenantId, projectId, refreshKey]
   );
   const rfis = useMemo(
-    () => getByTenant<Rfi>('rfis', tenantId).filter(r => r.projectId === projectId)
+    () => (apiData?.rfis ?? getByTenant<Rfi>('rfis', tenantId)).filter(r => r.projectId === projectId)
       .sort((a, b) => b.number - a.number),
-    [tenantId, projectId, refreshKey]
+    [apiData, tenantId, projectId, refreshKey]
   );
   const changeOrders = useMemo(
-    () => getByTenant<ChangeOrder>('changeOrders', tenantId).filter(c => c.projectId === projectId)
+    () => (apiData?.changeOrders ?? getByTenant<ChangeOrder>('changeOrders', tenantId)).filter(c => c.projectId === projectId)
       .sort((a, b) => b.number - a.number),
-    [tenantId, projectId, refreshKey]
+    [apiData, tenantId, projectId, refreshKey]
   );
   const inspections = useMemo(
-    () => getByTenant<Inspection>('inspections', tenantId).filter(i => i.projectId === projectId)
+    () => (apiData?.inspections ?? getByTenant<Inspection>('inspections', tenantId)).filter(i => i.projectId === projectId)
       .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()),
-    [tenantId, projectId, refreshKey]
+    [apiData, tenantId, projectId, refreshKey]
   );
 
   // Keep the open "run inspection" modal in step with the store after a save
@@ -121,7 +141,7 @@ export default function Execution() {
   const coImpact = project ? changeOrderImpact(tenantId, project.id) : { cost: 0, days: 0 };
 
   // ── Site tasks ─────────────────────────────────────────────────────────────
-  const handleAddTask = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleAddTask = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (!project) return;
     const fd = new FormData(e.currentTarget);
@@ -129,24 +149,30 @@ export default function Execution() {
     const dueDate = fd.get('dueDate') as string;
     if (!title || !dueDate) { toast.error('Title and due date are required'); return; }
     const dependsOn = fd.getAll('dependsOn') as string[];
-    const created = create<SiteTask>('siteTasks', {
-      id: '', tenantId, projectId: project.id, title,
-      description: (fd.get('description') as string) || '',
-      isMilestone: fd.get('isMilestone') === 'on',
-      startDate: (fd.get('startDate') as string) || '',
-      dueDate,
-      status: 'not_started', progress: 0,
-      assignedTo: (fd.get('assignedTo') as string) || undefined,
-      dependsOn,
-      createdAt: new Date().toISOString(),
-    });
+    let created: SiteTask;
+    try {
+      created = await execWrites.createSiteTask({
+        id: '', tenantId, projectId: project.id, title,
+        description: (fd.get('description') as string) || '',
+        isMilestone: fd.get('isMilestone') === 'on',
+        startDate: (fd.get('startDate') as string) || '',
+        dueDate,
+        status: 'not_started', progress: 0,
+        assignedTo: (fd.get('assignedTo') as string) || undefined,
+        dependsOn,
+        createdAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not add the task');
+      return;
+    }
     audit('create', 'site_task', created.id, `Added site task "${title}" on ${project.name}`);
     setShowAddTask(false);
     refresh();
     toast.success(created.isMilestone ? 'Milestone added' : 'Task added');
   };
 
-  const setTaskStatus = (task: SiteTask, status: SiteTaskStatus) => {
+  const setTaskStatus = async (task: SiteTask, status: SiteTaskStatus) => {
     if (status !== 'not_started' && status !== 'blocked') {
       const unmet = unmetDependencies(task, tasks);
       if (unmet.length > 0) {
@@ -154,31 +180,28 @@ export default function Execution() {
         return;
       }
     }
-    update<SiteTask>('siteTasks', task.id, {
-      status,
-      progress: status === 'done' ? 100 : task.progress,
-      completedAt: status === 'done' ? new Date().toISOString() : undefined,
-    });
+    try { await execWrites.setTaskStatus(task, status); }
+    catch (err) { toast.error(err instanceof Error ? err.message : 'Could not update the task'); return; }
     audit('update', 'site_task', task.id, `"${task.title}" → ${status.replace('_', ' ')}`);
+    // Construction-linked demand automation: completing a milestone auto-raises
+    // the matching payment demand on every buyer in this project.
+    if (status === 'done' && task.isMilestone) {
+      const res = raiseConstructionDemands(tenantId, task.projectId, task.title, user ? { id: user.id, name: user.name } : undefined);
+      if (res.count > 0) toast.success(`Milestone reached — raised ${res.count} demand${res.count === 1 ? '' : 's'} (${formatCurrency(res.total, tenant?.currency || 'INR')})`);
+    }
     refresh();
   };
 
-  const setTaskProgress = (task: SiteTask, progress: number) => {
-    update<SiteTask>('siteTasks', task.id, {
-      progress,
-      status: progress >= 100 ? 'done' : task.status === 'not_started' && progress > 0 ? 'in_progress' : task.status,
-      completedAt: progress >= 100 ? new Date().toISOString() : undefined,
-    });
+  const setTaskProgress = async (task: SiteTask, progress: number) => {
+    try { await execWrites.setTaskProgress(task, progress); }
+    catch (err) { toast.error(err instanceof Error ? err.message : 'Could not update progress'); return; }
     refresh();
   };
 
-  const deleteTask = (task: SiteTask) => {
+  const deleteTask = async (task: SiteTask) => {
     if (!confirm(`Delete "${task.title}"? Tasks depending on it will lose the link.`)) return;
-    // Unlink dependents so no task points at a ghost prerequisite
-    tasks.filter(t => t.dependsOn.includes(task.id)).forEach(t =>
-      update<SiteTask>('siteTasks', t.id, { dependsOn: t.dependsOn.filter(d => d !== task.id) })
-    );
-    remove('siteTasks', task.id);
+    try { await execWrites.deleteSiteTask(task, tasks); }
+    catch (err) { toast.error(err instanceof Error ? err.message : 'Could not delete the task'); return; }
     audit('delete', 'site_task', task.id, `Deleted site task "${task.title}"`);
     refresh();
     toast.success('Task deleted');
@@ -204,21 +227,27 @@ export default function Execution() {
     } finally { setCompressing(false); }
   };
 
-  const handleAddUpdate = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleAddUpdate = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (!project || !user) return;
     const fd = new FormData(e.currentTarget);
     const summary = (fd.get('summary') as string)?.trim();
     if (!summary) { toast.error('Write a short summary of the work done'); return; }
     const workforce = Number(fd.get('workforce'));
-    const created = create<ProgressUpdate>('progressUpdates', {
-      id: '', tenantId, projectId: project.id, userId: user.id,
-      date: (fd.get('date') as string) || new Date().toISOString().slice(0, 10),
-      summary,
-      workforce: workforce > 0 ? workforce : undefined,
-      photos: pendingPhotos,
-      createdAt: new Date().toISOString(),
-    });
+    let created: ProgressUpdate;
+    try {
+      created = await execWrites.createUpdate({
+        id: '', tenantId, projectId: project.id, userId: user.id,
+        date: (fd.get('date') as string) || new Date().toISOString().slice(0, 10),
+        summary,
+        workforce: workforce > 0 ? workforce : undefined,
+        photos: pendingPhotos,
+        createdAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not log the update');
+      return;
+    }
     audit('create', 'progress_update', created.id, `Site update on ${project.name}: ${summary.slice(0, 60)}`);
     setShowAddUpdate(false);
     setPendingPhotos([]);
@@ -226,48 +255,57 @@ export default function Execution() {
     toast.success('Progress update logged');
   };
 
-  const deleteUpdate = (u: ProgressUpdate) => {
+  const deleteUpdate = async (u: ProgressUpdate) => {
     if (!confirm('Delete this progress update?')) return;
-    remove('progressUpdates', u.id);
+    try { await execWrites.deleteUpdate(u); }
+    catch (err) { toast.error(err instanceof Error ? err.message : 'Could not delete the update'); return; }
     audit('delete', 'progress_update', u.id, 'Deleted site progress update');
     refresh();
     toast.success('Update deleted');
   };
 
   // ── RFIs ───────────────────────────────────────────────────────────────────
-  const handleAddRfi = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleAddRfi = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (!project || !user) return;
     const fd = new FormData(e.currentTarget);
     const subject = (fd.get('subject') as string)?.trim();
     const question = (fd.get('question') as string)?.trim();
     if (!subject || !question) { toast.error('Subject and question are required'); return; }
-    const created = create<Rfi>('rfis', {
-      id: '', tenantId, projectId: project.id,
-      number: nextRfiNumber(tenantId, project.id),
-      subject, question, raisedBy: user.id,
-      assignedTo: (fd.get('assignedTo') as string) || undefined,
-      status: 'open',
-      dueDate: (fd.get('dueDate') as string) || undefined,
-      createdAt: new Date().toISOString(),
-    });
+    let created: Rfi;
+    try {
+      created = await execWrites.createRfi({
+        id: '', tenantId, projectId: project.id,
+        number: nextRfiNumber(tenantId, project.id),
+        subject, question, raisedBy: user.id,
+        assignedTo: (fd.get('assignedTo') as string) || undefined,
+        status: 'open',
+        dueDate: (fd.get('dueDate') as string) || undefined,
+        createdAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not raise the RFI');
+      return;
+    }
     audit('create', 'rfi', created.id, `Raised RFI-${String(created.number).padStart(3, '0')}: ${subject}`);
     setShowAddRfi(false);
     refresh();
     toast.success('RFI raised');
   };
 
-  const answerRfi = (rfi: Rfi, answer: string) => {
+  const answerRfi = async (rfi: Rfi, answer: string) => {
     if (!answer.trim()) { toast.error('Write an answer first'); return; }
-    update<Rfi>('rfis', rfi.id, { answer: answer.trim(), status: 'answered', answeredAt: new Date().toISOString() });
+    try { await execWrites.answerRfi(rfi, answer.trim()); }
+    catch (err) { toast.error(err instanceof Error ? err.message : 'Could not save the answer'); return; }
     audit('update', 'rfi', rfi.id, `Answered RFI-${String(rfi.number).padStart(3, '0')}`);
     setOpenRfi(null);
     refresh();
     toast.success('RFI answered');
   };
 
-  const closeRfi = (rfi: Rfi) => {
-    update<Rfi>('rfis', rfi.id, { status: 'closed' });
+  const closeRfi = async (rfi: Rfi) => {
+    try { await execWrites.closeRfi(rfi); }
+    catch (err) { toast.error(err instanceof Error ? err.message : 'Could not close the RFI'); return; }
     audit('update', 'rfi', rfi.id, `Closed RFI-${String(rfi.number).padStart(3, '0')}`);
     setOpenRfi(null);
     refresh();
@@ -275,33 +313,37 @@ export default function Execution() {
   };
 
   // ── Change orders ──────────────────────────────────────────────────────────
-  const handleAddCo = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleAddCo = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (!project || !user) return;
     const fd = new FormData(e.currentTarget);
     const title = (fd.get('title') as string)?.trim();
     if (!title) { toast.error('Title is required'); return; }
-    const created = create<ChangeOrder>('changeOrders', {
-      id: '', tenantId, projectId: project.id,
-      number: nextChangeOrderNumber(tenantId, project.id),
-      title, reason: (fd.get('reason') as string) || '',
-      costImpact: Number(fd.get('costImpact')) || 0,
-      timeImpactDays: Number(fd.get('timeImpactDays')) || 0,
-      status: 'pending_approval', requestedBy: user.id,
-      createdAt: new Date().toISOString(),
-    });
+    let created: ChangeOrder;
+    try {
+      created = await execWrites.createChangeOrder({
+        id: '', tenantId, projectId: project.id,
+        number: nextChangeOrderNumber(tenantId, project.id),
+        title, reason: (fd.get('reason') as string) || '',
+        costImpact: Number(fd.get('costImpact')) || 0,
+        timeImpactDays: Number(fd.get('timeImpactDays')) || 0,
+        status: 'pending_approval', requestedBy: user.id,
+        createdAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not submit the change order');
+      return;
+    }
     audit('create', 'change_order', created.id, `Change order CO-${String(created.number).padStart(3, '0')}: ${title}`);
     setShowAddCo(false);
     refresh();
     toast.success('Change order submitted for approval');
   };
 
-  const decideCo = (co: ChangeOrder, approved: boolean) => {
+  const decideCo = async (co: ChangeOrder, approved: boolean) => {
     if (!user) return;
-    update<ChangeOrder>('changeOrders', co.id, {
-      status: approved ? 'approved' : 'rejected',
-      decidedBy: user.id, decidedAt: new Date().toISOString(),
-    });
+    try { await execWrites.decideChangeOrder(co, approved, user.id); }
+    catch (err) { toast.error(err instanceof Error ? err.message : 'Could not record the decision'); return; }
     audit('update', 'change_order', co.id, `${approved ? 'Approved' : 'Rejected'} CO-${String(co.number).padStart(3, '0')} "${co.title}"`);
     refresh();
     toast.success(approved ? 'Change order approved' : 'Change order rejected');
@@ -321,46 +363,55 @@ export default function Execution() {
     setDraftTitle(tpl.title);
   };
 
-  const handleAddInspection = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleAddInspection = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (!project || !user) return;
     const fd = new FormData(e.currentTarget);
     const items = draftItems.map(s => s.trim()).filter(Boolean);
     if (!draftTitle.trim() || items.length === 0) { toast.error('A title and at least one checklist item are required'); return; }
-    const created = create<Inspection>('inspections', {
-      id: '', tenantId, projectId: project.id, type: inspectionType,
-      title: draftTitle.trim(),
-      date: (fd.get('date') as string) || new Date().toISOString().slice(0, 10),
-      inspectorId: (fd.get('inspectorId') as string) || user.id,
-      status: 'scheduled',
-      items: buildChecklistItems(items),
-      createdAt: new Date().toISOString(),
-    });
+    let created: Inspection;
+    try {
+      created = await execWrites.createInspection({
+        id: '', tenantId, projectId: project.id, type: inspectionType,
+        title: draftTitle.trim(),
+        date: (fd.get('date') as string) || new Date().toISOString().slice(0, 10),
+        inspectorId: (fd.get('inspectorId') as string) || user.id,
+        status: 'scheduled',
+        items: buildChecklistItems(items),
+        createdAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not schedule the inspection');
+      return;
+    }
     audit('create', 'inspection', created.id, `Scheduled ${inspectionType} inspection "${created.title}" on ${project.name}`);
     setShowAddInspection(false);
     refresh();
     toast.success('Inspection scheduled');
   };
 
-  const setItemResult = (insp: Inspection, itemId: string, result: InspectionItemResult) => {
+  const setItemResult = async (insp: Inspection, itemId: string, result: InspectionItemResult) => {
     const items = insp.items.map(i => i.id === itemId ? { ...i, result } : i);
-    update<Inspection>('inspections', insp.id, { items });
+    try { await execWrites.setInspectionItems(insp, items); }
+    catch (err) { toast.error(err instanceof Error ? err.message : 'Could not save the result'); return; }
     refresh();
   };
 
-  const completeInspection = (insp: Inspection) => {
+  const completeInspection = async (insp: Inspection) => {
     const outcome = inspectionOutcome(insp.items);
     if (!outcome) { toast.error('Mark every item pass / fail / N.A. first'); return; }
-    update<Inspection>('inspections', insp.id, { status: outcome });
+    try { await execWrites.completeInspection(insp, outcome); }
+    catch (err) { toast.error(err instanceof Error ? err.message : 'Could not complete the inspection'); return; }
     audit('update', 'inspection', insp.id, `Completed "${insp.title}" — ${outcome.toUpperCase()}`);
     setRunInspection(null);
     refresh();
     toast[outcome === 'passed' ? 'success' : 'error'](`Inspection ${outcome}`);
   };
 
-  const deleteInspection = (insp: Inspection) => {
+  const deleteInspection = async (insp: Inspection) => {
     if (!confirm(`Delete inspection "${insp.title}"?`)) return;
-    remove('inspections', insp.id);
+    try { await execWrites.deleteInspection(insp); }
+    catch (err) { toast.error(err instanceof Error ? err.message : 'Could not delete the inspection'); return; }
     audit('delete', 'inspection', insp.id, `Deleted inspection "${insp.title}"`);
     refresh();
     toast.success('Inspection deleted');

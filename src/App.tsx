@@ -32,6 +32,7 @@ import PortalLogin from './pages/PortalLogin';
 import PortalDashboard from './pages/PortalDashboard';
 import ChatbotPortal from './pages/ChatbotPortal';
 import Microsite from './pages/Microsite';
+import ChatbotWidget from './pages/ChatbotWidget';
 import ForcePasswordChange from './components/ForcePasswordChange';
 import ErrorBoundary from './components/ErrorBoundary';
 
@@ -97,6 +98,7 @@ function AppRoutes() {
 
       {/* Public project microsite — no auth; captures leads into the CRM */}
       <Route path="/site/:slug/:projectId" element={<Microsite />} />
+      <Route path="/chat/:slug" element={<ChatbotWidget />} />
 
       <Route
         element={

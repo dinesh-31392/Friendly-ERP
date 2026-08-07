@@ -1,11 +1,13 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Handshake, Plus, X, MapPin, ArrowRight, TrendingUp, Map, LineChart,
   Building2, IndianRupee,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { getByTenant, create, logAudit } from '../services/db';
+import { getByTenant, logAudit } from '../services/db';
+import { isApiEnabled } from '../services/apiClient';
+import { hydrateLandBd, persistBdLead, persistMarketReport } from '../services/landBdWrites';
 import { handOffToLand, advanceStage, closeLost } from '../services/bdService';
 import { formatCurrency } from '../utils/format';
 import type {
@@ -26,6 +28,15 @@ export default function BD() {
   const actor = user ? { id: user.id, name: user.name } : { id: '', name: 'System' };
 
   const [refreshKey, setRefreshKey] = useState(0);
+  // API mode: mirror the server Land/BD slice into the read-cache on mount.
+  useEffect(() => {
+    if (!isApiEnabled() || !tenantId) return;
+    let cancelled = false;
+    hydrateLandBd(tenantId)
+      .then(() => { if (!cancelled) setRefreshKey(k => k + 1); })
+      .catch(() => toast.error('Could not reach the server — showing locally cached data'));
+    return () => { cancelled = true; };
+  }, [tenantId]);
   const refresh = () => setRefreshKey(k => k + 1);
   const [tab, setTab] = useState<Tab>('pipeline');
   const [showAdd, setShowAdd] = useState(false);
@@ -48,15 +59,17 @@ export default function BD() {
   const handedOff = deals.filter(d => d.stage === 'handed_to_land').length;
   const negotiating = deals.filter(d => d.stage === 'terms_negotiation').length;
 
-  const handleAdd = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleAdd = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const fd = new FormData(e.currentTarget);
     const counterpartyName = (fd.get('counterpartyName') as string)?.trim();
     const city = (fd.get('city') as string)?.trim();
     if (!counterpartyName || !city) { toast.error('Counterparty and city are required'); return; }
     const opportunityType = (fd.get('opportunityType') as BdOpportunityType) || 'land_acquisition';
-    const created = create<BdLead>('bdLeads', {
-      id: '', tenantId, opportunityType,
+    let created: BdLead;
+    try {
+      created = await persistBdLead({
+      tenantId, opportunityType,
       source: (fd.get('source') as BdSource) || 'broker',
       counterpartyName, counterpartyContact: (fd.get('counterpartyContact') as string) || '',
       city, stage: 'identified',
@@ -67,34 +80,43 @@ export default function BD() {
       areaSharePercent: Number(fd.get('areaSharePercent')) || undefined,
       jvNotes: (fd.get('jvNotes') as string) || '',
       createdBy: user?.id, createdAt: new Date().toISOString(),
-    });
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not log the opportunity');
+      return;
+    }
     logAudit({ tenantId, userId: actor.id, userName: actor.name, action: 'create', entity: 'bd_lead', entityId: created.id, details: `Logged BD opportunity "${counterpartyName}" in ${city}` });
     setShowAdd(false);
     refresh();
     toast.success('Opportunity logged');
   };
 
-  const handleAddReport = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleAddReport = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const fd = new FormData(e.currentTarget);
     const areaName = (fd.get('areaName') as string)?.trim();
     const findings = (fd.get('findings') as string)?.trim();
     if (!areaName || !findings) { toast.error('Area and findings are required'); return; }
-    create<MarketReport>('marketReports', {
-      id: '', tenantId, areaName,
+    try {
+      await persistMarketReport({
+      tenantId, areaName,
       reportType: (fd.get('reportType') as MarketReport['reportType']) || 'pricing_benchmark',
       findings, dataSources: (fd.get('dataSources') as string) || '',
       createdBy: actor.id, createdAt: new Date().toISOString(),
-    });
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not save the analysis');
+      return;
+    }
     setShowReport(false);
     refresh();
     toast.success('Market analysis saved');
   };
 
-  const doHandOff = () => {
+  const doHandOff = async () => {
     if (!sel) return;
     if (!confirm('Hand this deal off to Land Acquisition? A land parcel will be created for the team to run feasibility on.')) return;
-    const r = handOffToLand(sel, actor);
+    const r = await handOffToLand(sel, actor);
     if (!r.ok) { toast.error(r.error || 'Could not hand off'); return; }
     refresh();
     toast.success('Handed to Land Acquisition');
@@ -102,7 +124,9 @@ export default function BD() {
     navigate('/land');
   };
 
-  const stageMeta = (s: BdStage) => BD_STAGES.find(x => x.id === s)!;
+  // Falls back rather than asserting — see the same guard in Land.tsx.
+  const stageMeta = (s: BdStage) =>
+    BD_STAGES.find(x => x.id === s) ?? { id: s, label: String(s).replace(/_/g, ' '), color: 'bg-zinc-300' };
   const inputCls = 'w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20';
   const labelCls = 'block text-xs font-semibold text-zinc-500 uppercase mb-1';
   const fmtDate = (d: string) => new Date(d).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
@@ -253,7 +277,7 @@ export default function BD() {
             ) : sel.stage === 'closed_lost' ? (
               <div className="text-center text-sm text-red-500 bg-red-50 rounded-xl py-2.5">Closed lost{sel.closedLostReason ? ` — ${sel.closedLostReason}` : ''}</div>
             ) : lostMode ? (
-              <form onSubmit={e => { e.preventDefault(); const r = new FormData(e.currentTarget).get('reason') as string; if (!r?.trim()) return; closeLost(sel, r.trim(), actor); setLostMode(false); refresh(); toast.success('Marked closed-lost'); }} className="flex gap-2">
+              <form onSubmit={async e => { e.preventDefault(); const r = new FormData(e.currentTarget).get('reason') as string; if (!r?.trim()) return; await closeLost(sel, r.trim(), actor); setLostMode(false); refresh(); toast.success('Marked closed-lost'); }} className="flex gap-2">
                 <input name="reason" autoFocus placeholder="Why did this deal fall through?" className={inputCls} />
                 <button type="submit" className="px-3.5 py-2 bg-red-600 text-white rounded-xl text-xs font-semibold hover:bg-red-700 whitespace-nowrap">Confirm</button>
                 <button type="button" onClick={() => setLostMode(false)} className="px-3 py-2 border border-zinc-200 rounded-xl text-xs font-medium text-zinc-600">Cancel</button>
@@ -262,8 +286,8 @@ export default function BD() {
               <div className="space-y-2">
                 {canManage && sel.stage !== 'terms_negotiation' && (
                   <div className="flex gap-2">
-                    {sel.stage === 'identified' && <button onClick={() => { advanceStage(sel, 'initial_discussion', actor); refresh(); }} className="flex-1 py-2.5 bg-zinc-100 text-zinc-700 rounded-xl text-sm font-semibold hover:bg-zinc-200">Move to Initial Discussion</button>}
-                    {sel.stage === 'initial_discussion' && <button onClick={() => { advanceStage(sel, 'terms_negotiation', actor); refresh(); }} className="flex-1 py-2.5 bg-zinc-100 text-zinc-700 rounded-xl text-sm font-semibold hover:bg-zinc-200">Move to Terms Negotiation</button>}
+                    {sel.stage === 'identified' && <button onClick={async () => { await advanceStage(sel, 'initial_discussion', actor); refresh(); }} className="flex-1 py-2.5 bg-zinc-100 text-zinc-700 rounded-xl text-sm font-semibold hover:bg-zinc-200">Move to Initial Discussion</button>}
+                    {sel.stage === 'initial_discussion' && <button onClick={async () => { await advanceStage(sel, 'terms_negotiation', actor); refresh(); }} className="flex-1 py-2.5 bg-zinc-100 text-zinc-700 rounded-xl text-sm font-semibold hover:bg-zinc-200">Move to Terms Negotiation</button>}
                   </div>
                 )}
                 <div className="flex gap-2">

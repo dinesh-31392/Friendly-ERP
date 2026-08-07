@@ -17,6 +17,8 @@ import { pendingLeaves } from '../services/hrService';
 import { filingsDueSoon, isFilingOverdue } from '../services/complianceService';
 import { loansDueSoon } from '../services/accountsService';
 import { formatCurrency } from '../utils/format';
+import DateRangeFilter from '../components/DateRangeFilter';
+import { type DateRange, ALL_RANGE, resolveRange, inRange, rangeLabel } from '../utils/dateRange';
 import type { Lead, Task, Unit, Activity, User as UserType, Project, SiteTask, Rfi, Inspection, PurchaseOrder, VendorBill, Invoice, RaBill, Quotation, Booking, LandLead, BdLead } from '../types';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
@@ -28,7 +30,7 @@ const iconMap: Record<string, React.ElementType> = {
 
 export default function Dashboard() {
   const { user, tenant, hasPermission } = useAuth();
-  const [timeRange, setTimeRange] = useState<'today' | 'week' | 'month'>('week');
+  const [dateRange, setDateRange] = useState<DateRange>(ALL_RANGE);
   const [refreshKey, setRefreshKey] = useState(0);
 
   const tenantId = tenant?.id || '';
@@ -210,11 +212,18 @@ export default function Dashboard() {
   const leads = isExecutive ? allLeads.filter(l => l.assignedTo === userId) : allLeads;
   const tasks = isExecutive ? allTasks.filter(t => t.userId === userId) : allTasks;
 
-  const totalLeads = leads.length;
-  const bookedLeads = leads.filter(l => l.stage === 'booked').length;
+  // Lead-based KPIs are scoped to the selected date window (by received date).
+  // preset 'all' → rangedLeads === leads, so the dashboard is unchanged by default.
+  const rangedLeads = useMemo(() => {
+    const r = resolveRange(dateRange);
+    return leads.filter(l => inRange(l.createdAt, r));
+  }, [leads, dateRange]);
+
+  const totalLeads = rangedLeads.length;
+  const bookedLeads = rangedLeads.filter(l => l.stage === 'booked').length;
   const conversionRate = totalLeads > 0 ? ((bookedLeads / totalLeads) * 100).toFixed(1) : '0.0';
   const availableUnits = units.filter(u => u.status === 'available').length;
-  const totalRevenue = leads.filter(l => l.stage === 'booked').reduce((s, l) => s + l.budget, 0);
+  const totalRevenue = rangedLeads.filter(l => l.stage === 'booked').reduce((s, l) => s + l.budget, 0);
   const avgDealSize = bookedLeads > 0 ? (totalRevenue / bookedLeads) : 0;
 
   // Real 30-day deltas computed from lead createdAt; null = not enough
@@ -259,8 +268,8 @@ export default function Dashboard() {
     .map(s => ({
       stage: s.label,
       stageId: s.id,
-      count: leads.filter(l => l.stage === s.id).length,
-      value: leads.filter(l => l.stage === s.id).reduce((a, l) => a + l.budget, 0),
+      count: rangedLeads.filter(l => l.stage === s.id).length,
+      value: rangedLeads.filter(l => l.stage === s.id).reduce((a, l) => a + l.budget, 0),
     }));
 
   // Build weekly data from actual activity dates
@@ -417,21 +426,16 @@ export default function Dashboard() {
           <h2 className="text-2xl font-bold text-zinc-900">Welcome back, {user?.name?.split(' ')[0] || 'User'}</h2>
           <p className="text-sm text-zinc-500 mt-0.5">
             {isExecutive ? "Here's your personal pipeline overview." : `Here's what's happening at ${tenant?.name || 'Friendly ERP'} today.`}
+            {dateRange.preset !== 'all' && (
+              <span className="text-indigo-600 font-medium"> · Leads scoped to {rangeLabel(dateRange).toLowerCase()}</span>
+            )}
           </p>
         </div>
-        <div className="flex items-center gap-2 bg-white rounded-xl border border-zinc-200 p-1">
-          {(['today', 'week', 'month'] as const).map(r => (
-            <button
-              key={r}
-              onClick={() => setTimeRange(r)}
-              className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-all capitalize ${timeRange === r ? 'bg-indigo-600 text-white shadow-sm' : 'text-zinc-500 hover:text-zinc-700'}`}
-            >
-              {r}
-            </button>
-          ))}
+        <div className="flex items-center gap-2">
+          <DateRangeFilter value={dateRange} onChange={setDateRange} align="right" />
           <button
             onClick={() => setRefreshKey(k => k + 1)}
-            className="p-2 rounded-lg text-zinc-500 hover:bg-zinc-100 transition-all ml-1"
+            className="p-2 rounded-lg text-zinc-500 hover:bg-zinc-100 border border-zinc-200 bg-white transition-all"
             title="Refresh dashboard"
           >
             <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">

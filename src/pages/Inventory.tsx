@@ -1,9 +1,11 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import {
   Search, Building2, ChevronDown, MapPin, Grid3X3, List, Plus, X,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { getByTenant, create, update, remove, logAudit } from '../services/db';
+import { getByTenant, remove, logAudit } from '../services/db';
+import { isApiEnabled, apiGetProjects, apiGetTowers, apiGetUnits } from '../services/apiClient';
+import { createUnit, patchUnit } from '../services/inventoryWrites';
 import { formatCurrency, formatCurrencyFull, currencySymbol } from '../utils/format';
 import type { Project, Tower, Unit, UnitStatus, Lead, Booking } from '../types';
 import { UNIT_STATUSES } from '../types';
@@ -42,9 +44,27 @@ export default function Inventory() {
   const [refreshKey, setRefreshKey] = useState(0);
   const refresh = () => setRefreshKey(k => k + 1);
 
-  const projects = useMemo(() => getByTenant<Project>('projects', tenantId), [tenantId, refreshKey]);
-  const towers = useMemo(() => getByTenant<Tower>('towers', tenantId), [tenantId, refreshKey]);
-  const allUnits = useMemo(() => getByTenant<Unit>('units', tenantId), [tenantId, refreshKey]);
+  // Feature flag: with an API URL configured, inventory is read from the
+  // Fastify backend (RLS-scoped). Falls back to localStorage on any API failure
+  // so the page never goes blank. Flag off → identical behavior to before.
+  const [apiData, setApiData] = useState<{ projects: Project[]; towers: Tower[]; units: Unit[] } | null>(null);
+  useEffect(() => {
+    if (!isApiEnabled()) { setApiData(null); return; }
+    let cancelled = false;
+    Promise.all([apiGetProjects(), apiGetTowers(), apiGetUnits()])
+      .then(([projects, towers, units]) => { if (!cancelled) setApiData({ projects, towers, units }); })
+      .catch(() => {
+        if (!cancelled) {
+          setApiData(null);
+          toast.error('API unreachable — showing local data', { id: 'api-fallback' });
+        }
+      });
+    return () => { cancelled = true; };
+  }, [tenantId, refreshKey]);
+
+  const projects = useMemo(() => apiData?.projects ?? getByTenant<Project>('projects', tenantId), [apiData, tenantId, refreshKey]);
+  const towers = useMemo(() => apiData?.towers ?? getByTenant<Tower>('towers', tenantId), [apiData, tenantId, refreshKey]);
+  const allUnits = useMemo(() => apiData?.units ?? getByTenant<Unit>('units', tenantId), [apiData, tenantId, refreshKey]);
 
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
   const [selectedTower, setSelectedTower] = useState<Tower | null>(null);
@@ -112,7 +132,7 @@ export default function Inventory() {
     return counts;
   }, [currentUnits]);
 
-  const handleStatusChange = (unitId: string, newStatus: UnitStatus) => {
+  const handleStatusChange = async (unitId: string, newStatus: UnitStatus) => {
     if (!canManage) {
       toast.error('You do not have permission to change unit status');
       return;
@@ -134,14 +154,20 @@ export default function Inventory() {
     const updates: Partial<Unit> = { status: newStatus };
     // Releasing a booked unit must clear its owner and cancel the booking,
     // otherwise the unit could be double-booked while an active Booking
-    // record still points at it
+    // record still points at it. (In demo mode bookings live in localStorage;
+    // once the Bookings module is API-cut-over this cascade moves server-side.)
     if (unit.status === 'booked' && newStatus !== 'sold') {
       updates.bookedBy = undefined;
       getByTenant<Booking>('bookings', tenantId)
         .filter(b => b.unitId === unitId)
         .forEach(b => remove('bookings', b.id));
     }
-    update<Unit>('units', unitId, updates);
+    try {
+      await patchUnit(unitId, updates);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not update unit');
+      return;
+    }
     if (user) {
       logAudit({
         tenantId, userId: user.id, userName: user.name,
@@ -162,7 +188,7 @@ export default function Inventory() {
     handleStatusChange(unit.id, options[0]);
   };
 
-  const handleAddUnit = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleAddUnit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (!currentTower) return;
     const form = e.currentTarget;
@@ -177,17 +203,23 @@ export default function Inventory() {
       return;
     }
 
-    const newUnit = create<Unit>('units', {
-      id: '', towerId: currentTower.id, floorNumber: floorNum,
-      number: unitNum,
-      type: (formData.get('type') as string) || '2 BHK',
-      configuration: (formData.get('configuration') as string) || '2 BHK',
-      area: Number(formData.get('area')) || 1000,
-      price: Number(formData.get('price')) || 5000000,
-      status: 'available',
-      tenantId,
-    });
-    
+    let newUnit: Unit;
+    try {
+      newUnit = await createUnit({
+        towerId: currentTower.id, floorNumber: floorNum,
+        number: unitNum,
+        type: (formData.get('type') as string) || '2 BHK',
+        configuration: (formData.get('configuration') as string) || '2 BHK',
+        area: Number(formData.get('area')) || 1000,
+        price: Number(formData.get('price')) || 5000000,
+        status: 'available',
+        tenantId,
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not add unit');
+      return;
+    }
+
     // Audit log for adding unit
     if (user) {
       logAudit({
@@ -196,7 +228,7 @@ export default function Inventory() {
         details: `Added unit ${unitNum} to ${currentTower.name} (Floor ${floorNum}, ${formData.get('configuration')} ${formData.get('type')}, ${formData.get('area')} sqft, ${formatCurrencyFull(Number(formData.get('price')), currency)})`,
       });
     }
-    
+
     setShowAddUnit(false);
     refresh();
     toast.success('Unit added successfully');

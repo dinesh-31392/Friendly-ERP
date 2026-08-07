@@ -9,6 +9,7 @@ import {
   getWebsiteFormSnippet, getChatbotSnippet, getChatbotNextJsInstructions, ingestLead,
 } from '../services/integrationService';
 import type { IntegrationProviderDef } from '../services/integrationService';
+import { isApiEnabled, apiSaveWhatsAppInstance } from '../services/apiClient';
 
 function timeAgo(iso?: string): string {
   if (!iso) return 'Never';
@@ -55,6 +56,14 @@ export default function IntegrationsPanel() {
     });
     if (missing) { toast.error('Please fill in all fields'); return; }
     connectIntegration(tenantId, configuring.id, config, actor);
+    // WhatsApp Business: in API mode the Meta creds must live SERVER-side (the
+    // token never persists in the browser), so also register the instance there,
+    // flipping the tenant's WhatsApp adapter to the paid Cloud API path.
+    if (configuring.id === 'whatsapp_business' && isApiEnabled()) {
+      apiSaveWhatsAppInstance({
+        provider: 'meta_cloud_waba', phoneNumberId: config.phoneNumberId, accessToken: config.apiToken,
+      }).catch(() => toast.error('Saved locally, but the server WhatsApp config failed — retry in Settings'));
+    }
     toast.success(`${configuring.name} connected`);
     setConfiguring(null);
     refresh();
@@ -76,6 +85,10 @@ export default function IntegrationsPanel() {
     if (!canManage) { toast.error('You do not have permission to manage integrations'); return; }
     if (!confirm(`Disconnect ${provider.name}? Lead sync from this source will stop.`)) return;
     disconnectIntegration(tenantId, provider.id, actor);
+    // Revert the WhatsApp adapter to the free click-to-chat path server-side too.
+    if (provider.id === 'whatsapp_business' && isApiEnabled()) {
+      apiSaveWhatsAppInstance({ provider: 'click_to_chat' }).catch(() => {});
+    }
     toast.success(`${provider.name} disconnected`);
     refresh();
   };
@@ -156,7 +169,7 @@ export default function IntegrationsPanel() {
                     to="/integrations/chatbot"
                     className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 bg-white border border-indigo-200 text-indigo-700 rounded-lg text-xs font-medium hover:bg-indigo-50"
                   >
-                    <Bot className="h-3 w-3" /> Open Portal
+                    <Bot className="h-3 w-3" /> Chatbot Builder
                   </Link>
                   <button
                     onClick={() => setShowChatbotSnippet(true)}

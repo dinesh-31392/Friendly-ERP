@@ -1,7 +1,9 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { FileText, Search, Plus, Download, Eye, Trash2, Filter, Calendar, X, FolderOpen } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { getByTenant, create, remove } from '../services/db';
+import { getByTenant } from '../services/db';
+import { isApiEnabled, apiGetDocuments } from '../services/apiClient';
+import { createDocument, deleteDocument } from '../services/documentWrites';
 import { localeFor } from '../utils/format';
 import type { Document } from '../types';
 import toast from 'react-hot-toast';
@@ -29,11 +31,28 @@ export default function Documents() {
   const [typeFilter, setTypeFilter] = useState<string>('all');
   const [showAdd, setShowAdd] = useState(false);
 
+  // Feature flag: with an API URL configured, documents are read from the
+  // Fastify backend (RLS-scoped). Falls back to localStorage on any API failure
+  // so the page never goes blank. Flag off → identical behavior to before.
+  const [apiDocuments, setApiDocuments] = useState<Document[] | null>(null);
+  useEffect(() => {
+    if (!isApiEnabled()) { setApiDocuments(null); return; }
+    let cancelled = false;
+    apiGetDocuments()
+      .then(rows => { if (!cancelled) setApiDocuments(rows); })
+      .catch(() => {
+        if (!cancelled) {
+          setApiDocuments(null);
+          toast.error('API unreachable — showing local data', { id: 'api-fallback' });
+        }
+      });
+    return () => { cancelled = true; };
+  }, [tenantId, refreshKey]);
+
   const documents = useMemo(
-    () => getByTenant<Document>('documents', tenantId).sort((a, b) =>
-      new Date(b.date).getTime() - new Date(a.date).getTime()
-    ),
-    [tenantId, refreshKey]
+    () => (apiDocuments ?? getByTenant<Document>('documents', tenantId))
+      .slice().sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()),
+    [apiDocuments, tenantId, refreshKey]
   );
 
   const filtered = documents.filter(d => {
@@ -42,32 +61,43 @@ export default function Documents() {
     return true;
   });
 
-  const handleAdd = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleAdd = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
+    if (!canManage) { toast.error('You do not have permission to add documents'); return; }
     const form = e.currentTarget;
     const formData = new FormData(form);
 
     const name = formData.get('name') as string;
     if (!name) { toast.error('Document name is required'); return; }
 
-    create<Document>('documents', {
-      id: '', tenantId, name,
-      type: (formData.get('type') as string) || 'Other',
-      project: (formData.get('project') as string) || 'General',
-      date: new Date().toISOString(),
-      size: `${Math.floor(Math.random() * 500 + 50)} KB`,
-      status: (formData.get('status') as string) || 'Draft',
-      url: '#',
-    });
+    try {
+      await createDocument({
+        tenantId, name,
+        type: (formData.get('type') as string) || 'Other',
+        project: (formData.get('project') as string) || 'General',
+        date: new Date().toISOString(),
+        size: `${Math.floor(Math.random() * 500 + 50)} KB`,
+        status: (formData.get('status') as string) || 'Draft',
+        url: '#',
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not add document');
+      return;
+    }
     setShowAdd(false);
     refresh();
     toast.success('Document added successfully');
   };
 
-  const handleDelete = (id: string) => {
+  const handleDelete = async (id: string) => {
     if (!canManage) { toast.error('You do not have permission to delete documents'); return; }
     if (!confirm('Delete this document?')) return;
-    remove('documents', id);
+    try {
+      await deleteDocument(id);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not delete document');
+      return;
+    }
     refresh();
     toast.success('Document deleted');
   };

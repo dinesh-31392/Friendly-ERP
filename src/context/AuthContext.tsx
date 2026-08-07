@@ -2,6 +2,7 @@ import { createContext, useContext, useState, useEffect, ReactNode, useCallback 
 import type { User, Tenant, Role } from '../types';
 import * as authService from '../services/authService';
 import { isApiEnabled, apiLogin, clearApiToken, getStoredApiSession } from '../services/apiClient';
+import { hydrateLedger } from '../services/accountsService';
 import { initializeDatabase, getByField } from '../services/db';
 import { ensureBranchMigration } from '../services/branchService';
 import { isTrialExpired } from '../services/planService';
@@ -58,6 +59,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setNeedsSetup(!isApiEnabled() && authService.needsSetup());
     setIsLoading(false);
   }, []);
+
+  // API mode: load the server ledger (chart of accounts + posted journal
+  // entries) into the local read-cache whenever a tenant session is active, so
+  // the synchronous finance statements (trial balance / P&L / fund flow, on
+  // Accounts, Billing, Dashboard, Reports) fold over server-authoritative data.
+  // Runs on login and on refresh-restored sessions. No-op in demo mode.
+  useEffect(() => {
+    if (!isApiEnabled() || !tenant?.id) return;
+    hydrateLedger(tenant.id).catch(() => { /* pages fall back to whatever's cached */ });
+  }, [tenant?.id]);
 
   const setupPlatformAdmin = useCallback(async (name: string, email: string, password: string) => {
     if (password.length < 8) {

@@ -1,22 +1,24 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import {
   Landmark, BookOpen, Scale, HardHat, Plus, X, Trash2, CheckCircle2,
   ArrowDownToLine, FileText, Banknote,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { getByTenant, create, update, logAudit } from '../services/db';
+import { isApiEnabled } from '../services/apiClient';
 import {
   ensureCoa, postEntry, postDraft, postRaApproved, postApPayment,
   trialBalance, profitAndLoss, balanceSheet, nextRaNumber, contractorLedger,
   buildLoanSchedule, postLoanDisbursed, postLoanRepayment,
-  fundFlow, projectPnl, cashBalance, COA,
+  fundFlow, projectPnl, cashBalance, COA, hydrateLedger,
 } from '../services/accountsService';
+import * as accountsWrites from '../services/accountsWrites';
 import { projectProgress } from '../services/executionService';
 import { formatCurrency, formatCurrencyFull } from '../utils/format';
 import { downloadCsv } from '../utils/csv';
 import type {
   Account, AccountType, JournalEntry, Project, Vendor, RaBill, RaDeduction,
-  PaymentMade, PaymentMode, BankAccount, BankTransaction, Loan, LoanType,
+  PaymentMade, PaymentMode, BankAccount, BankTransaction, Loan, LoanInstallment, LoanType,
 } from '../types';
 import { ACCOUNT_TYPES, PAYMENT_MODES, LOAN_TYPES } from '../types';
 import { v4 as uuid } from 'uuid';
@@ -54,7 +56,7 @@ function parseCsvLine(line: string): string[] {
 
 const SOURCE_LABELS: Record<JournalEntry['sourceType'], string> = {
   manual: 'Manual', vendor_bill: 'Vendor Bill', ra_bill: 'RA Bill',
-  customer_payment: 'Collection', ap_payment: 'Payment',
+  customer_payment: 'Collection', ap_payment: 'Payment', revenue_recognition: 'Revenue (Possession)',
 };
 
 interface DraftLine { key: string; accountId: string; debit: string; credit: string }
@@ -70,6 +72,19 @@ export default function Accounts() {
   const canPay = hasPermission('manage_finance');
   const [refreshKey, setRefreshKey] = useState(0);
   const refresh = () => setRefreshKey(k => k + 1);
+
+  // API mode: pull the server ledger AND the AP/banking/loans slice into the
+  // read-cache on mount, then refresh so the statements render server-
+  // authoritative data even on a direct reload onto this page (before
+  // AuthContext's hydrate finishes). No-op in demo mode.
+  useEffect(() => {
+    if (!isApiEnabled() || !tenantId) return;
+    let cancelled = false;
+    Promise.all([hydrateLedger(tenantId), accountsWrites.hydrateAccounts(tenantId)])
+      .then(() => { if (!cancelled) refresh(); })
+      .catch(() => toast.error('Could not reach the server — showing locally cached data'));
+    return () => { cancelled = true; };
+  }, [tenantId]);
 
   const [tab, setTab] = useState<Tab>('ledger');
   const [statement, setStatement] = useState<'tb' | 'pl' | 'bs' | 'ff' | 'pp'>('tb');
@@ -168,13 +183,13 @@ export default function Accounts() {
   );
   const jeBalanced = jeTotals.dr > 0 && Math.round(jeTotals.dr * 100) === Math.round(jeTotals.cr * 100);
 
-  const handleAddJe = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleAddJe = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const fd = new FormData(e.currentTarget);
     const narration = (fd.get('narration') as string)?.trim();
     if (!narration) { toast.error('Write a narration'); return; }
     try {
-      postEntry({
+      await postEntry({
         tenantId, narration,
         reference: (fd.get('reference') as string) || undefined,
         projectId: (fd.get('projectId') as string) || undefined,
@@ -208,7 +223,12 @@ export default function Accounts() {
   const raNeedsOverride = raSiteProgress !== null && raProgressNum > raSiteProgress;
   const raGrossNum = Number(raGross) || 0;
   const raRetention = Math.round(raGrossNum * (Number(raRetentionPct) || 0) / 100);
-  const raDeductionsTotal = raDeductions.reduce((s, d) => s + d.amount, 0);
+  // Only labelled deductions are stored and posted to the ledger, so the net
+  // payable must be computed from the SAME set. A blank-label amount previously
+  // reduced the net without a matching ledger credit, so the approval entry
+  // failed to balance — and status was already flipped to 'approved' by then.
+  const raValidDeductions = raDeductions.filter(d => d.label.trim() && d.amount > 0);
+  const raDeductionsTotal = raValidDeductions.reduce((s, d) => s + d.amount, 0);
   const raNet = raGrossNum - raRetention - raDeductionsTotal;
   const raLedgerFor = raVendorId ? contractorLedger(tenantId, raVendorId) : null;
 
@@ -220,68 +240,112 @@ export default function Accounts() {
     setShowAddRa(true);
   };
 
-  const handleAddRa = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleAddRa = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const fd = new FormData(e.currentTarget);
     if (!raVendorId || !raProjectId) { toast.error('Pick the contractor and the project'); return; }
     if (!(raGrossNum > 0)) { toast.error('Gross amount is required'); return; }
     if (!(raProgressNum > 0) || raProgressNum > 100) { toast.error('Work progress must be between 1 and 100%'); return; }
     if (raNet < 0) { toast.error('Deductions and retention exceed the gross amount'); return; }
+    if (raDeductions.some(d => d.amount > 0 && !d.label.trim())) {
+      toast.error('Every deduction needs a label — an unlabelled amount would unbalance the ledger.');
+      return;
+    }
     const overrideReason = (fd.get('overrideReason') as string)?.trim();
     if (raNeedsOverride && !overrideReason) {
       toast.error(`Claimed ${raProgressNum}% exceeds the site's logged ${raSiteProgress}% — an override reason is required`);
       return;
     }
-    const created = create<RaBill>('raBills', {
-      id: '', tenantId, vendorId: raVendorId, projectId: raProjectId,
-      raNumber: nextRaNumber(tenantId, raVendorId, raProjectId),
-      progressPct: raProgressNum,
-      siteProgressPct: raSiteProgress,
-      overrideReason: raNeedsOverride ? overrideReason : undefined,
-      grossAmount: raGrossNum,
-      retentionAmount: raRetention,
-      deductions: raDeductions.filter(d => d.label.trim() && d.amount > 0),
-      netPayable: raNet,
-      status: 'submitted',
-      notes: (fd.get('notes') as string) || '',
-      createdBy: actor.id,
-      createdAt: new Date().toISOString(),
-    });
+    let created: RaBill;
+    try {
+      created = await accountsWrites.createRaBill({
+        tenantId, vendorId: raVendorId, projectId: raProjectId,
+        // Server-assigned in API mode; this is the demo-mode sequence.
+        raNumber: nextRaNumber(tenantId, raVendorId, raProjectId),
+        progressPct: raProgressNum,
+        siteProgressPct: raSiteProgress,
+        overrideReason: raNeedsOverride ? overrideReason : undefined,
+        grossAmount: raGrossNum,
+        retentionAmount: raRetention,
+        deductions: raValidDeductions,
+        netPayable: raNet,
+        status: 'submitted',
+        notes: (fd.get('notes') as string) || '',
+        createdBy: actor.id,
+        createdAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not submit the RA bill');
+      return;
+    }
     audit('create', 'ra_bill', created.id, `RA-${created.raNumber} submitted for ${vendorName(raVendorId)} on ${projectName(raProjectId)} — ${formatCurrency(raGrossNum, currency)} gross`);
     setShowAddRa(false);
     refresh();
     toast.success(`RA-${created.raNumber} submitted — awaiting site sign-off`);
   };
 
-  const signOffRa = (ra: RaBill) => {
-    update<RaBill>('raBills', ra.id, { status: 'site_approved', signedOffBy: actor.id, signedOffAt: new Date().toISOString() });
+  const signOffRa = async (ra: RaBill) => {
+    try {
+      await accountsWrites.setRaStatus(ra, 'site_approved', actor.id);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not record the sign-off');
+      return;
+    }
     audit('update', 'ra_bill', ra.id, `Site sign-off on RA-${ra.raNumber} (${vendorName(ra.vendorId)})`);
     refresh();
     toast.success('Progress verified — over to finance');
   };
 
-  const approveRa = (ra: RaBill) => {
-    update<RaBill>('raBills', ra.id, { status: 'approved', approvedBy: actor.id, approvedAt: new Date().toISOString() });
-    postRaApproved({ ...ra, status: 'approved' }, actor);
+  const approveRa = async (ra: RaBill) => {
+    // Post to the ledger FIRST — postEntry validates the balance (and the server
+    // re-validates + commits) before anything persists, so a throw here leaves
+    // no journal entry AND no status change. Only flip the RA to 'approved' once
+    // the posting succeeded.
+    try {
+      await postRaApproved({ ...ra, status: 'approved' }, actor);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not post the ledger entry — RA not approved');
+      return;
+    }
+    try {
+      await accountsWrites.setRaStatus(ra, 'approved', actor.id);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Ledger entry posted, but the RA status did not save');
+      return;
+    }
     audit('update', 'ra_bill', ra.id, `Finance approved RA-${ra.raNumber} — ${formatCurrency(ra.netPayable, currency)} payable`);
     refresh();
     toast.success('RA bill approved and posted to the ledger');
   };
 
-  const handlePayRa = (e: React.FormEvent<HTMLFormElement>) => {
+  const handlePayRa = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (!payingRa) return;
     const fd = new FormData(e.currentTarget);
-    const payment = create<PaymentMade>('paymentsMade', {
-      id: '', tenantId, vendorId: payingRa.vendorId, raBillId: payingRa.id,
-      amount: payingRa.netPayable,
-      date: (fd.get('date') as string) || new Date().toISOString().slice(0, 10),
-      mode: (fd.get('mode') as PaymentMode) || 'bank_transfer',
-      reference: (fd.get('reference') as string) || '',
-      paidBy: actor.id, createdAt: new Date().toISOString(),
-    });
-    update<RaBill>('raBills', payingRa.id, { status: 'paid' });
-    postApPayment(payment, `Paid RA-${payingRa.raNumber} to ${vendorName(payingRa.vendorId)}`, payingRa.projectId, actor);
+    let payment: PaymentMade;
+    try {
+      payment = await accountsWrites.recordRaPayment({
+        tenantId, vendorId: payingRa.vendorId, raBillId: payingRa.id,
+        amount: payingRa.netPayable,
+        date: (fd.get('date') as string) || new Date().toISOString().slice(0, 10),
+        mode: (fd.get('mode') as PaymentMode) || 'bank_transfer',
+        reference: (fd.get('reference') as string) || '',
+        paidBy: actor.id, createdAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not record the payment');
+      return;
+    }
+    // In API mode the payment route already flipped the RA to paid server-side,
+    // so only the read-cache needs catching up — a second PATCH would be a
+    // redundant round trip.
+    if (isApiEnabled()) update<RaBill>('raBills', payingRa.id, { status: 'paid' });
+    else await accountsWrites.setRaStatus(payingRa, 'paid', actor.id);
+    try {
+      await postApPayment(payment, `Paid RA-${payingRa.raNumber} to ${vendorName(payingRa.vendorId)}`, payingRa.projectId, actor);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Payment recorded, but posting to the ledger failed');
+    }
     audit('payment', 'ra_bill', payingRa.id, `Paid RA-${payingRa.raNumber} — ${formatCurrency(payingRa.netPayable, currency)} (${payment.mode})`);
     setPayingRa(null);
     refresh();
@@ -289,18 +353,24 @@ export default function Accounts() {
   };
 
   // ── Banking & reconciliation ───────────────────────────────────────────────
-  const handleAddBank = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleAddBank = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const fd = new FormData(e.currentTarget);
     const name = (fd.get('name') as string)?.trim();
     if (!name) { toast.error('Account name is required'); return; }
-    const created = create<BankAccount>('bankAccounts', {
-      id: '', tenantId, name,
-      bankName: (fd.get('bankName') as string) || '',
-      accountNumber: (fd.get('accountNumber') as string) || '',
-      openingBalance: Number(fd.get('openingBalance')) || 0,
-      createdAt: new Date().toISOString(),
-    });
+    let created: BankAccount;
+    try {
+      created = await accountsWrites.createBankAccount({
+        tenantId, name,
+        bankName: (fd.get('bankName') as string) || '',
+        accountNumber: (fd.get('accountNumber') as string) || '',
+        openingBalance: Number(fd.get('openingBalance')) || 0,
+        createdAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not add the bank account');
+      return;
+    }
     audit('create', 'bank_account', created.id, `Added bank account "${name}"`);
     setBankId(created.id);
     setShowAddBank(false);
@@ -308,21 +378,26 @@ export default function Accounts() {
     toast.success('Bank account added');
   };
 
-  const handleAddTxn = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleAddTxn = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (!activeBank) return;
     const fd = new FormData(e.currentTarget);
     const amount = Number(fd.get('amount'));
     if (!(amount > 0)) { toast.error('Amount is required'); return; }
-    create<BankTransaction>('bankTransactions', {
-      id: '', tenantId, bankAccountId: activeBank.id,
-      date: (fd.get('date') as string) || new Date().toISOString().slice(0, 10),
-      description: (fd.get('description') as string) || 'Manual entry',
-      amount,
-      type: (fd.get('type') as 'debit' | 'credit') || 'debit',
-      reconciled: false,
-      createdAt: new Date().toISOString(),
-    });
+    try {
+      await accountsWrites.createBankTxn({
+        tenantId, bankAccountId: activeBank.id,
+        date: (fd.get('date') as string) || new Date().toISOString().slice(0, 10),
+        description: (fd.get('description') as string) || 'Manual entry',
+        amount,
+        type: (fd.get('type') as 'debit' | 'credit') || 'debit',
+        reconciled: false,
+        createdAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not add the statement line');
+      return;
+    }
     setShowAddTxn(false);
     refresh();
     toast.success('Statement line added');
@@ -339,24 +414,34 @@ export default function Accounts() {
         toast.error('CSV must have date, description, amount, type columns — download the template');
         return;
       }
-      let imported = 0, skipped = 0;
-      lines.slice(1).forEach(line => {
-        const cells = parseCsvLine(line);
-        const amount = Number(cells[col('amount')]);
-        const type = cells[col('type')].toLowerCase();
-        if (!(amount > 0) || (type !== 'debit' && type !== 'credit')) { skipped++; return; }
-        create<BankTransaction>('bankTransactions', {
-          id: '', tenantId, bankAccountId: activeBank.id,
-          date: cells[col('date')] || new Date().toISOString().slice(0, 10),
-          description: col('description') >= 0 ? cells[col('description')] : '',
-          amount, type: type as 'debit' | 'credit',
-          reconciled: false, createdAt: new Date().toISOString(),
-        });
-        imported++;
+      let imported = 0, skipped = 0, failed = 0;
+      // Sequential, not Promise.all: an import is dozens of rows and the API
+      // rate-limits bursts. A row that fails is counted, not fatal — a partial
+      // import the user can see is better than losing the whole file.
+      const run = async () => {
+        for (const line of lines.slice(1)) {
+          const cells = parseCsvLine(line);
+          const amount = Number(cells[col('amount')]);
+          const type = cells[col('type')].toLowerCase();
+          if (!(amount > 0) || (type !== 'debit' && type !== 'credit')) { skipped++; continue; }
+          try {
+            await accountsWrites.createBankTxn({
+              tenantId, bankAccountId: activeBank.id,
+              date: cells[col('date')] || new Date().toISOString().slice(0, 10),
+              description: col('description') >= 0 ? cells[col('description')] : '',
+              amount, type: type as 'debit' | 'credit',
+              reconciled: false, createdAt: new Date().toISOString(),
+            });
+            imported++;
+          } catch { failed++; }
+        }
+      };
+      return run().then(() => {
+        audit('create', 'bank_statement', activeBank.id, `Imported ${imported} statement line(s) into ${activeBank.name}`);
+        refresh();
+        if (failed) toast.error(`${failed} line${failed === 1 ? '' : 's'} could not be saved`);
+        toast.success(`${imported} line${imported === 1 ? '' : 's'} imported${skipped ? `, ${skipped} skipped` : ''}`);
       });
-      audit('create', 'bank_statement', activeBank.id, `Imported ${imported} statement line(s) into ${activeBank.name}`);
-      refresh();
-      toast.success(`${imported} line${imported === 1 ? '' : 's'} imported${skipped ? `, ${skipped} skipped` : ''}`);
     }).catch(() => toast.error('Could not read that file'));
   };
 
@@ -386,8 +471,13 @@ export default function Accounts() {
     ).slice(0, 8);
   };
 
-  const confirmMatch = (txn: BankTransaction, je: JournalEntry) => {
-    update<BankTransaction>('bankTransactions', txn.id, { reconciled: true, matchedJournalEntryId: je.id });
+  const confirmMatch = async (txn: BankTransaction, je: JournalEntry) => {
+    try {
+      await accountsWrites.reconcileTxn(txn, je.id);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not save the reconciliation');
+      return;
+    }
     audit('update', 'bank_transaction', txn.id, `Reconciled "${txn.description.slice(0, 40)}" against JE: ${je.narration.slice(0, 40)}`);
     setMatchingTxn(null);
     refresh();
@@ -402,7 +492,7 @@ export default function Accounts() {
   const unreconciledCount = bankTxns.filter(t => !t.reconciled).length;
 
   // ── Loans ──────────────────────────────────────────────────────────────────
-  const handleAddLoan = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleAddLoan = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const fd = new FormData(e.currentTarget);
     const lenderName = (fd.get('lenderName') as string)?.trim();
@@ -411,19 +501,29 @@ export default function Accounts() {
     const tenure = Number(fd.get('tenure'));
     if (!lenderName || !(principal > 0) || !(tenure > 0)) { toast.error('Lender, principal and tenure are required'); return; }
     const startDate = (fd.get('startDate') as string) || new Date().toISOString().slice(0, 10);
-    const created = create<Loan>('loans', {
-      id: '', tenantId,
-      projectId: (fd.get('projectId') as string) || undefined,
-      lenderName,
-      loanType: (fd.get('loanType') as LoanType) || 'term_loan',
-      principal, interestRatePct: rate, tenureMonths: tenure,
-      tdsPct: Number(fd.get('tdsPct')) || 0,
-      startDate,
-      schedule: buildLoanSchedule(principal, rate, tenure, Number(fd.get('tdsPct')) || 0, startDate),
-      status: 'active',
-      createdAt: new Date().toISOString(),
-    });
-    postLoanDisbursed(created, actor);
+    let created: Loan;
+    try {
+      created = await accountsWrites.createLoan({
+        tenantId,
+        projectId: (fd.get('projectId') as string) || undefined,
+        lenderName,
+        loanType: (fd.get('loanType') as LoanType) || 'term_loan',
+        principal, interestRatePct: rate, tenureMonths: tenure,
+        tdsPct: Number(fd.get('tdsPct')) || 0,
+        startDate,
+        schedule: buildLoanSchedule(principal, rate, tenure, Number(fd.get('tdsPct')) || 0, startDate),
+        status: 'active',
+        createdAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not record the loan');
+      return;
+    }
+    try {
+      await postLoanDisbursed(created, actor);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Loan recorded, but posting to the ledger failed');
+    }
     audit('create', 'loan', created.id, `Loan from ${lenderName} — ${formatCurrency(principal, currency)} at ${rate}% for ${tenure} months`);
     setShowAddLoan(false);
     setOpenLoanId(created.id);
@@ -431,7 +531,7 @@ export default function Accounts() {
     toast.success('Loan recorded — disbursement posted to the ledger');
   };
 
-  const payInstallment = (loan: Loan, number: number) => {
+  const payInstallment = async (loan: Loan, number: number) => {
     const inst = loan.schedule.find(i => i.number === number);
     if (!inst || inst.status === 'paid') return;
     const firstPending = loan.schedule.find(i => i.status === 'pending');
@@ -439,10 +539,19 @@ export default function Accounts() {
       toast.error(`EMI #${firstPending.number} is due first — repayments post in order`);
       return;
     }
-    const schedule = loan.schedule.map(i => i.number === number ? { ...i, status: 'paid' as const, paidAt: new Date().toISOString() } : i);
+    let schedule: LoanInstallment[];
+    try {
+      schedule = await accountsWrites.payLoanInstallment(loan, number);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not record the EMI');
+      return;
+    }
     const allPaid = schedule.every(i => i.status === 'paid');
-    update<Loan>('loans', loan.id, { schedule, status: allPaid ? 'closed' : 'active' });
-    postLoanRepayment(loan, inst, actor);
+    try {
+      await postLoanRepayment(loan, inst, actor);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'EMI recorded, but posting to the ledger failed');
+    }
     audit('payment', 'loan', loan.id, `Paid EMI #${inst.number} to ${loan.lenderName} — ${formatCurrency(inst.principal + inst.interest - inst.tds, currency)} net`);
     refresh();
     toast.success(allPaid ? 'Final EMI paid — loan closed' : `EMI #${inst.number} paid and posted`);

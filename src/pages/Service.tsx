@@ -1,7 +1,9 @@
 import { useState, useMemo, useEffect } from 'react';
 import { Wrench, Plus, Search, Filter, Clock, AlertCircle, CheckCircle2, User, MapPin, X, Trash2 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { getByTenant, create, update, remove } from '../services/db';
+import { getByTenant } from '../services/db';
+import { isApiEnabled, apiGetTickets } from '../services/apiClient';
+import { createTicket, patchTicket, deleteTicket } from '../services/serviceWrites';
 import { useTenantUsers } from '../hooks/useTenantUsers';
 import { localeFor } from '../utils/format';
 import type { Ticket, TicketPriority, TicketStatus, Project, Lead } from '../types';
@@ -23,8 +25,12 @@ const statusColors: Record<TicketStatus, string> = {
 const ticketCategories = ['Defect', 'Request', 'Maintenance', 'Handover', 'Documentation', 'Other'];
 
 export default function Service() {
-  const { tenant } = useAuth();
+  const { tenant, hasPermission } = useAuth();
   const tenantId = tenant?.id || '';
+  // Service was the one page with no write gate — any viewer could create,
+  // reassign, or delete tickets. Mirror the sibling pages (Campaigns/Documents)
+  // and gate every mutation on manage_service, both in the handlers and the UI.
+  const canManage = hasPermission('manage_service');
   const appLocale = localeFor(tenant?.currency);
   const [refreshKey, setRefreshKey] = useState(0);
   const refresh = () => setRefreshKey(k => k + 1);
@@ -34,11 +40,28 @@ export default function Service() {
   const [showAdd, setShowAdd] = useState(false);
   const [selectedTicket, setSelectedTicket] = useState<Ticket | null>(null);
 
+  // Feature flag: with an API URL configured, tickets are read from the Fastify
+  // backend (RLS-scoped). Falls back to localStorage on any API failure so the
+  // page never goes blank. Flag off → identical behavior to before.
+  const [apiTickets, setApiTickets] = useState<Ticket[] | null>(null);
+  useEffect(() => {
+    if (!isApiEnabled()) { setApiTickets(null); return; }
+    let cancelled = false;
+    apiGetTickets()
+      .then(rows => { if (!cancelled) setApiTickets(rows); })
+      .catch(() => {
+        if (!cancelled) {
+          setApiTickets(null);
+          toast.error('API unreachable — showing local data', { id: 'api-fallback' });
+        }
+      });
+    return () => { cancelled = true; };
+  }, [tenantId, refreshKey]);
+
   const tickets = useMemo(
-    () => getByTenant<Ticket>('tickets', tenantId).sort((a, b) =>
-      new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-    ),
-    [tenantId, refreshKey]
+    () => (apiTickets ?? getByTenant<Ticket>('tickets', tenantId))
+      .slice().sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
+    [apiTickets, tenantId, refreshKey]
   );
 
   // Deep linking: listen to search query focus events
@@ -68,8 +91,9 @@ export default function Service() {
 
   const getUserName = (id: string) => users.find(u => u.id === id)?.name || 'Unassigned';
 
-  const handleAdd = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleAdd = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
+    if (!canManage) { toast.error("You don't have permission to manage service tickets."); return; }
     const form = e.currentTarget;
     const formData = new FormData(form);
     const title = formData.get('title') as string;
@@ -81,30 +105,47 @@ export default function Service() {
     const matchedLead = getByTenant<Lead>('leads', tenantId)
       .find(l => l.name.trim().toLowerCase() === customer.trim().toLowerCase());
     const activeStaff = users.filter(u => u.active && u.role !== 'super_admin');
-    create<Ticket>('tickets', {
-      id: '', tenantId, title, customer,
-      leadId: matchedLead?.id,
-      project: (formData.get('project') as string) || matchedLead?.project || 'General',
-      category: (formData.get('category') as string) || 'Other',
-      priority: (formData.get('priority') as TicketPriority) || 'medium',
-      status: 'open',
-      assignedTo: (formData.get('assignedTo') as string) || activeStaff[0]?.id || '',
-      createdAt: new Date().toISOString(),
-    });
+    try {
+      await createTicket({
+        tenantId, title, customer,
+        leadId: matchedLead?.id,
+        project: (formData.get('project') as string) || matchedLead?.project || 'General',
+        category: (formData.get('category') as string) || 'Other',
+        priority: (formData.get('priority') as TicketPriority) || 'medium',
+        status: 'open',
+        assignedTo: (formData.get('assignedTo') as string) || activeStaff[0]?.id || '',
+        createdAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not create ticket');
+      return;
+    }
     setShowAdd(false);
     refresh();
     toast.success('Ticket created');
   };
 
-  const handleStatusChange = (id: string, status: TicketStatus) => {
-    update<Ticket>('tickets', id, { status });
+  const handleStatusChange = async (id: string, status: TicketStatus) => {
+    if (!canManage) { toast.error("You don't have permission to manage service tickets."); return; }
+    try {
+      await patchTicket(id, { status });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not update ticket');
+      return;
+    }
     refresh();
     toast.success(`Status updated to ${status.replace('_', ' ')}`);
   };
 
-  const handleDelete = (id: string) => {
+  const handleDelete = async (id: string) => {
+    if (!canManage) { toast.error("You don't have permission to manage service tickets."); return; }
     if (!confirm('Delete this ticket?')) return;
-    remove('tickets', id);
+    try {
+      await deleteTicket(id);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not delete ticket');
+      return;
+    }
     setSelectedTicket(null);
     refresh();
     toast.success('Ticket deleted');
@@ -117,9 +158,11 @@ export default function Service() {
           <h2 className="text-2xl font-bold text-zinc-900">Service Tickets</h2>
           <p className="text-sm text-zinc-500 mt-0.5">Track defects, requests, and maintenance issues.</p>
         </div>
-        <button onClick={() => setShowAdd(true)} className="flex items-center gap-2 px-4 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 transition-colors shadow-sm">
-          <Plus className="h-4 w-4" /> New Ticket
-        </button>
+        {canManage && (
+          <button onClick={() => setShowAdd(true)} className="flex items-center gap-2 px-4 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 transition-colors shadow-sm">
+            <Plus className="h-4 w-4" /> New Ticket
+          </button>
+        )}
       </div>
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -207,7 +250,9 @@ export default function Service() {
                 <h3 className="text-lg font-semibold text-zinc-900">{selectedTicket.title}</h3>
               </div>
               <div className="flex gap-1">
-                <button onClick={() => handleDelete(selectedTicket.id)} className="p-1.5 rounded-lg hover:bg-red-50 text-zinc-400 hover:text-red-500"><Trash2 className="h-4 w-4" /></button>
+                {canManage && (
+                  <button onClick={() => handleDelete(selectedTicket.id)} className="p-1.5 rounded-lg hover:bg-red-50 text-zinc-400 hover:text-red-500"><Trash2 className="h-4 w-4" /></button>
+                )}
                 <button onClick={() => setSelectedTicket(null)} className="p-1.5 rounded-lg hover:bg-zinc-100 text-zinc-500"><X className="h-4 w-4" /></button>
               </div>
             </div>
@@ -237,14 +282,21 @@ export default function Service() {
                 <p className="text-sm font-semibold text-zinc-900 mt-0.5">{new Date(selectedTicket.createdAt).toLocaleDateString(appLocale, { day: 'numeric', month: 'short', year: 'numeric' })}</p>
               </div>
             </div>
-            <div className="flex gap-2">
-              {(['open', 'in_progress', 'resolved', 'closed'] as TicketStatus[]).map(s => (
-                <button key={s}
-                  onClick={() => { handleStatusChange(selectedTicket.id, s); setSelectedTicket({ ...selectedTicket, status: s }); }}
-                  className={`flex-1 py-2 rounded-xl text-xs font-semibold capitalize transition-all ${selectedTicket.status === s ? statusColors[s] + ' ring-2 ring-offset-1 ring-current/20' : 'bg-zinc-50 text-zinc-500 hover:bg-zinc-100'}`}
-                >{s.replace('_', ' ')}</button>
-              ))}
-            </div>
+            {canManage ? (
+              <div className="flex gap-2">
+                {(['open', 'in_progress', 'resolved', 'closed'] as TicketStatus[]).map(s => (
+                  <button key={s}
+                    onClick={() => { handleStatusChange(selectedTicket.id, s); setSelectedTicket({ ...selectedTicket, status: s }); }}
+                    className={`flex-1 py-2 rounded-xl text-xs font-semibold capitalize transition-all ${selectedTicket.status === s ? statusColors[s] + ' ring-2 ring-offset-1 ring-current/20' : 'bg-zinc-50 text-zinc-500 hover:bg-zinc-100'}`}
+                  >{s.replace('_', ' ')}</button>
+                ))}
+              </div>
+            ) : (
+              <div className="flex items-center gap-2 text-sm">
+                <span className="text-zinc-500">Status:</span>
+                <span className={`text-xs font-semibold px-2.5 py-1 rounded-full capitalize ${statusColors[selectedTicket.status]}`}>{selectedTicket.status.replace('_', ' ')}</span>
+              </div>
+            )}
           </div>
         </div>
       )}

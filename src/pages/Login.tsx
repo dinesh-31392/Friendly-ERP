@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { Building2, Mail, Lock, User, Phone, ArrowRight, Eye, EyeOff, Shield, Globe, Home, KeyRound, CheckCircle2, X, Clock, AlertCircle, Hash, Sparkles, Copy } from 'lucide-react';
+import { Building2, Mail, Lock, User, Users, Phone, ArrowRight, Eye, EyeOff, Shield, Globe, Home, KeyRound, CheckCircle2, X, Clock, AlertCircle, Hash, Sparkles, Landmark, HardHat, Map } from 'lucide-react';
 import { COUNTRIES } from '../utils/format';
 import { getRecentAccounts, forgetRecentAccount, type RecentAccount } from '../services/authService';
 import { isDemoMode } from '../services/apiClient';
@@ -10,6 +10,16 @@ import InstallAppButton from '../components/InstallAppButton';
 import toast from 'react-hot-toast';
 
 type LoginTab = 'platform' | 'builder' | 'portal';
+
+// The demo workspace's roles, grouped into the departments a real builder runs.
+// Each group renders a one-click login button per role (see the demo panel).
+const DEMO_DEPARTMENTS: { label: string; icon: React.ElementType; roles: string[] }[] = [
+  { label: 'Administration', icon: Shield, roles: ['super_admin', 'builder_admin'] },
+  { label: 'Sales & CRM', icon: Users, roles: ['sales_manager', 'sales_executive', 'telecaller'] },
+  { label: 'Finance & Accounts', icon: Landmark, roles: ['accountant', 'auditor'] },
+  { label: 'Site & Execution', icon: HardHat, roles: ['site_engineer'] },
+  { label: 'Land & Business Dev', icon: Map, roles: ['land_manager', 'bd_manager'] },
+];
 
 export default function Login() {
   const { login, register, resetPassword, needsSetup, setupPlatformAdmin } = useAuth();
@@ -46,15 +56,20 @@ export default function Login() {
     }
   };
 
-  const useDemoAccount = (accEmail: string) => {
-    seedDemoWorkspace();               // ensure the workspace exists
-    setTab(DEMO_ACCOUNTS.find(a => a.email === accEmail)?.tab || 'builder');
-    setIsRegistering(false);
-    setEmail(accEmail);
-    setPassword(DEMO_PASSWORD);
-    if (DEMO_ACCOUNTS.find(a => a.email === accEmail)?.tab === 'builder') setWorkspaceCode(DEMO_WORKSPACE_CODE);
-    setShowDemoAccounts(false);
-    toast('Credentials filled — press Sign In', { icon: '✨' });
+  // One click signs straight in as the chosen department/role — no need to press
+  // Sign In. Seeds the (single) builder workspace first so every role lands in
+  // the same populated tenant.
+  const loginAsDemoRole = async (accEmail: string) => {
+    setDemoLoading(true);
+    try {
+      seedDemoWorkspace();
+      const result = await login(accEmail, DEMO_PASSWORD);
+      if (!result.success) { toast.error(result.error || 'Could not sign in'); return; }
+      const acc = DEMO_ACCOUNTS.find(a => a.email === accEmail);
+      toast.success(`Signed in as ${acc?.label || 'demo user'}`);
+    } finally {
+      setDemoLoading(false);
+    }
   };
   // Optional workspace code (tenant slug) — spec §4 company-code entry
   const [workspaceCode, setWorkspaceCode] = useState('');
@@ -637,22 +652,39 @@ export default function Login() {
                 {demoLoading ? <span className="h-5 w-5 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : <>Launch Demo Workspace <ArrowRight className="h-4 w-4" /></>}
               </button>
               <button onClick={() => { seedDemoWorkspace(); setShowDemoAccounts(v => !v); }} className="w-full mt-2 text-[11px] font-medium text-indigo-600 hover:text-indigo-700">
-                {showDemoAccounts ? 'Hide role logins' : 'Or sign in as a specific role →'}
+                {showDemoAccounts ? 'Hide department logins' : 'Or sign in by department / role →'}
               </button>
               {showDemoAccounts && (
-                <div className="mt-2 space-y-1">
-                  <p className="text-[10px] text-zinc-400">All passwords <code className="font-mono text-zinc-500">{DEMO_PASSWORD}</code> · workspace code <code className="font-mono text-zinc-500">{DEMO_WORKSPACE_CODE}</code></p>
-                  {DEMO_ACCOUNTS.map(a => (
-                    <button
-                      key={a.email}
-                      onClick={() => useDemoAccount(a.email)}
-                      className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-white border border-zinc-200 hover:border-indigo-300 hover:bg-indigo-50/40 transition-colors text-left"
-                    >
-                      <span className="text-[11px] font-semibold text-zinc-800 w-28 shrink-0">{a.label}</span>
-                      <span className="text-[11px] text-zinc-500 truncate flex-1">{a.email}</span>
-                      <Copy className="h-3 w-3 text-zinc-300" />
-                    </button>
-                  ))}
+                <div className="mt-3 space-y-3">
+                  {DEMO_DEPARTMENTS.map(dept => {
+                    const accts = dept.roles
+                      .map(r => DEMO_ACCOUNTS.find(a => a.role === r))
+                      .filter((a): a is typeof DEMO_ACCOUNTS[number] => !!a);
+                    if (accts.length === 0) return null;
+                    return (
+                      <div key={dept.label}>
+                        <div className="flex items-center gap-1.5 mb-1.5">
+                          <dept.icon className="h-3.5 w-3.5 text-indigo-500 shrink-0" />
+                          <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">{dept.label}</p>
+                        </div>
+                        <div className="space-y-1">
+                          {accts.map(a => (
+                            <button
+                              key={a.email}
+                              onClick={() => loginAsDemoRole(a.email)}
+                              disabled={demoLoading}
+                              className="group w-full flex items-center gap-2 px-2.5 py-2 rounded-lg bg-white border border-zinc-200 hover:border-indigo-300 hover:bg-indigo-50/50 transition-colors text-left disabled:opacity-50"
+                            >
+                              <span className="text-[11px] font-semibold text-zinc-800 flex-1 truncate">{a.label}</span>
+                              <span className="text-[10px] text-zinc-400 truncate hidden sm:block max-w-[9rem]">{a.email}</span>
+                              <ArrowRight className="h-3 w-3 text-zinc-300 group-hover:text-indigo-500 shrink-0" />
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })}
+                  <p className="text-[10px] text-zinc-400 pt-2 border-t border-indigo-100/70">One click signs you straight in · all roles share the demo password <code className="font-mono text-zinc-500">{DEMO_PASSWORD}</code> · workspace <code className="font-mono text-zinc-500">{DEMO_WORKSPACE_CODE}</code></p>
                 </div>
               )}
             </div>

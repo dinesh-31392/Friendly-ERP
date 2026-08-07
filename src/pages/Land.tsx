@@ -1,11 +1,13 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Map, Plus, X, MapPin, Gauge, ArrowRight, AlertTriangle, ShieldCheck,
   FileText, CheckCircle2, Ban, Building2, Calculator, ScrollText,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { getByTenant, create, logAudit } from '../services/db';
+import { getByTenant, logAudit } from '../services/db';
+import { isApiEnabled } from '../services/apiClient';
+import { hydrateLandBd, persistLandLead } from '../services/landBdWrites';
 import {
   computeFeasibility, feasibilityHistory, findDuplicateParcel, qualifyLead,
   rejectLead, convertToProject, addLandDocument, landDocuments, verifyDocument,
@@ -32,6 +34,17 @@ export default function Land() {
 
   const [refreshKey, setRefreshKey] = useState(0);
   const refresh = () => setRefreshKey(k => k + 1);
+
+  // API mode: mirror the server Land/BD slice into the read-cache on mount so
+  // the synchronous folds below render server truth. No-op in demo mode.
+  useEffect(() => {
+    if (!isApiEnabled() || !tenantId) return;
+    let cancelled = false;
+    hydrateLandBd(tenantId)
+      .then(() => { if (!cancelled) refresh(); })
+      .catch(() => toast.error('Could not reach the server — showing locally cached data'));
+    return () => { cancelled = true; };
+  }, [tenantId]);
   const [showAdd, setShowAdd] = useState(false);
   const [selected, setSelected] = useState<LandLead | null>(null);
   const [statusFilter, setStatusFilter] = useState<LandLeadStatus | 'all'>('all');
@@ -53,7 +66,7 @@ export default function Land() {
   // keep the open drawer in step with the store
   const sel = selected ? leads.find(l => l.id === selected.id) ?? null : null;
 
-  const handleAdd = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleAdd = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const fd = new FormData(e.currentTarget);
     const surveyNumber = (fd.get('surveyNumber') as string)?.trim();
@@ -65,8 +78,10 @@ export default function Land() {
     const dup = findDuplicateParcel(tenantId, surveyNumber, city);
     if (dup && !confirm(`A live parcel on survey ${surveyNumber} in ${city} already exists ("${dup.ownerName}"). Log this as a possible duplicate anyway?`)) return;
 
-    const created = create<LandLead>('landLeads', {
-      id: '', tenantId,
+    let created: LandLead;
+    try {
+      created = await persistLandLead({
+      tenantId,
       referenceSource: (fd.get('referenceSource') as LandReferenceSource) || 'broker',
       ownerName, ownerContact: (fd.get('ownerContact') as string) || '',
       location: (fd.get('location') as string) || '',
@@ -86,54 +101,71 @@ export default function Land() {
       litigationStatus: (fd.get('litigationStatus') as LitigationStatus) || 'none',
       duplicateOf: dup?.id,
       createdBy: user?.id, createdAt: new Date().toISOString(),
-    });
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not log the parcel');
+      return;
+    }
     logAudit({ tenantId, userId: actor.id, userName: actor.name, action: 'create', entity: 'land_lead', entityId: created.id, details: `Logged land parcel ${surveyNumber} in ${city}` });
     setShowAdd(false);
     refresh();
     toast.success('Land parcel logged');
   };
 
-  const runFeasibility = () => {
+  const runFeasibility = async () => {
     if (!sel) return;
     const cost = Number(feasInputs.costPerSqft);
     const area = Number(feasInputs.saleableArea);
     if (!(cost > 0) || !(area > 0)) { toast.error('Enter a sale rate and saleable area'); return; }
-    computeFeasibility(sel, { costPerSqft: cost, saleableArea: area }, actor);
+    try {
+      await computeFeasibility(sel, { costPerSqft: cost, saleableArea: area }, actor);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not save the feasibility run');
+      return;
+    }
     setFeasInputs({ costPerSqft: '', saleableArea: '' });
     refresh();
     toast.success('Feasibility computed');
   };
 
-  const doQualify = () => {
+  const doQualify = async () => {
     if (!sel) return;
-    const r = qualifyLead(sel, actor);
+    const r = await qualifyLead(sel, actor);
     if (!r.ok) { toast.error(r.error || 'Could not qualify'); return; }
     refresh();
     toast.success('Parcel qualified');
   };
 
-  const doConvert = () => {
+  const doConvert = async () => {
     if (!sel) return;
     if (!confirm('Convert this parcel into a live project? This commits the company to building here.')) return;
-    const r = convertToProject(sel, actor);
+    const r = await convertToProject(sel, actor);
     if (!r.ok) { toast.error(r.error || 'Could not convert'); return; }
     refresh();
     toast.success('Converted to a project');
     if (r.projectId) navigate('/projects');
   };
 
-  const uploadDoc = (docType: LandDocType) => {
+  const uploadDoc = async (docType: LandDocType) => {
     if (!sel) return;
     const name = prompt(`File name for the ${docType.replace('_', ' ')} (demo — records the upload, no file store):`);
     if (!name?.trim()) return;
-    addLandDocument(tenantId, sel.id, docType, name.trim(), actor);
+    try {
+      await addLandDocument(tenantId, sel.id, docType, name.trim(), actor);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not record the document');
+      return;
+    }
     refresh();
     toast.success('Document version recorded');
   };
 
   const inputCls = 'w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20';
   const labelCls = 'block text-xs font-semibold text-zinc-500 uppercase mb-1';
-  const statusMeta = (s: LandLeadStatus) => LAND_STATUSES.find(x => x.id === s)!;
+  // Falls back rather than asserting: an unrecognised status (an older row, or
+  // one written by another client) should render a neutral chip, not crash the page.
+  const statusMeta = (s: LandLeadStatus) =>
+    LAND_STATUSES.find(x => x.id === s) ?? { id: s, label: String(s).replace(/_/g, ' '), color: 'bg-zinc-300' };
   const scoreBadge = (n?: number) => n === undefined ? 'bg-zinc-100 text-zinc-400' : n >= 70 ? 'bg-emerald-50 text-emerald-700' : n >= 45 ? 'bg-amber-50 text-amber-700' : 'bg-red-50 text-red-600';
 
   return (

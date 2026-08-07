@@ -3,7 +3,9 @@ import {
   Handshake, Plus, X, IndianRupee, Users, CheckCircle2, Trash2, Phone, Mail,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { getByTenant, create, update, remove, logAudit } from '../services/db';
+import { getByTenant, update, remove, logAudit } from '../services/db';
+import { isApiEnabled, apiGetBrokers } from '../services/apiClient';
+import { createBroker, patchBroker, deleteBroker } from '../services/brokerWrites';
 import { formatCurrency } from '../utils/format';
 import { invitePartner, portalPath } from '../services/portalService';
 import type { Broker, Commission, PortalUser } from '../types';
@@ -26,9 +28,28 @@ export default function Brokers() {
   const [tab, setTab] = useState<'partners' | 'commissions'>('partners');
   const [showAdd, setShowAdd] = useState(false);
 
+  // Feature flag: with an API URL configured, brokers are read from the Fastify
+  // backend (RLS-scoped; leadsReferred/bookingsClosed derived server-side).
+  // Falls back to localStorage on any API failure. Flag off → unchanged.
+  const [apiBrokers, setApiBrokers] = useState<Broker[] | null>(null);
+  useEffect(() => {
+    if (!isApiEnabled()) { setApiBrokers(null); return; }
+    let cancelled = false;
+    apiGetBrokers()
+      .then(rows => { if (!cancelled) setApiBrokers(rows); })
+      .catch(() => {
+        if (!cancelled) {
+          setApiBrokers(null);
+          toast.error('API unreachable — showing local data', { id: 'api-fallback' });
+        }
+      });
+    return () => { cancelled = true; };
+  }, [tenantId, refreshKey]);
+
   const brokers = useMemo(
-    () => getByTenant<Broker>('brokers', tenantId).sort((a, b) => b.bookingsClosed - a.bookingsClosed),
-    [tenantId, refreshKey]
+    () => (apiBrokers ?? getByTenant<Broker>('brokers', tenantId))
+      .slice().sort((a, b) => b.bookingsClosed - a.bookingsClosed),
+    [apiBrokers, tenantId, refreshKey]
   );
   const commissions = useMemo(
     () => getByTenant<Commission>('commissions', tenantId).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
@@ -58,21 +79,28 @@ export default function Brokers() {
     logAudit({ tenantId, userId: user.id, userName: user.name, action, entity: 'broker', entityId: id, details });
   };
 
-  const handleAdd = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleAdd = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const fd = new FormData(e.currentTarget);
     const name = fd.get('name') as string;
     const phone = fd.get('phone') as string;
     if (!name || !phone) { toast.error('Name and phone are required'); return; }
-    const created = create<Broker>('brokers', {
-      id: '', tenantId, name,
-      firm: (fd.get('firm') as string) || '',
-      phone, email: (fd.get('email') as string) || '',
-      reraId: (fd.get('reraId') as string) || '',
-      commissionRate: Number(fd.get('commissionRate')) || 2,
-      leadsReferred: 0, bookingsClosed: 0,
-      status: 'active', createdAt: new Date().toISOString(),
-    });
+    let created: Broker;
+    try {
+      created = await createBroker({
+        tenantId, name,
+        firm: (fd.get('firm') as string) || '',
+        phone, email: (fd.get('email') as string) || '',
+        reraId: (fd.get('reraId') as string) || '',
+        commissionRate: Number(fd.get('commissionRate')) || 2,
+        // Counters are derived server-side; the demo store ignores these too.
+        leadsReferred: 0, bookingsClosed: 0,
+        status: 'active', createdAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not onboard partner');
+      return;
+    }
     audit('create', created.id, `Onboarded channel partner "${name}"`);
     setShowAdd(false);
     refresh();
@@ -89,20 +117,30 @@ export default function Brokers() {
     else update<PortalUser>('portalUsers', account.id, { active: mode === 'activate' });
   };
 
-  const handleToggleStatus = (b: Broker) => {
+  const handleToggleStatus = async (b: Broker) => {
     if (!canManage) { toast.error('No permission'); return; }
     const next = b.status === 'active' ? 'inactive' : 'active';
-    update<Broker>('brokers', b.id, { status: next });
+    try {
+      await patchBroker(b.id, { status: next });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not update partner');
+      return;
+    }
     syncPartnerPortalAccess(b.id, next === 'active' ? 'activate' : 'deactivate');
     audit('update', b.id, `Partner "${b.name}" set to ${next} (portal access ${next === 'active' ? 'restored' : 'suspended'})`);
     refresh();
     toast.success(`Partner ${next === 'active' ? 'activated' : 'deactivated'}`);
   };
 
-  const handleDelete = (b: Broker) => {
+  const handleDelete = async (b: Broker) => {
     if (!canManage) { toast.error('No permission'); return; }
     if (!confirm(`Remove partner "${b.name}"? Their portal login will be revoked; commission history is kept.`)) return;
-    remove('brokers', b.id);
+    try {
+      await deleteBroker(b.id);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not remove partner');
+      return;
+    }
     syncPartnerPortalAccess(b.id, 'revoke');
     audit('delete', b.id, `Removed channel partner "${b.name}" and revoked portal access`);
     refresh();
@@ -184,11 +222,17 @@ export default function Brokers() {
               {canManage && (
                 <div className="flex gap-2 pt-2 border-t border-zinc-100">
                   <button
-                    onClick={() => {
+                    onClick={async () => {
                       if (!b.email) { toast.error('Add an email for this partner first'); return; }
                       if (b.status !== 'active') { toast.error('Activate this partner before granting portal access'); return; }
                       if (!user || !tenant) return;
-                      const creds = invitePartner(tenantId, b, { id: user.id, name: user.name });
+                      let creds;
+                      try {
+                        creds = await invitePartner(tenantId, b, { id: user.id, name: user.name });
+                      } catch (err) {
+                        toast.error(err instanceof Error ? err.message : 'Could not grant portal access');
+                        return;
+                      }
                       const shareText = `Your ${tenant.name} partner portal access:\n${window.location.origin}${portalPath(tenant)}\nEmail: ${creds.email}\nPassword: ${creds.password}`;
                       navigator.clipboard?.writeText(shareText).catch(() => {});
                       toast.success(

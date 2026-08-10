@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { platformPool, withTenantContext } from '../db.js';
+import { enqueueAutoReply } from '../autoReply.js';
 
 /**
  * PUBLIC, unauthenticated endpoints for the website chatbot a builder embeds on
@@ -194,6 +195,12 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
           ],
         );
 
+        // The visitor just handed us their number through our own widget, so
+        // an immediate acknowledgement is expected — still queued and paced.
+        await enqueueAutoReply(db, {
+          leadId: rows[0].id, trigger: 'new_lead', phone: req.body.phone,
+          leadName: req.body.name, project: projectName,
+        }).catch(() => { /* never fail the capture */ });
         reply.code(201); return { ok: true, leadId: rows[0].id, stage, status: q?.status ?? null };
       });
     },

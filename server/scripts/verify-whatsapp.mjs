@@ -77,6 +77,7 @@ await admin.query('UPDATE users SET password_hash=$1, active=true WHERE email = 
 const MARK = 'WAE';
 async function cleanup() {
   await admin.query(`DELETE FROM lead_activities WHERE lead_id IN (SELECT id FROM leads WHERE name LIKE '${MARK}%')`);
+  await admin.query(`DELETE FROM whatsapp_outbox WHERE lead_id IN (SELECT id FROM leads WHERE name LIKE '${MARK}%')`);
   await admin.query(`DELETE FROM leads WHERE name LIKE '${MARK}%'`);
   await admin.query(`DELETE FROM whatsapp_user_sessions WHERE tenant_id = $1`, [PLATFORM]);
   // Reset the tenant gateway config so the "unconfigured → 503" assertion is
@@ -216,9 +217,19 @@ const mediaLog = (await admin.query(
   `SELECT notes FROM lead_activities WHERE lead_id=$1 AND type='whatsapp' ORDER BY created_at DESC LIMIT 1`, [lead.id])).rows[0];
 ok('attachment logged as a descriptor on the timeline',
   mediaLog?.notes === '[sent via my WhatsApp] 📷 floorplan.png — 2 BHK layout', mediaLog?.notes);
-const tooBig = await call(adminTok, 'POST', '/api/whatsapp/send-media', {
-  to: '919876511122', mediatype: 'image', mimetype: 'image/png', base64: 'x'.repeat(15 * 1024 * 1024) });
-ok('oversized attachment rejected', tooBig.status === 400 || tooBig.status === 413, `${tooBig.status}`);
+// Fastify enforces bodyLimit by ABORTING the stream, so on Windows the client
+// often sees a connection reset instead of a status. Either way the payload was
+// refused — that is what this asserts.
+let tooBigOutcome;
+try {
+  const r = await call(adminTok, 'POST', '/api/whatsapp/send-media', {
+    to: '919876511122', mediatype: 'image', mimetype: 'image/png', base64: 'x'.repeat(15 * 1024 * 1024) });
+  tooBigOutcome = r.status;
+} catch {
+  tooBigOutcome = 'connection reset';
+}
+ok('oversized attachment refused',
+  tooBigOutcome === 400 || tooBigOutcome === 413 || tooBigOutcome === 'connection reset', String(tooBigOutcome));
 
 // inbound media descriptors — a caption-less photo used to be dropped entirely
 console.log('\n=== INBOUND MEDIA DESCRIPTORS ===');
@@ -271,6 +282,88 @@ const emptyLead = (await admin.query(
    VALUES ($1, '${MARK} Silent Lead', '919999000011', 'Direct', 'new', 'warm', now()) RETURNING id`, [PLATFORM])).rows[0];
 const inbox3 = (await call(adminTok, 'GET', '/api/whatsapp/conversations')).body?.conversations ?? [];
 ok('leads with no chat history are excluded', !inbox3.some(c => c.leadId === emptyLead.id));
+
+// ── auto-reply: the safety rules are the feature ────────────────────────────
+console.log('\n=== AUTO-REPLY ===');
+const cfgOn = await call(adminTok, 'PUT', '/api/whatsapp/instance', {
+  provider: 'evolution', autoNewLeadEnabled: true, autoInboundEnabled: true,
+  autoNewLeadTemplate: 'Hi {{name}}, this is {{agent}} from {{company}}.',
+  autoMinDelaySeconds: 0, autoMaxDelaySeconds: 0,   // no wait, so the test can drain
+  autoDailyCap: 2, autoQuietFrom: 0, autoQuietTo: 0,
+});
+ok('auto-reply settings persist', cfgOn.status === 200 && cfgOn.body?.instance?.autoNewLeadEnabled === true
+  && cfgOn.body?.instance?.autoDailyCap === 2, JSON.stringify(cfgOn.body?.instance)?.slice(0, 160));
+
+// a brand-new lead from the ERP queues exactly one greeting
+const newLead = await call(adminTok, 'POST', '/api/leads', { name: `${MARK} Auto One`, phone: '919876100001', source: 'Direct' });
+const autoLeadId = newLead.body?.lead?.id;
+ok('lead created for the auto-reply test', newLead.status === 201 && !!autoLeadId, `${newLead.status}`);
+const q1 = (await admin.query(`SELECT * FROM whatsapp_outbox WHERE lead_id=$1`, [autoLeadId])).rows;
+ok('new lead queues one greeting', q1.length === 1 && q1[0].trigger === 'new_lead' && q1[0].status === 'pending', `n=${q1.length}`);
+// {{name}} renders the lead's FIRST word; this fixture is '${MARK} Auto One'.
+ok('template renders {{name}}, {{agent}} and {{company}}',
+  /^Hi WAE, this is .+ from .+.$/.test(q1[0]?.body ?? ''), q1[0]?.body);
+ok('queued against a CONNECTED rep', !!q1[0]?.user_id);
+
+// re-importing the same lead must never re-greet — the UNIQUE key is the guard
+await admin.query(
+  `INSERT INTO whatsapp_outbox (tenant_id, lead_id, user_id, trigger, phone, body, send_after)
+   VALUES ($1,$2,$3,'new_lead','919876100001','dupe', now())
+   ON CONFLICT (tenant_id, lead_id, trigger) DO NOTHING`,
+  [PLATFORM, autoLeadId, q1[0].user_id]);
+ok('a lead can never be auto-greeted twice',
+  (await admin.query(`SELECT count(*)::int n FROM whatsapp_outbox WHERE lead_id=$1 AND trigger='new_lead'`, [autoLeadId])).rows[0].n === 1);
+
+// draining actually sends it, through the rep's own instance
+const beforeSends = calls.sendText.length;
+const drain1 = await call(adminTok, 'GET', '/api/whatsapp/auto-reply/queue');
+ok('queue endpoint drains and reports', drain1.status === 200 && Array.isArray(drain1.body?.queue), `${drain1.status}`);
+ok('the greeting actually went out', calls.sendText.length === beforeSends + 1, `sends ${beforeSends} → ${calls.sendText.length}`);
+const sentRow = (await admin.query(`SELECT status FROM whatsapp_outbox WHERE lead_id=$1`, [autoLeadId])).rows[0];
+ok('outbox row marked sent', sentRow?.status === 'sent', sentRow?.status);
+ok('the automated message is on the lead timeline',
+  (await admin.query(`SELECT count(*)::int n FROM lead_activities WHERE lead_id=$1 AND type='whatsapp'`, [autoLeadId])).rows[0].n === 1);
+
+// a human replying first cancels the pending automation
+const lead2 = await call(adminTok, 'POST', '/api/leads', { name: `${MARK} Auto Two`, phone: '919876100002', source: 'Direct' });
+const lead2Id = lead2.body?.lead?.id;
+await call(adminTok, 'POST', '/api/whatsapp/send', { to: '919876100002', body: 'personal note first', leadId: lead2Id });
+await call(adminTok, 'GET', '/api/whatsapp/auto-reply/queue');
+const skipped = (await admin.query(`SELECT status, last_error FROM whatsapp_outbox WHERE lead_id=$1`, [lead2Id])).rows[0];
+ok('a human reply cancels the queued automation', skipped?.status === 'skipped' && /human replied/.test(skipped?.last_error ?? ''),
+  JSON.stringify(skipped));
+
+// the daily cap stops runaway first-contacts
+await call(adminTok, 'PUT', '/api/whatsapp/instance', { provider: 'evolution', autoDailyCap: 1 });
+const lead3 = await call(adminTok, 'POST', '/api/leads', { name: `${MARK} Auto Three`, phone: '919876100003', source: 'Direct' });
+const lead3Id = lead3.body?.lead?.id;
+await call(adminTok, 'GET', '/api/whatsapp/auto-reply/queue');
+await call(adminTok, 'GET', '/api/whatsapp/auto-reply/queue');
+const capped = (await admin.query(`SELECT status, last_error FROM whatsapp_outbox WHERE lead_id=$1`, [lead3Id])).rows[0];
+ok('daily cap blocks further automated first-contacts',
+  capped?.status === 'skipped' && /daily cap/.test(capped?.last_error ?? ''), JSON.stringify(capped));
+
+// quiet hours push the send out rather than firing at night
+await call(adminTok, 'PUT', '/api/whatsapp/instance', { provider: 'evolution', autoQuietFrom: 0, autoQuietTo: 23, autoDailyCap: 50 });
+const lead4 = await call(adminTok, 'POST', '/api/leads', { name: `${MARK} Auto Four`, phone: '919876100004', source: 'Direct' });
+const q4 = (await admin.query(`SELECT send_after FROM whatsapp_outbox WHERE lead_id=$1`, [lead4.body?.lead?.id])).rows[0];
+ok('quiet hours defer the send instead of firing', !!q4 && new Date(q4.send_after) > new Date(Date.now() + 60_000),
+  String(q4?.send_after));
+
+// a queued message can be cancelled by a human before it goes
+const pend = (await admin.query(`SELECT id FROM whatsapp_outbox WHERE lead_id=$1 AND status='pending'`, [lead4.body?.lead?.id])).rows[0];
+// via call() so it sends '{}' — a bodyless DELETE with a json content-type is
+// rejected by Fastify before the route is reached.
+const cancel = await call(adminTok, 'DELETE', `/api/whatsapp/auto-reply/queue/${pend?.id}`);
+ok('a pending automated message can be cancelled', !!pend && cancel.status === 200, `${cancel.status} id=${pend?.id}`);
+
+// disabled = nothing queued at all
+await call(adminTok, 'PUT', '/api/whatsapp/instance', { provider: 'evolution', autoNewLeadEnabled: false });
+const lead5 = await call(adminTok, 'POST', '/api/leads', { name: `${MARK} Auto Five`, phone: '919876100005', source: 'Direct' });
+ok('disabled auto-reply queues nothing',
+  (await admin.query(`SELECT count(*)::int n FROM whatsapp_outbox WHERE lead_id=$1`, [lead5.body?.lead?.id])).rows[0].n === 0);
+await admin.query(`DELETE FROM whatsapp_outbox WHERE tenant_id=$1`, [PLATFORM]);
+await call(adminTok, 'PUT', '/api/whatsapp/instance', { provider: 'evolution', autoInboundEnabled: false, autoQuietFrom: 21, autoQuietTo: 9 });
 
 // ── chat privacy: one rep must never see another's conversations ────────────
 console.log('\n=== CHAT PRIVACY (per-user isolation) ===');

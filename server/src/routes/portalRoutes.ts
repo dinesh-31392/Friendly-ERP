@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { withTenantContext, platformPool } from '../db.js';
 import { requireAuth, hashPassword, verifyPassword, signToken, verifyToken } from '../auth.js';
+import { enqueueAutoReply } from '../autoReply.js';
 
 /**
  * Customer / channel-partner portal — a SEPARATE auth realm from staff.
@@ -306,6 +307,10 @@ export async function portalRoutes(app: FastifyInstance): Promise<void> {
            RETURNING id, name, phone, project, stage, budget, created_at`,
           [req.body.name, req.body.phone, req.body.email || null, br[0].name, br[0].id, project, req.body.budget ?? 0]);
         const l = rows[0];
+        await enqueueAutoReply(db, {
+          leadId: l.id, trigger: 'new_lead', phone: l.phone,
+          leadName: l.name, project: l.project,
+        }).catch(() => { /* never fail the referral */ });
         reply.code(201);
         return { lead: { id: l.id, name: l.name, phone: l.phone, project: l.project, stage: l.stage, budget: Number(l.budget ?? 0), createdAt: l.created_at } };
       });

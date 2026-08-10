@@ -632,6 +632,10 @@ export async function apiPostJournalEntry(input: {
 // ── WhatsApp channel (adapter: free click-to-chat / paid Meta Cloud API) ─────
 
 export interface WhatsAppInstance {
+  autoNewLeadEnabled?: boolean; autoNewLeadTemplate?: string;
+  autoInboundEnabled?: boolean; autoInboundTemplate?: string;
+  autoMinDelaySeconds?: number; autoMaxDelaySeconds?: number;
+  autoDailyCap?: number; autoQuietFrom?: number; autoQuietTo?: number;
   chatVisibility?: 'private' | 'team';
   retentionDays?: number | null;
   provider: 'click_to_chat' | 'meta_cloud_waba';
@@ -655,6 +659,10 @@ export async function apiSaveWhatsAppInstance(input: {
   phoneNumberId?: string; accessToken?: string; displayPhone?: string;
   evolutionUrl?: string; evolutionApiKey?: string;
   chatVisibility?: 'private' | 'team'; retentionDays?: number | null;
+  autoNewLeadEnabled?: boolean; autoNewLeadTemplate?: string;
+  autoInboundEnabled?: boolean; autoInboundTemplate?: string;
+  autoMinDelaySeconds?: number; autoMaxDelaySeconds?: number;
+  autoDailyCap?: number; autoQuietFrom?: number; autoQuietTo?: number;
 }): Promise<WhatsAppInstance> {
   const res = await request<{ instance: WhatsAppInstance }>('/api/whatsapp/instance', { method: 'PUT', body: JSON.stringify(input) });
   return res.instance;
@@ -734,6 +742,20 @@ export async function apiWhatsappExport(
 
 export async function apiWhatsappDeleteChats(input: { leadId?: string; olderThanDays?: number }): Promise<{ deleted: number }> {
   return request('/api/whatsapp/storage', { method: 'DELETE', body: JSON.stringify(input) });
+}
+
+export interface WhatsAppQueueItem {
+  id: string; trigger: 'new_lead' | 'inbound';
+  status: 'pending' | 'sent' | 'failed' | 'skipped';
+  leadName: string; phone: string; body: string;
+  sendAfter: string; sentAt?: string | null; error?: string | null;
+}
+/** Reading the queue also drains it — there is no scheduler in this stack. */
+export async function apiWhatsappQueue(): Promise<WhatsAppQueueItem[]> {
+  return (await request<{ queue: WhatsAppQueueItem[] }>('/api/whatsapp/auto-reply/queue')).queue;
+}
+export async function apiWhatsappCancelQueued(id: string): Promise<void> {
+  await request(`/api/whatsapp/auto-reply/queue/${id}`, { method: 'DELETE', body: JSON.stringify({}) });
 }
 
 /** One inbox row per lead with WhatsApp history, newest first. */

@@ -2,15 +2,34 @@ import type { FastifyInstance } from 'fastify';
 import { randomBytes } from 'node:crypto';
 import { withTenantContext, platformPool } from '../db.js';
 import { requireAuth } from '../auth.js';
+import { enqueueAutoReply, drainOutbox } from '../autoReply.js';
 import { resolveGateway, ensureInstance, requestQr, connectionStatus, logoutInstance, sendWhatsAppMessage, sendWhatsAppMedia, type MediaKind } from '../evolution.js';
 
 const PROVIDERS = ['click_to_chat', 'meta_cloud_waba', 'evolution'] as const;
+
+// Mirrors the column defaults in 027 — needed because an INSERT that passes an
+// explicit NULL overrides the DB default and would violate NOT NULL.
+const DEFAULT_NEW_LEAD_TEMPLATE =
+  "Hi {{name}}, thanks for your enquiry with {{company}}. I'm {{agent}} and I'll help you personally — when is a good time to talk?";
+const DEFAULT_INBOUND_TEMPLATE =
+  "Thanks for your message! I've received it and will reply personally very shortly.";
 const GRAPH_VERSION = 'v21.0';
 
 /** DB row → the SPA-safe view. Secrets (Meta token, Evolution key) are NEVER
  *  included — the client only learns WHETHER each is set. */
 function toApiInstance(r: Record<string, unknown> | undefined) {
-  if (!r) return { provider: 'click_to_chat', phoneNumberId: '', displayPhone: '', status: 'disconnected', hasToken: false, evolutionUrl: '', hasEvolutionKey: !!process.env.EVOLUTION_API_KEY, chatVisibility: 'private', retentionDays: null };
+  // No row yet (a tenant running on the platform's env gateway). Mirror the
+  // column defaults from 026/027 so the UI shows what would actually apply,
+  // rather than blanks that look like "off" for settings that have values.
+  if (!r) return {
+    provider: 'click_to_chat', phoneNumberId: '', displayPhone: '', status: 'disconnected',
+    hasToken: false, evolutionUrl: '', hasEvolutionKey: !!process.env.EVOLUTION_API_KEY,
+    chatVisibility: 'private', retentionDays: null,
+    autoNewLeadEnabled: false, autoNewLeadTemplate: DEFAULT_NEW_LEAD_TEMPLATE,
+    autoInboundEnabled: false, autoInboundTemplate: DEFAULT_INBOUND_TEMPLATE,
+    autoMinDelaySeconds: 20, autoMaxDelaySeconds: 60,
+    autoDailyCap: 50, autoQuietFrom: 21, autoQuietTo: 9,
+  };
   return {
     provider: r.provider_type,
     phoneNumberId: r.phone_number_id ?? '',
@@ -20,6 +39,15 @@ function toApiInstance(r: Record<string, unknown> | undefined) {
     evolutionUrl: r.evolution_url ?? '',
     chatVisibility: r.chat_visibility ?? 'private',
     retentionDays: r.retention_days ?? null,
+    autoNewLeadEnabled: !!r.auto_new_lead_enabled,
+    autoNewLeadTemplate: r.auto_new_lead_template ?? '',
+    autoInboundEnabled: !!r.auto_inbound_enabled,
+    autoInboundTemplate: r.auto_inbound_template ?? '',
+    autoMinDelaySeconds: Number(r.auto_min_delay_seconds ?? 20),
+    autoMaxDelaySeconds: Number(r.auto_max_delay_seconds ?? 60),
+    autoDailyCap: Number(r.auto_daily_cap ?? 50),
+    autoQuietFrom: Number(r.auto_quiet_from ?? 21),
+    autoQuietTo: Number(r.auto_quiet_to ?? 9),
     hasEvolutionKey: !!(r.evolution_api_key as string) || !!process.env.EVOLUTION_API_KEY,
   };
 }
@@ -84,7 +112,7 @@ function messageText(msg: Record<string, unknown> | undefined): string {
   return '';
 }
 
-interface SaveBody { provider?: string; phoneNumberId?: string; accessToken?: string; displayPhone?: string; evolutionUrl?: string; evolutionApiKey?: string; chatVisibility?: string; retentionDays?: number | null }
+interface SaveBody { provider?: string; phoneNumberId?: string; accessToken?: string; displayPhone?: string; evolutionUrl?: string; evolutionApiKey?: string; chatVisibility?: string; retentionDays?: number | null; autoNewLeadEnabled?: boolean; autoNewLeadTemplate?: string; autoInboundEnabled?: boolean; autoInboundTemplate?: string; autoMinDelaySeconds?: number; autoMaxDelaySeconds?: number; autoDailyCap?: number; autoQuietFrom?: number; autoQuietTo?: number }
 interface SendBody { to: string; body: string; leadId?: string }
 
 /**
@@ -165,6 +193,15 @@ export async function whatsappRoutes(app: FastifyInstance): Promise<void> {
             evolutionApiKey: { type: 'string', maxLength: 300 },
             chatVisibility: { type: 'string', enum: ['private', 'team'] },
             retentionDays: { type: ['integer', 'null'], minimum: 0, maximum: 3650 },
+            autoNewLeadEnabled: { type: 'boolean' },
+            autoNewLeadTemplate: { type: 'string', maxLength: 1000 },
+            autoInboundEnabled: { type: 'boolean' },
+            autoInboundTemplate: { type: 'string', maxLength: 1000 },
+            autoMinDelaySeconds: { type: 'integer', minimum: 0, maximum: 3600 },
+            autoMaxDelaySeconds: { type: 'integer', minimum: 0, maximum: 3600 },
+            autoDailyCap: { type: 'integer', minimum: 0, maximum: 1000 },
+            autoQuietFrom: { type: 'integer', minimum: 0, maximum: 23 },
+            autoQuietTo: { type: 'integer', minimum: 0, maximum: 23 },
           },
         },
       },
@@ -177,14 +214,19 @@ export async function whatsappRoutes(app: FastifyInstance): Promise<void> {
         const provider = req.body.provider ?? 'click_to_chat';
         const envGateway = !!(process.env.EVOLUTION_API_URL && process.env.EVOLUTION_API_KEY);
         const { rows } = await db.query(
-          `INSERT INTO whatsapp_instances (tenant_id, provider_type, phone_number_id, display_phone, access_token, evolution_url, evolution_api_key, connection_status, chat_visibility, retention_days)
+          `INSERT INTO whatsapp_instances (tenant_id, provider_type, phone_number_id, display_phone, access_token, evolution_url, evolution_api_key, connection_status, chat_visibility, retention_days,
+             auto_new_lead_enabled, auto_new_lead_template, auto_inbound_enabled, auto_inbound_template,
+             auto_min_delay_seconds, auto_max_delay_seconds, auto_daily_cap, auto_quiet_from, auto_quiet_to)
            VALUES (app_current_tenant(), $1, COALESCE($2,''), COALESCE($3,''), COALESCE($4,''), COALESCE($5,''), COALESCE($6,''),
                    CASE
                      WHEN $1 = 'meta_cloud_waba' AND COALESCE($2,'') <> '' AND COALESCE($4,'') <> '' THEN 'connected'
                      WHEN $1 = 'evolution' AND ((COALESCE($5,'') <> '' AND COALESCE($6,'') <> '') OR $7) THEN 'connected'
                      ELSE 'disconnected' END,
                    COALESCE($8, 'private'),
-                   CASE WHEN $9 THEN $10::int ELSE NULL END)
+                   CASE WHEN $9 THEN $10::int ELSE NULL END,
+                   COALESCE($11,false), COALESCE(NULLIF($12,''), $20),
+                   COALESCE($13,false), COALESCE(NULLIF($14,''), $21),
+                   COALESCE($15,20), COALESCE($16,60), COALESCE($17,50), COALESCE($18,21), COALESCE($19,9))
            ON CONFLICT (tenant_id) DO UPDATE SET
              provider_type   = EXCLUDED.provider_type,
              phone_number_id = COALESCE(NULLIF($2,''), whatsapp_instances.phone_number_id),
@@ -195,6 +237,15 @@ export async function whatsappRoutes(app: FastifyInstance): Promise<void> {
              evolution_url     = COALESCE(NULLIF($5,''), whatsapp_instances.evolution_url),
              evolution_api_key = COALESCE(NULLIF($6,''), whatsapp_instances.evolution_api_key),
              chat_visibility = COALESCE($8, whatsapp_instances.chat_visibility),
+             auto_new_lead_enabled  = COALESCE($11, whatsapp_instances.auto_new_lead_enabled),
+             auto_new_lead_template = COALESCE(NULLIF($12,''), whatsapp_instances.auto_new_lead_template),
+             auto_inbound_enabled   = COALESCE($13, whatsapp_instances.auto_inbound_enabled),
+             auto_inbound_template  = COALESCE(NULLIF($14,''), whatsapp_instances.auto_inbound_template),
+             auto_min_delay_seconds = COALESCE($15, whatsapp_instances.auto_min_delay_seconds),
+             auto_max_delay_seconds = COALESCE($16, whatsapp_instances.auto_max_delay_seconds),
+             auto_daily_cap         = COALESCE($17, whatsapp_instances.auto_daily_cap),
+             auto_quiet_from        = COALESCE($18, whatsapp_instances.auto_quiet_from),
+             auto_quiet_to          = COALESCE($19, whatsapp_instances.auto_quiet_to),
              retention_days  = CASE WHEN $9 THEN $10::int ELSE whatsapp_instances.retention_days END,
              connection_status = CASE
                WHEN EXCLUDED.provider_type = 'meta_cloud_waba'
@@ -212,7 +263,12 @@ export async function whatsappRoutes(app: FastifyInstance): Promise<void> {
            req.body.evolutionUrl ?? null, req.body.evolutionApiKey ?? null, envGateway,
            req.body.chatVisibility ?? null,
            // retentionDays supports an explicit null ("keep forever") — hence the sentinel
-           'retentionDays' in req.body, req.body.retentionDays ?? null],
+           'retentionDays' in req.body, req.body.retentionDays ?? null,
+           req.body.autoNewLeadEnabled ?? null, req.body.autoNewLeadTemplate ?? null,
+           req.body.autoInboundEnabled ?? null, req.body.autoInboundTemplate ?? null,
+           req.body.autoMinDelaySeconds ?? null, req.body.autoMaxDelaySeconds ?? null,
+           req.body.autoDailyCap ?? null, req.body.autoQuietFrom ?? null, req.body.autoQuietTo ?? null,
+           DEFAULT_NEW_LEAD_TEMPLATE, DEFAULT_INBOUND_TEMPLATE],
         );
         return { instance: toApiInstance(rows[0]) };
       }),
@@ -315,6 +371,8 @@ export async function whatsappRoutes(app: FastifyInstance): Promise<void> {
       // workspace is 'private'.
       const scope = await chatScope(db, req.ctx.userId);
       await applyRetention(db, scope.retentionDays);
+      // No scheduler in this stack — the inbox poll is what moves the queue.
+      await drainOutbox(db).catch(() => { /* never block the inbox on a send */ });
 
       const { rows } = await db.query(
         `SELECT l.id AS lead_id, l.name, l.phone, l.project, l.stage, l.assigned_to,
@@ -351,6 +409,52 @@ export async function whatsappRoutes(app: FastifyInstance): Promise<void> {
         }),
       };
     }),
+  );
+
+  /**
+   * GET /api/whatsapp/auto-reply/queue — what automation is about to do, and
+   * what it recently did. Automated sending should never be invisible: the
+   * whole point of the delay window is that a human can still intervene.
+   * Draining here too means opening this page also moves the queue.
+   */
+  app.get('/api/whatsapp/auto-reply/queue', { preHandler: requireAuth }, async (req, reply) =>
+    withTenantContext(req.ctx, async (db) => {
+      const { rows: [{ allowed }] } = await db.query(`SELECT has_permission('view_messages') AS allowed`);
+      if (!allowed) return reply.code(403).send({ error: 'Missing permission: view_messages' });
+      await drainOutbox(db).catch(() => { /* reporting must not fail on a send */ });
+      const { rows } = await db.query(
+        `SELECT o.id, o.trigger, o.status, o.phone, o.body, o.send_after, o.sent_at, o.last_error,
+                l.name AS lead_name
+           FROM whatsapp_outbox o JOIN leads l ON l.id = o.lead_id
+          ORDER BY (o.status = 'pending') DESC, COALESCE(o.sent_at, o.send_after) DESC
+          LIMIT 50`);
+      return {
+        queue: rows.map(r => ({
+          id: r.id, trigger: r.trigger, status: r.status, leadName: r.lead_name,
+          phone: r.phone, body: r.body, sendAfter: r.send_after, sentAt: r.sent_at, error: r.last_error,
+        })),
+      };
+    }),
+  );
+
+  /** DELETE /api/whatsapp/auto-reply/queue/:id — cancel a queued message
+   *  before it goes out. The delay window exists so this is possible. */
+  app.delete<{ Params: { id: string } }>(
+    '/api/whatsapp/auto-reply/queue/:id',
+    {
+      preHandler: requireAuth,
+      schema: { params: { type: 'object', required: ['id'], properties: { id: { type: 'string', pattern: '^[0-9a-fA-F-]{36}$' } } } },
+    },
+    async (req, reply) =>
+      withTenantContext(req.ctx, async (db) => {
+        const { rows: [{ allowed }] } = await db.query(`SELECT has_permission('send_messages') AS allowed`);
+        if (!allowed) return reply.code(403).send({ error: 'Missing permission: send_messages' });
+        const { rowCount } = await db.query(
+          `UPDATE whatsapp_outbox SET status='skipped', last_error='cancelled by a user'
+            WHERE id=$1 AND status='pending'`, [req.params.id]);
+        if (!rowCount) return reply.code(404).send({ error: 'Nothing pending with that id — it may have already gone out' });
+        return { cancelled: true };
+      }),
   );
 
   // ── Data storage: usage, export, delete, retention ──────────────────────
@@ -740,6 +844,11 @@ export async function whatsappRoutes(app: FastifyInstance): Promise<void> {
               `INSERT INTO lead_activities (tenant_id, lead_id, user_id, type, notes)
                VALUES (app_current_tenant(), $1, $2, 'whatsapp', $3)`,
               [match[0].id, session.user_id, `[${direction}] ${text}`.slice(0, 2000)]);
+            // Only acknowledge messages the CUSTOMER sent — never our own.
+            if (!key.fromMe) {
+              await enqueueAutoReply(db, { leadId: match[0].id, trigger: 'inbound', phone: digits })
+                .catch(() => { /* the webhook must always 200 */ });
+            }
           }
         });
         return { ok: true };

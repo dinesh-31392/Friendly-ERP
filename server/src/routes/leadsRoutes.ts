@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import type pg from 'pg';
 import { withTenantContext } from '../db.js';
 import { requireAuth } from '../auth.js';
+import { enqueueAutoReply } from '../autoReply.js';
 
 interface LeadsQuery {
   stage?: string;
@@ -297,6 +298,12 @@ export async function leadsRoutes(app: FastifyInstance): Promise<void> {
           );
           // The audit row is written by the audit_row_change trigger using
           // app.current_user_id — no application-side logging needed.
+          // Auto-greeting is queued, never sent inline: a lead insert must not
+          // block on a gateway round trip, and the delay has to be durable.
+          await enqueueAutoReply(db, {
+            leadId: rows[0].id, trigger: 'new_lead', phone: rows[0].phone ?? '',
+            leadName: rows[0].name, project: rows[0].project,
+          }).catch(() => { /* auto-reply must never fail a lead create */ });
           reply.code(201); return { lead: toApiLead(rows[0]) };
         });
       } catch (err) {

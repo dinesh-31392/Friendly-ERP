@@ -1,5 +1,6 @@
 import type { PoolClient } from 'pg';
 import { resolveGateway, sendWhatsAppMessage } from './evolution.js';
+import { platformPool, withTenantContext } from './db.js';
 
 /**
  * WhatsApp auto-reply (027).
@@ -194,4 +195,58 @@ export async function drainOutbox(db: PoolClient, limit = 5): Promise<{ sent: nu
     break;
   }
   return { sent, failed, skipped };
+}
+
+/**
+ * Background outbox worker.
+ *
+ * Draining only when someone opened the inbox meant a greeting promised in
+ * "20–60 seconds" could sit until the next morning if nobody was looking —
+ * which is worse than not sending at all, because the customer has moved on.
+ * A queue with a time promise needs something that ticks.
+ *
+ * This is an in-process interval, not a cron: single Node process, no extra
+ * infrastructure. It walks tenants that actually have due rows (via the
+ * platform pool, which is BYPASSRLS) and drains each under its own tenant
+ * context, so RLS still applies to every statement the drain runs.
+ *
+ * Set WHATSAPP_WORKER=off to disable — the page-triggered drains still work.
+ */
+export function startOutboxWorker(log?: { info: (o: unknown, m?: string) => void; error: (o: unknown, m?: string) => void }): NodeJS.Timeout | null {
+  if (process.env.WHATSAPP_WORKER === 'off') return null;
+  const everyMs = Math.max(10_000, Number(process.env.WHATSAPP_WORKER_INTERVAL_MS ?? 30_000));
+  let running = false;   // never overlap ticks — a slow gateway must not stack drains
+
+  const tick = async () => {
+    if (running) return;
+    running = true;
+    try {
+      const { rows } = await platformPool.query(
+        `SELECT DISTINCT tenant_id FROM whatsapp_outbox
+          WHERE status = 'pending' AND send_after <= now() LIMIT 50`);
+      for (const { tenant_id } of rows) {
+        try {
+          const res = await withTenantContext(
+            { tenantId: tenant_id as string, userId: '', ip: '' },
+            (db) => drainOutbox(db),
+          );
+          if (res.sent || res.failed || res.skipped) {
+            log?.info({ tenantId: tenant_id, ...res }, 'whatsapp outbox drained');
+          }
+        } catch (err) {
+          // One tenant's gateway being down must not stall every other tenant.
+          log?.error({ tenantId: tenant_id, err: String(err) }, 'whatsapp outbox drain failed');
+        }
+      }
+    } catch (err) {
+      log?.error({ err: String(err) }, 'whatsapp outbox worker tick failed');
+    } finally {
+      running = false;
+    }
+  };
+
+  const timer = setInterval(tick, everyMs);
+  // Never hold the process open on shutdown.
+  timer.unref?.();
+  return timer;
 }

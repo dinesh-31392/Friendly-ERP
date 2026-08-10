@@ -357,6 +357,26 @@ const pend = (await admin.query(`SELECT id FROM whatsapp_outbox WHERE lead_id=$1
 const cancel = await call(adminTok, 'DELETE', `/api/whatsapp/auto-reply/queue/${pend?.id}`);
 ok('a pending automated message can be cancelled', !!pend && cancel.status === 200, `${cancel.status} id=${pend?.id}`);
 
+// The background worker must send WITHOUT anyone opening a page — that is the
+// whole point of a queue with a time promise.
+await call(adminTok, 'PUT', '/api/whatsapp/instance', {
+  provider: 'evolution', autoDailyCap: 50, autoQuietFrom: 0, autoQuietTo: 0,
+  autoMinDelaySeconds: 0, autoMaxDelaySeconds: 0 });
+const leadW = await call(adminTok, 'POST', '/api/leads', { name: `${MARK} Auto Worker`, phone: '919876100009', source: 'Direct' });
+const leadWId = leadW.body?.lead?.id;
+const sendsBeforeWorker = calls.sendText.length;
+let workerSent = false;
+// The test server runs the worker at its configured interval; poll the DB only,
+// never an endpoint, so nothing here can drain it on our behalf.
+for (let i = 0; i < 20; i++) {
+  const st = (await admin.query(`SELECT status FROM whatsapp_outbox WHERE lead_id=$1`, [leadWId])).rows[0]?.status;
+  if (st === 'sent') { workerSent = true; break; }
+  await new Promise(r => setTimeout(r, 1500));
+}
+ok('background worker sends with no page open',
+  workerSent && calls.sendText.length > sendsBeforeWorker,
+  `sent=${workerSent} sends ${sendsBeforeWorker}→${calls.sendText.length}`);
+
 // disabled = nothing queued at all
 await call(adminTok, 'PUT', '/api/whatsapp/instance', { provider: 'evolution', autoNewLeadEnabled: false });
 const lead5 = await call(adminTok, 'POST', '/api/leads', { name: `${MARK} Auto Five`, phone: '919876100005', source: 'Direct' });

@@ -4,6 +4,7 @@ import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
 import { randomUUID } from 'node:crypto';
 import { env } from './env.js';
+import { startOutboxWorker } from './autoReply.js';
 import { pool, platformPool } from './db.js';
 import { authRoutes } from './routes/authRoutes.js';
 import { leadsRoutes } from './routes/leadsRoutes.js';
@@ -125,3 +126,8 @@ process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
 await app.listen({ port: env.port, host: '0.0.0.0' });
+
+// Queued WhatsApp auto-replies carry a time promise (20-60s), so something has
+// to tick — page-triggered drains alone would leave a greeting waiting until
+// someone happened to open the inbox. WHATSAPP_WORKER=off disables it.
+startOutboxWorker(app.log);

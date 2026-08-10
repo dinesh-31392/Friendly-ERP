@@ -47,6 +47,13 @@ services:
       JWT_SECRET: ${JWT_SECRET:?set in .env}
       PORT: 4000
       CORS_ORIGIN: ${PUBLIC_URL:?set in .env}
+      # WhatsApp gateway. PUBLIC_URL is where the gateway posts webhooks back,
+      # so it must be reachable from the evolution container (same compose
+      # network) and, for a real phone link, from the internet over HTTPS.
+      PUBLIC_URL: ${PUBLIC_URL:?set in .env}
+      EVOLUTION_API_URL: http://evolution:8080
+      EVOLUTION_API_KEY: ${EVOLUTION_API_KEY:?set in .env}
+      WHATSAPP_DEFAULT_CC: ${WHATSAPP_DEFAULT_CC:-91}
     expose:
       - "4000"
 

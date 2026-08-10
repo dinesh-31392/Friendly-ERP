@@ -1,0 +1,63 @@
+# ─── WhatsApp gateway (Evolution API) — production overlay ──────────────────
+# Merged on top of docker-compose.prod.yml so the base stack stays usable for
+# anyone who does not want WhatsApp at all:
+#
+#   docker compose -f docker-compose.prod.yml -f evolution.prod.yml up -d
+#
+# Each sales rep links their OWN number by scanning a QR inside the ERP. The
+# gateway is NOT published to the internet — only the api container reaches it
+# over the compose network. Session data lives in a named volume, so a restart
+# does not force everyone to re-scan.
+#
+# This is an UNOFFICIAL gateway (Baileys). It is appropriate for per-rep
+# conversational messaging; it is NOT the path for bulk campaigns. See
+# SECURITY.md before enabling the new-lead auto-greeting.
+
+services:
+  evolution:
+    image: atendai/evolution-api:v2.3.7
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      SERVER_PORT: 8080
+      SERVER_URL: http://evolution:8080
+      AUTHENTICATION_API_KEY: ${EVOLUTION_API_KEY:?set in .env}
+      DATABASE_ENABLED: "true"
+      DATABASE_PROVIDER: postgresql
+      # Its own database on the same Postgres instance, created by the
+      # evolution-db-init one-shot below.
+      DATABASE_CONNECTION_URI: postgresql://postgres:${POSTGRES_PASSWORD:?set in .env}@db:5432/evolution?schema=public
+      DATABASE_SAVE_DATA_INSTANCE: "true"
+      CACHE_LOCAL_ENABLED: "true"
+      CACHE_REDIS_ENABLED: "false"
+      CONFIG_SESSION_PHONE_CLIENT: Friendly ERP
+      CONFIG_SESSION_PHONE_NAME: Chrome
+    volumes:
+      - evolution_instances:/evolution/instances
+    expose:
+      - "8080"
+
+  # One-shot: create the `evolution` database with EXPLICIT UTF8.
+  # Without it the database inherits the server's default encoding, which on
+  # some hosts is a legacy 8-bit codepage — and then the first emoji in a
+  # message fails the send with a bare "character has no equivalent" error.
+  # (This exact failure cost an afternoon in development.)
+  evolution-db-init:
+    image: postgres:16-alpine
+    profiles: ["tools"]
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >
+        psql -h db -U postgres -tc "SELECT 1 FROM pg_database WHERE datname='evolution'" | grep -q 1 ||
+        psql -h db -U postgres -c "CREATE DATABASE evolution ENCODING 'UTF8' TEMPLATE template0"
+
+volumes:
+  evolution_instances:

@@ -2,6 +2,9 @@
 # Start:  docker compose up -d      Stop:  docker compose down
 # The ERP's API server reaches it at http://localhost:8080; the container
 # reaches the ERP's webhooks at http://host.docker.internal:4000 (PUBLIC_URL).
+# The key is NOT baked into this file — it is read from .env beside it, so the
+# compose file is safe to commit and to share.
+
 services:
   evolution-db:
     image: postgres:15-alpine

@@ -260,3 +260,76 @@ server/migrations/    ← THE DATABASE: full PostgreSQL schema (RLS, RBAC,
 deploy/               ← docker-compose.prod.yml, nginx.conf, env template, this guide
 docs/backend/         ← architecture spec + annotated schema
 ```
+
+---
+
+## Step 10 — WhatsApp (optional)
+
+Each sales rep links **their own** number by scanning a QR inside the ERP.
+Messages then send from that rep's number, and both directions land on the
+lead's timeline automatically.
+
+### 10a — Create the database and start the gateway
+
+```bash
+cd /opt/friendly-crm/deploy
+
+# Add EVOLUTION_API_KEY to .env first (openssl rand -hex 24)
+
+# One-shot: create the gateway's database with explicit UTF8 encoding.
+# Skipping this is the classic failure — the database inherits a legacy
+# codepage and the first emoji in a message kills the send.
+docker compose -f docker-compose.prod.yml -f evolution.prod.yml \
+  run --rm evolution-db-init
+
+# Start everything, gateway included
+docker compose -f docker-compose.prod.yml -f evolution.prod.yml up -d
+```
+
+The gateway is **not** published to the internet — only the API container
+reaches it over the compose network.
+
+### 10b — HTTPS is required
+
+The gateway calls back into the ERP over webhooks using `PUBLIC_URL`. A phone
+will only complete the QR link against a reachable host, so finish **Step 8
+(domain + HTTPS)** before linking. `PUBLIC_URL=http://VPS_IP` is fine for
+testing the ERP itself, but WhatsApp linking wants the real HTTPS origin.
+
+### 10c — Link a number
+
+In the ERP: **Settings → Integrations → My WhatsApp → Link WhatsApp**, then on
+the phone: WhatsApp → Settings → **Linked devices → Link a device** → scan.
+The chip flips to *Connected* by itself. QR codes expire in ~40 seconds; press
+**New QR** if it lapses.
+
+Repeat per rep — each gets an isolated session, and by default **no one can
+read anyone else's conversations** (Settings → Data Storage → Privacy).
+
+### 10d — After a restart
+
+A gateway restart drops the link: Evolution persists the instance status, and
+if it was not `open` at shutdown it logs *"Skipping auto-connect"* and stays
+closed. Chat history is unaffected — it lives in the ERP database, not the
+gateway — but each rep re-scans once. Budget for this in any maintenance
+window.
+
+### 10e — Auto-reply
+
+**Settings → Auto-Reply** has two switches, and the difference matters:
+
+| | Risk | Default |
+|---|---|---|
+| **Reply to incoming messages** | Low — you are answering someone who messaged you | Off, safe to enable |
+| **Greet every new lead** | Higher — an *outbound first contact* to someone who has not messaged you | Off; enable knowingly |
+
+Everything queues with a randomised 20–60s delay, respects quiet hours and a
+per-rep daily cap, and is cancelled automatically if a human replies first.
+Turn on the inbound one first and watch the Queue panel before enabling
+new-lead greetings.
+
+> **Honest limitation.** Evolution is an unofficial gateway. Per-rep
+> conversational use is what it is for. Bulk or unsolicited messaging risks the
+> number being restricted by WhatsApp — that is a platform decision no code
+> here can prevent. For high-volume campaigns use the official Meta Cloud API
+> path, which the ERP also supports (Settings → Integrations).

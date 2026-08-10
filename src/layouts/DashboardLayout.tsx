@@ -9,7 +9,7 @@ import {
 import { useAuth } from '../context/AuthContext';
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { getByTenant } from '../services/db';
-import { isDemoMode } from '../services/apiClient';
+import { isDemoMode, isApiEnabled, apiWhatsappConversations } from '../services/apiClient';
 import { trialDaysLeft, isModuleEnabled } from '../services/planService';
 import { lowStockMaterials } from '../services/procurementService';
 import { filingsDueSoon } from '../services/complianceService';
@@ -175,8 +175,31 @@ export default function DashboardLayout() {
     [tenantId, location.pathname, tenant]
   );
 
+  /**
+   * WhatsApp badge = conversations whose newest message came FROM the customer,
+   * i.e. the ones waiting on a reply. In the live workspace this comes from the
+   * server (scoped by chat privacy, so a rep is only nudged about their own
+   * conversations); in demo mode it falls back to the simulated store's unread
+   * counters, which is all that exists there.
+   */
+  const [waAwaiting, setWaAwaiting] = useState(0);
+  useEffect(() => {
+    if (!isApiEnabled() || !moduleOn('messages')) return;
+    let cancelled = false;
+    const poll = () => apiWhatsappConversations()
+      .then(rows => { if (!cancelled) setWaAwaiting(rows.filter(c => c.awaitingReply).length); })
+      .catch(() => { /* transient — keep the last known count */ });
+    poll();
+    // Lazier than the inbox's own 10s poll: this is a badge, not a live thread.
+    const t = setInterval(poll, 30_000);
+    return () => { cancelled = true; clearInterval(t); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tenantId]);
+
   // Counts only from ENABLED modules (a disabled module must not leak counts)
-  const unreadMessages = moduleOn('messages') ? conversations.reduce((s, c) => s + c.unread, 0) : 0;
+  const unreadMessages = !moduleOn('messages')
+    ? 0
+    : isApiEnabled() ? waAwaiting : conversations.reduce((s, c) => s + c.unread, 0);
   const openTickets = moduleOn('service') ? tickets.filter(t => t.status === 'open').length : 0;
   const pendingTasks = moduleOn('calendar') ? tasks.filter(t => t.status === 'pending' && t.priority === 'hot').length : 0;
   const newLeads = moduleOn('leads') ? leads.filter(l => l.stage === 'new').length : 0;

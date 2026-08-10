@@ -16,7 +16,7 @@ import { telHref, mailtoHref } from '../utils/contact';
 import { whatsappSend } from '../services/whatsappService';
 import { toCsv } from '../utils/csv';
 import { inviteCustomer, portalPath } from '../services/portalService';
-import { isApiEnabled, apiGetLeads, apiWhatsappSession } from '../services/apiClient';
+import { isApiEnabled, apiGetLeads } from '../services/apiClient';
 import { createLead, patchLead, deleteLead as removeLead, patchLeads, deleteLeads } from '../services/leadWrites';
 import { useTenantUsers } from '../hooks/useTenantUsers';
 import DateRangeFilter from '../components/DateRangeFilter';
@@ -118,13 +118,6 @@ export default function Leads() {
   const [chatLead, setChatLead] = useState<Lead | null>(null);
   // Deep link from the WhatsApp inbox: /leads?lead=<id> opens that drawer.
   const [searchParams, setSearchParams] = useSearchParams();
-  // Whether the CALLER has a linked WhatsApp session — decides if the button
-  // opens the chat thread (connected) or keeps the one-shot greeting flow.
-  const [waConnected, setWaConnected] = useState(false);
-  useEffect(() => {
-    if (!isApiEnabled()) return;
-    apiWhatsappSession().then(s => setWaConnected(s.status === 'connected')).catch(() => {});
-  }, []);
   const [filterStage, setFilterStage] = useState<LeadStage | 'all'>('all');
   const [dateRange, setDateRange] = useState<DateRange>(ALL_RANGE);
   const [showAddModal, setShowAddModal] = useState(false);
@@ -1281,7 +1274,13 @@ export default function Leads() {
                     // One inbox for all chat: hand off to Engagement → Messages
                     // with this conversation preselected, rather than opening a
                     // second chat UI inside the drawer.
-                    if (isApiEnabled() && waConnected) { navigate(`/messages?lead=${selectedLead.id}`); return; }
+                    //
+                    // This is NOT gated on the session being live: the history
+                    // is worth reading either way, and the inbox itself explains
+                    // an unlinked number and offers the click-to-chat fallback.
+                    // Gating it here sent the agent to wa.me with no way back to
+                    // the conversation.
+                    if (isApiEnabled()) { navigate(`/messages?lead=${selectedLead.id}`); return; }
                     // Otherwise: the one-shot greeting flow, dispatched through
                     // whichever provider the tenant runs (click-to-chat / Meta).
                     const greeting = `Hi ${selectedLead.name.split(' ')[0]}, this is ${user?.name || 'your advisor'} from ${tenant?.name || 'our team'} regarding ${selectedLead.project}. Is this a good time to chat?`;

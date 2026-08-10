@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { Search, MessageCircle, ArrowLeft, ExternalLink, RefreshCw, PenSquare } from 'lucide-react';
+import { Search, MessageCircle, ArrowLeft, ExternalLink, RefreshCw, PenSquare, AlertTriangle } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
-import { isApiEnabled, apiWhatsappConversations, apiGetLeads, type WhatsAppConversation } from '../services/apiClient';
+import { isApiEnabled, apiWhatsappConversations, apiGetLeads, apiWhatsappSession, type WhatsAppConversation } from '../services/apiClient';
 import { inboxStamp } from '../services/whatsappThread';
 import WhatsAppThread from './WhatsAppThread';
 import NewChatPicker from './NewChatPicker';
@@ -27,6 +27,16 @@ export default function WhatsAppInbox({ tenantId, deepLinkLeadId, onDeepLinkCons
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [error, setError] = useState('');
+
+  // Reading history never requires a live session, but SENDING does — so the
+  // inbox says so up front instead of letting each message fail one by one.
+  const [linked, setLinked] = useState(true);
+  useEffect(() => {
+    if (!isApiEnabled()) return;
+    apiWhatsappSession()
+      .then(s => setLinked(s.status === 'connected'))
+      .catch(() => { /* leave optimistic; a send will surface the real error */ });
+  }, []);
 
   const load = useCallback(async () => {
     try {
@@ -159,6 +169,19 @@ export default function WhatsAppInbox({ tenantId, deepLinkLeadId, onDeepLinkCons
   }
 
   return (
+    <>
+    {!linked && (
+      <div className="mb-3 flex items-center gap-2 px-4 py-2.5 bg-amber-50 border border-amber-200 rounded-xl">
+        <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0" />
+        <p className="text-xs text-amber-800 flex-1">
+          Your WhatsApp isn't linked, so you can read history but not send from your own number.
+        </p>
+        <button onClick={() => navigate('/settings')}
+          className="px-3 py-1.5 bg-amber-600 text-white rounded-lg text-xs font-semibold hover:bg-amber-700 shrink-0">
+          Link WhatsApp
+        </button>
+      </div>
+    )}
     <div className="flex h-[calc(100vh-190px)] min-h-[420px] rounded-2xl border border-zinc-200/60 overflow-hidden bg-white">
       {/* conversation list */}
       <div className={`w-full lg:w-80 shrink-0 border-r border-zinc-200/60 flex flex-col ${selected ? 'hidden lg:flex' : 'flex'}`}>
@@ -274,5 +297,6 @@ export default function WhatsAppInbox({ tenantId, deepLinkLeadId, onDeepLinkCons
         <p className="absolute bottom-2 left-2 text-[11px] text-red-500 bg-white px-2 py-1 rounded-lg shadow">{error}</p>
       )}
     </div>
+    </>
   );
 }

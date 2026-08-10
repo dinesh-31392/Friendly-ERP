@@ -122,7 +122,10 @@ function AppRoutes() {
         <Route path="/campaigns" element={<PermissionGuard permission="view_campaigns" module="campaigns"><Campaigns /></PermissionGuard>} />
         <Route path="/calendar" element={<PermissionGuard permission="view_calendar" module="calendar"><Calendar /></PermissionGuard>} />
         <Route path="/reports" element={<PermissionGuard permission="view_reports" module="reports"><Reports /></PermissionGuard>} />
-        <Route path="/messages" element={<PermissionGuard permission="view_messages" module="messages"><Messages /></PermissionGuard>} />
+        <Route path="/whatsapp" element={<PermissionGuard permission="view_messages" module="messages"><Messages /></PermissionGuard>} />
+        {/* Old path kept as a redirect so existing links and bookmarks survive
+            the rename (query string included, for /messages?lead=<id>). */}
+        <Route path="/messages" element={<Navigate to={{ pathname: '/whatsapp', search: window.location.search }} replace />} />
         <Route path="/documents" element={<PermissionGuard permission="view_documents" module="documents"><Documents /></PermissionGuard>} />
         <Route path="/billing" element={<PermissionGuard permission="view_finance" module="billing"><Billing /></PermissionGuard>} />
         <Route path="/service" element={<PermissionGuard permission="view_service" module="service"><Service /></PermissionGuard>} />

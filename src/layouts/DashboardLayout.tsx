@@ -67,7 +67,7 @@ const NAV_GROUPS: NavGroupDef[] = [
   },
   {
     id: 'engagement', label: 'Engagement', icon: MessageSquare, children: [
-      { to: '/messages', icon: MessageSquare, label: 'Messages', permission: 'view_messages' },
+      { to: '/whatsapp', icon: MessageSquare, label: 'WhatsApp', permission: 'view_messages' },
       { to: '/service', icon: Wrench, label: 'Service', permission: 'view_service' },
       { to: '/documents', icon: FileText, label: 'Documents', permission: 'view_documents' },
       { to: '/calendar', icon: Calendar, label: 'Calendar', permission: 'view_calendar' },
@@ -196,7 +196,7 @@ export default function DashboardLayout() {
       items.push({ id: `tk-${t.id}`, type: 'ticket', title: `Open ticket: ${t.title}`, time: new Date(t.createdAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }), link: '/service', icon: AlertCircle, color: 'text-red-500' });
     });
     if (moduleOn('messages') && unreadMessages > 0) {
-      items.push({ id: 'msg-all', type: 'msg', title: `${unreadMessages} unread messages`, time: 'now', link: '/messages', icon: MessageSquare, color: 'text-indigo-500' });
+      items.push({ id: 'msg-all', type: 'msg', title: `${unreadMessages} unread messages`, time: 'now', link: '/whatsapp', icon: MessageSquare, color: 'text-indigo-500' });
     }
     // ERP: construction & supply alerts
     overdueSiteTasks.slice(0, 3).forEach(t => {
@@ -331,7 +331,7 @@ export default function DashboardLayout() {
   const badgeFor = (to: string): number => {
     switch (to) {
       case '/leads': return newLeads;
-      case '/messages': return unreadMessages;
+      case '/whatsapp': return unreadMessages;
       case '/service': return openTickets;
       case '/calendar': return pendingTasks;
       case '/execution': return overdueSiteTasks.length;

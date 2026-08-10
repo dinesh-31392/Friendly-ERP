@@ -1280,7 +1280,7 @@ export default function Leads() {
                     // an unlinked number and offers the click-to-chat fallback.
                     // Gating it here sent the agent to wa.me with no way back to
                     // the conversation.
-                    if (isApiEnabled()) { navigate(`/messages?lead=${selectedLead.id}`); return; }
+                    if (isApiEnabled()) { navigate(`/whatsapp?lead=${selectedLead.id}`); return; }
                     // Otherwise: the one-shot greeting flow, dispatched through
                     // whichever provider the tenant runs (click-to-chat / Meta).
                     const greeting = `Hi ${selectedLead.name.split(' ')[0]}, this is ${user?.name || 'your advisor'} from ${tenant?.name || 'our team'} regarding ${selectedLead.project}. Is this a good time to chat?`;

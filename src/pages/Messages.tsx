@@ -173,7 +173,7 @@ export default function Messages() {
       <div className="space-y-4 max-w-[1200px]">
         <div className="flex items-center justify-between flex-wrap gap-3">
           <div>
-            <h2 className="text-2xl font-bold text-zinc-900">Messages</h2>
+            <h2 className="text-2xl font-bold text-zinc-900">WhatsApp</h2>
             <p className="text-sm text-zinc-500 mt-0.5">Every WhatsApp conversation with your leads, in one inbox.</p>
           </div>
         </div>

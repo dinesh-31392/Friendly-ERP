@@ -20,14 +20,10 @@ export default function Messages() {
   const isExecutive = user?.role === 'sales_executive';
   const [refreshKey, setRefreshKey] = useState(0);
   const refresh = () => setRefreshKey(k => k + 1);
-  // WhatsApp is the real channel (server-backed); 'internal' is the simulated
-  // in-app thread the demo has always had. Default to WhatsApp on the server.
-  const [channel, setChannel] = useState<'whatsapp' | 'internal'>(isApiEnabled() ? 'whatsapp' : 'internal');
-  // Deep link from a lead's Synced Actions: /messages?lead=<id> forces the
-  // WhatsApp channel and preselects that conversation.
+  // Deep link from a lead's Synced Actions: /messages?lead=<id> preselects
+  // that conversation in the inbox.
   const [searchParams, setSearchParams] = useSearchParams();
   const deepLinkLeadId = searchParams.get('lead') ?? undefined;
-  useEffect(() => { if (deepLinkLeadId) setChannel('whatsapp'); }, [deepLinkLeadId]);
   const clearDeepLink = () => setSearchParams(prev => {
     const next = new URLSearchParams(prev); next.delete('lead'); return next;
   }, { replace: true });
@@ -169,28 +165,10 @@ export default function Messages() {
     replyTimers.current.add(timer);
   };
 
-  const channelTabs = (
-    <div className="flex items-center gap-2">
-      {([
-        { id: 'whatsapp' as const, label: 'WhatsApp', hint: 'Real conversations from your linked number' },
-        { id: 'internal' as const, label: 'In-app', hint: 'Simulated in-app thread' },
-      ]).map(t => (
-        <button
-          key={t.id}
-          onClick={() => setChannel(t.id)}
-          title={t.hint}
-          className={`px-3.5 py-2 rounded-xl text-sm font-semibold transition-colors ${
-            channel === t.id ? 'bg-emerald-600 text-white' : 'bg-white text-zinc-600 border border-zinc-200 hover:bg-zinc-50'
-          }`}
-        >
-          {t.label}
-        </button>
-      ))}
-    </div>
-  );
-
-  // WhatsApp inbox — every conversation across all leads, sent and received.
-  if (channel === 'whatsapp') {
+  // In the live workspace Messages IS the WhatsApp inbox. The simulated in-app
+  // thread below is demo-only scaffolding — it has no server tables and fakes
+  // customer replies, so offering it beside real conversations was misleading.
+  if (isApiEnabled()) {
     return (
       <div className="space-y-4 max-w-[1200px]">
         <div className="flex items-center justify-between flex-wrap gap-3">
@@ -198,7 +176,6 @@ export default function Messages() {
             <h2 className="text-2xl font-bold text-zinc-900">Messages</h2>
             <p className="text-sm text-zinc-500 mt-0.5">Every WhatsApp conversation with your leads, in one inbox.</p>
           </div>
-          {channelTabs}
         </div>
         <WhatsAppInbox tenantId={tenantId} deepLinkLeadId={deepLinkLeadId} onDeepLinkConsumed={clearDeepLink} />
       </div>
@@ -208,8 +185,7 @@ export default function Messages() {
   if (conversations.length === 0) {
     return (
       <div className="space-y-4">
-        <div className="flex justify-end">{channelTabs}</div>
-        <div className="flex flex-col items-center justify-center py-20 text-center">
+          <div className="flex flex-col items-center justify-center py-20 text-center">
           <MessageSquare className="h-12 w-12 text-zinc-300 mb-4" />
           <h3 className="text-lg font-semibold text-zinc-700 mb-1">No Conversations Yet</h3>
           <p className="text-sm text-zinc-500 max-w-sm">Your customer conversations will appear here.</p>
@@ -220,7 +196,6 @@ export default function Messages() {
 
   return (
     <div className="space-y-3 max-w-[1200px]">
-    <div className="flex justify-end">{channelTabs}</div>
     <div className="flex gap-0 h-[calc(100vh-170px)] flex-col lg:flex-row">
       <div className="w-full lg:w-80 shrink-0 bg-white rounded-t-2xl lg:rounded-l-2xl lg:rounded-tr-none border border-zinc-200/60 lg:border-r-0 overflow-hidden flex flex-col">
         <div className="p-4 border-b border-zinc-100">

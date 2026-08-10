@@ -272,6 +272,90 @@ const emptyLead = (await admin.query(
 const inbox3 = (await call(adminTok, 'GET', '/api/whatsapp/conversations')).body?.conversations ?? [];
 ok('leads with no chat history are excluded', !inbox3.some(c => c.leadId === emptyLead.id));
 
+// ── chat privacy: one rep must never see another's conversations ────────────
+console.log('\n=== CHAT PRIVACY (per-user isolation) ===');
+// rep2 is a sales executive, so the inbox's lead-ownership filter would hide an
+// unassigned lead before privacy is even reached. Assign it to them so this
+// block tests the PRIVACY boundary, not lead ownership.
+await admin.query(
+  `UPDATE leads SET assigned_to = (SELECT id FROM users WHERE email='exec1@erptest.local') WHERE id = $1`, [lead.id]);
+
+// rep2 links their own session and messages the SAME lead.
+states[inst2] = 'open';
+const tok2 = (await admin.query('SELECT webhook_token FROM whatsapp_user_sessions WHERE instance_name=$1', [inst2])).rows[0].webhook_token;
+await hook(tok2, { event: 'connection.update', instance: inst2, data: { state: 'open', wuid: '919000000002@s.whatsapp.net' } });
+const rep2Send = await call(repTok, 'POST', '/api/whatsapp/send', { to: '919876511122', body: 'rep2 private note to the same lead', leadId: lead.id });
+ok('rep2 can message the same lead', rep2Send.status === 200 && rep2Send.body?.delivered === true, `${rep2Send.status}`);
+
+// Default visibility is 'private' — each rep's inbox shows only their own half.
+const inboxA = ((await call(adminTok, 'GET', '/api/whatsapp/conversations')).body?.conversations ?? []).find(c => c.leadId === lead.id);
+const inboxB = ((await call(repTok, 'GET', '/api/whatsapp/conversations')).body?.conversations ?? []).find(c => c.leadId === lead.id);
+ok('rep2 sees ONLY their own message in the shared lead', inboxB?.messageCount === 1, `rep2 count ${inboxB?.messageCount}`);
+ok('rep1 does not see rep2\'s message', inboxA && inboxA.messageCount > 1 && inboxA.lastMessage !== 'rep2 private note to the same lead',
+  JSON.stringify({ n: inboxA?.messageCount, last: inboxA?.lastMessage }));
+
+// The thread feed is the same boundary — it must not be a way around the inbox.
+const threadB = ((await call(repTok, 'GET', `/api/lead-activities?leadId=${lead.id}&type=whatsapp`)).body?.activities ?? []);
+ok('rep2\'s thread shows only their own message', threadB.length === 1 && threadB[0].notes.includes('rep2 private note'),
+  `n=${threadB.length}`);
+const threadA = ((await call(adminTok, 'GET', `/api/lead-activities?leadId=${lead.id}&type=whatsapp`)).body?.activities ?? []);
+ok('rep1\'s thread excludes rep2\'s message', !threadA.some(a => a.notes.includes('rep2 private note')), `n=${threadA.length}`);
+// Non-WhatsApp activities stay shared workspace data.
+ok('shared notes are still visible to both',
+  ((await call(repTok, 'GET', `/api/lead-activities?leadId=${lead.id}`)).body?.activities ?? []).some(a => a.type === 'note'));
+
+// Export follows the same scope — it cannot become a privacy backdoor.
+const expB = await fetch(`${BASE}/api/whatsapp/storage/export?format=json`, { headers: H(repTok) });
+const expBody = await expB.json();
+ok('rep2\'s export contains only their own messages',
+  expB.status === 200 && expBody.chats.length === 1 && expBody.chats[0].text.includes('rep2 private note'),
+  `n=${expBody?.chats?.length}`);
+
+// Switching the workspace to 'team' opens it up — deliberately, not by default.
+await call(adminTok, 'PUT', '/api/whatsapp/instance', { provider: 'evolution', chatVisibility: 'team' });
+const teamB = ((await call(repTok, 'GET', '/api/whatsapp/conversations')).body?.conversations ?? []).find(c => c.leadId === lead.id);
+ok('team visibility lets rep2 see the whole conversation', (teamB?.messageCount ?? 0) > 1, `count ${teamB?.messageCount}`);
+await call(adminTok, 'PUT', '/api/whatsapp/instance', { provider: 'evolution', chatVisibility: 'private' });
+const backB = ((await call(repTok, 'GET', '/api/whatsapp/conversations')).body?.conversations ?? []).find(c => c.leadId === lead.id);
+ok('switching back to private re-isolates immediately', backB?.messageCount === 1, `count ${backB?.messageCount}`);
+
+// ── storage: summary, export shape, delete ──────────────────────────────────
+console.log('\n=== DATA STORAGE ===');
+const sum = await call(adminTok, 'GET', '/api/whatsapp/storage/summary');
+const dbOwn = (await admin.query(
+  `SELECT count(*)::int n FROM lead_activities la JOIN users u ON u.id = la.user_id
+    WHERE la.type='whatsapp' AND u.email='admin@erptest.local'`)).rows[0].n;
+ok('summary counts match the caller\'s own rows', sum.status === 200 && sum.body?.summary?.messages === dbOwn,
+  `api ${sum.body?.summary?.messages} vs db ${dbOwn}`);
+ok('summary reports visibility + manage flag', sum.body?.summary?.visibility === 'private' && sum.body?.summary?.canManage === true);
+
+const csv = await fetch(`${BASE}/api/whatsapp/storage/export?format=csv`, { headers: H(adminTok) });
+const csvText = await csv.text();
+ok('CSV has a header and one row per message',
+  csv.status === 200 && csvText.split('\r\n')[0].replace(/^﻿/, '') === 'date,lead,phone,direction,message' &&
+  csvText.trim().split('\r\n').length === dbOwn + 1,
+  `${csv.status} lines=${csvText.trim().split('\r\n').length} expected=${dbOwn + 1}`);
+ok('CSV strips the [direction] prefix into its own column', !csvText.includes('[sent via'), 'prefix leaked into the text column');
+ok('CSV is downloadable (attachment + filename)', /attachment; filename="whatsapp-chats-/.test(csv.headers.get('content-disposition') ?? ''));
+
+// formula-injection guard: a message starting with '=' must be neutralised
+await call(adminTok, 'POST', '/api/whatsapp/send', { to: '919876511122', body: '=cmd|calc', leadId: lead.id });
+const csv2 = await (await fetch(`${BASE}/api/whatsapp/storage/export?format=csv`, { headers: H(adminTok) })).text();
+ok('a formula-looking message is escaped for spreadsheets', csv2.includes(`"'=cmd|calc"`), 'no leading quote guard');
+
+const delNothing = await fetch(`${BASE}/api/whatsapp/storage`, { method: 'DELETE', headers: H(adminTok), body: '{}' });
+ok('delete refuses an unscoped wipe (400)', delNothing.status === 400, `${delNothing.status}`);
+
+const beforeNotes = (await admin.query(`SELECT count(*)::int n FROM lead_activities WHERE lead_id=$1 AND type='note'`, [lead.id])).rows[0].n;
+const del = await fetch(`${BASE}/api/whatsapp/storage`, { method: 'DELETE', headers: H(adminTok), body: JSON.stringify({ leadId: lead.id }) });
+const delBody = await del.json();
+ok('delete removes the caller\'s conversation', del.status === 200 && delBody.deleted > 0, `${del.status} ${JSON.stringify(delBody)}`);
+ok('delete left non-WhatsApp activities untouched',
+  (await admin.query(`SELECT count(*)::int n FROM lead_activities WHERE lead_id=$1 AND type='note'`, [lead.id])).rows[0].n === beforeNotes);
+ok('delete did NOT touch the other rep\'s messages',
+  (await admin.query(`SELECT count(*)::int n FROM lead_activities la JOIN users u ON u.id=la.user_id
+     WHERE la.type='whatsapp' AND u.email='exec1@erptest.local'`)).rows[0].n === 1);
+
 // ── directory exposure + isolation + disconnect ─────────────────────────────
 console.log('\n=== DIRECTORY + ISOLATION + DISCONNECT ===');
 const dir = await call(adminTok, 'GET', '/api/users');

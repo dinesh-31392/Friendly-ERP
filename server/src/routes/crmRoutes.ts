@@ -76,11 +76,31 @@ export async function crmRoutes(app: FastifyInstance): Promise<void> {
       if (!await gate(db, 'view_leads')) return reply.code(403).send({ error: 'Missing permission: view_leads' });
       // ?type= keeps the WhatsApp chat thread's 5s poll cheap — it only ever
       // wants the whatsapp slice, not the whole timeline.
+      //
+      // WhatsApp rows carry chat privacy (026): each rep links their OWN phone,
+      // so while the workspace is 'private' a caller only ever sees the rows
+      // their own session carried. This is the SAME boundary the inbox
+      // enforces — the timeline must not become a way around it. Non-WhatsApp
+      // activities (notes, calls, visits) stay shared workspace data.
+      const { rows: [priv] } = await db.query(
+        `SELECT COALESCE(
+                  (SELECT chat_visibility FROM whatsapp_instances WHERE tenant_id = app_current_tenant()),
+                  'private') AS visibility`);
+      const waOwner = priv.visibility === 'team' ? null : (req.ctx.userId ?? null);
+
       const { rows } = req.query.leadId
         ? await db.query(
-            `SELECT * FROM lead_activities WHERE lead_id = $1 AND ($2::text IS NULL OR type = $2) ORDER BY created_at DESC`,
-            [req.query.leadId, req.query.type ?? null])
-        : await db.query('SELECT * FROM lead_activities ORDER BY created_at DESC LIMIT 500');
+            `SELECT * FROM lead_activities
+              WHERE lead_id = $1
+                AND ($2::text IS NULL OR type = $2)
+                AND (type <> 'whatsapp' OR $3::uuid IS NULL OR user_id = $3)
+              ORDER BY created_at DESC`,
+            [req.query.leadId, req.query.type ?? null, waOwner])
+        : await db.query(
+            `SELECT * FROM lead_activities
+              WHERE (type <> 'whatsapp' OR $1::uuid IS NULL OR user_id = $1)
+              ORDER BY created_at DESC LIMIT 500`,
+            [waOwner]);
       return { activities: rows.map(actToApi) };
     }),
   );

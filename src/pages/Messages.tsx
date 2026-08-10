@@ -1,5 +1,6 @@
 import { useState, useMemo, useRef, useEffect } from 'react';
 import { Search, Send, Paperclip, Phone, MoreHorizontal, MessageSquare } from 'lucide-react';
+import { useSearchParams } from 'react-router-dom';
 import WhatsAppInbox from '../components/WhatsAppInbox';
 import { isApiEnabled } from '../services/apiClient';
 import { useAuth } from '../context/AuthContext';
@@ -22,6 +23,14 @@ export default function Messages() {
   // WhatsApp is the real channel (server-backed); 'internal' is the simulated
   // in-app thread the demo has always had. Default to WhatsApp on the server.
   const [channel, setChannel] = useState<'whatsapp' | 'internal'>(isApiEnabled() ? 'whatsapp' : 'internal');
+  // Deep link from a lead's Synced Actions: /messages?lead=<id> forces the
+  // WhatsApp channel and preselects that conversation.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const deepLinkLeadId = searchParams.get('lead') ?? undefined;
+  useEffect(() => { if (deepLinkLeadId) setChannel('whatsapp'); }, [deepLinkLeadId]);
+  const clearDeepLink = () => setSearchParams(prev => {
+    const next = new URLSearchParams(prev); next.delete('lead'); return next;
+  }, { replace: true });
 
   const leads = useMemo(() => getByTenant<Lead>('leads', tenantId), [tenantId, refreshKey]);
   const visibleLeadIds = useMemo(
@@ -191,7 +200,7 @@ export default function Messages() {
           </div>
           {channelTabs}
         </div>
-        <WhatsAppInbox tenantId={tenantId} />
+        <WhatsAppInbox tenantId={tenantId} deepLinkLeadId={deepLinkLeadId} onDeepLinkConsumed={clearDeepLink} />
       </div>
     );
   }

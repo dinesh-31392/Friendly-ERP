@@ -10,7 +10,7 @@ const GRAPH_VERSION = 'v21.0';
 /** DB row → the SPA-safe view. Secrets (Meta token, Evolution key) are NEVER
  *  included — the client only learns WHETHER each is set. */
 function toApiInstance(r: Record<string, unknown> | undefined) {
-  if (!r) return { provider: 'click_to_chat', phoneNumberId: '', displayPhone: '', status: 'disconnected', hasToken: false, evolutionUrl: '', hasEvolutionKey: false };
+  if (!r) return { provider: 'click_to_chat', phoneNumberId: '', displayPhone: '', status: 'disconnected', hasToken: false, evolutionUrl: '', hasEvolutionKey: !!process.env.EVOLUTION_API_KEY, chatVisibility: 'private', retentionDays: null };
   return {
     provider: r.provider_type,
     phoneNumberId: r.phone_number_id ?? '',
@@ -18,6 +18,8 @@ function toApiInstance(r: Record<string, unknown> | undefined) {
     status: r.connection_status,
     hasToken: !!(r.access_token as string),
     evolutionUrl: r.evolution_url ?? '',
+    chatVisibility: r.chat_visibility ?? 'private',
+    retentionDays: r.retention_days ?? null,
     hasEvolutionKey: !!(r.evolution_api_key as string) || !!process.env.EVOLUTION_API_KEY,
   };
 }
@@ -82,8 +84,52 @@ function messageText(msg: Record<string, unknown> | undefined): string {
   return '';
 }
 
-interface SaveBody { provider?: string; phoneNumberId?: string; accessToken?: string; displayPhone?: string; evolutionUrl?: string; evolutionApiKey?: string }
+interface SaveBody { provider?: string; phoneNumberId?: string; accessToken?: string; displayPhone?: string; evolutionUrl?: string; evolutionApiKey?: string; chatVisibility?: string; retentionDays?: number | null }
 interface SendBody { to: string; body: string; leadId?: string }
+
+/**
+ * WhatsApp chat privacy (026). Each rep links their OWN phone, so their
+ * conversations are personal correspondence — the workspace defaults to
+ * 'private' and a rep sees only rows their own session carried
+ * (lead_activities.user_id = them), even from colleagues in the same tenant.
+ *
+ * Returns the SQL fragment + params to append to a whatsapp query. Every read,
+ * export and delete goes through this one helper so a new endpoint cannot
+ * accidentally sidestep the boundary.
+ */
+async function chatScope(db: import('pg').PoolClient, userId: string | undefined) {
+  const { rows } = await db.query(
+    `SELECT chat_visibility, retention_days FROM whatsapp_instances WHERE tenant_id = app_current_tenant()`);
+  const visibility = (rows[0]?.chat_visibility as string) ?? 'private';
+  const retentionDays = (rows[0]?.retention_days as number | null) ?? null;
+  return {
+    visibility,
+    retentionDays,
+    /**
+     * NULL when the workspace shares chats ('team'), else the caller's id.
+     * Queries pair it with `($n::uuid IS NULL OR la.user_id = $n)` so one
+     * statement serves both modes — no SQL splicing, no parameter drift.
+     */
+    ownerId: visibility === 'team' ? null : (userId ?? null),
+  };
+}
+
+/**
+ * Lazy retention sweep — this stack runs no scheduler, so the tenant's policy
+ * is applied whenever their inbox is read. Bounded by a LIMIT so one very old
+ * workspace can't stall a request; the next read continues the sweep.
+ */
+async function applyRetention(db: import('pg').PoolClient, retentionDays: number | null): Promise<number> {
+  if (!retentionDays || retentionDays <= 0) return 0;
+  const { rowCount } = await db.query(
+    `DELETE FROM lead_activities
+      WHERE ctid IN (
+        SELECT ctid FROM lead_activities
+         WHERE type = 'whatsapp' AND created_at < now() - ($1 || ' days')::interval
+         LIMIT 500)`,
+    [retentionDays]);
+  return rowCount ?? 0;
+}
 
 export async function whatsappRoutes(app: FastifyInstance): Promise<void> {
   /** GET /api/whatsapp/instance — the tenant's WhatsApp config, secrets stripped. */
@@ -117,6 +163,8 @@ export async function whatsappRoutes(app: FastifyInstance): Promise<void> {
             displayPhone: { type: 'string', maxLength: 32 },
             evolutionUrl: { type: 'string', maxLength: 300 },
             evolutionApiKey: { type: 'string', maxLength: 300 },
+            chatVisibility: { type: 'string', enum: ['private', 'team'] },
+            retentionDays: { type: ['integer', 'null'], minimum: 0, maximum: 3650 },
           },
         },
       },
@@ -129,12 +177,14 @@ export async function whatsappRoutes(app: FastifyInstance): Promise<void> {
         const provider = req.body.provider ?? 'click_to_chat';
         const envGateway = !!(process.env.EVOLUTION_API_URL && process.env.EVOLUTION_API_KEY);
         const { rows } = await db.query(
-          `INSERT INTO whatsapp_instances (tenant_id, provider_type, phone_number_id, display_phone, access_token, evolution_url, evolution_api_key, connection_status)
+          `INSERT INTO whatsapp_instances (tenant_id, provider_type, phone_number_id, display_phone, access_token, evolution_url, evolution_api_key, connection_status, chat_visibility, retention_days)
            VALUES (app_current_tenant(), $1, COALESCE($2,''), COALESCE($3,''), COALESCE($4,''), COALESCE($5,''), COALESCE($6,''),
                    CASE
                      WHEN $1 = 'meta_cloud_waba' AND COALESCE($2,'') <> '' AND COALESCE($4,'') <> '' THEN 'connected'
                      WHEN $1 = 'evolution' AND ((COALESCE($5,'') <> '' AND COALESCE($6,'') <> '') OR $7) THEN 'connected'
-                     ELSE 'disconnected' END)
+                     ELSE 'disconnected' END,
+                   COALESCE($8, 'private'),
+                   CASE WHEN $9 THEN $10::int ELSE NULL END)
            ON CONFLICT (tenant_id) DO UPDATE SET
              provider_type   = EXCLUDED.provider_type,
              phone_number_id = COALESCE(NULLIF($2,''), whatsapp_instances.phone_number_id),
@@ -144,6 +194,8 @@ export async function whatsappRoutes(app: FastifyInstance): Promise<void> {
              access_token      = COALESCE(NULLIF($4,''), whatsapp_instances.access_token),
              evolution_url     = COALESCE(NULLIF($5,''), whatsapp_instances.evolution_url),
              evolution_api_key = COALESCE(NULLIF($6,''), whatsapp_instances.evolution_api_key),
+             chat_visibility = COALESCE($8, whatsapp_instances.chat_visibility),
+             retention_days  = CASE WHEN $9 THEN $10::int ELSE whatsapp_instances.retention_days END,
              connection_status = CASE
                WHEN EXCLUDED.provider_type = 'meta_cloud_waba'
                     AND COALESCE(NULLIF($2,''), whatsapp_instances.phone_number_id) <> ''
@@ -157,7 +209,10 @@ export async function whatsappRoutes(app: FastifyInstance): Promise<void> {
              updated_at = now()
            RETURNING *`,
           [provider, req.body.phoneNumberId ?? null, req.body.displayPhone ?? null, req.body.accessToken ?? null,
-           req.body.evolutionUrl ?? null, req.body.evolutionApiKey ?? null, envGateway],
+           req.body.evolutionUrl ?? null, req.body.evolutionApiKey ?? null, envGateway,
+           req.body.chatVisibility ?? null,
+           // retentionDays supports an explicit null ("keep forever") — hence the sentinel
+           'retentionDays' in req.body, req.body.retentionDays ?? null],
         );
         return { instance: toApiInstance(rows[0]) };
       }),
@@ -255,23 +310,31 @@ export async function whatsappRoutes(app: FastifyInstance): Promise<void> {
       const { rows: [{ all_leads }] } = await db.query(
         `SELECT has_permission('manage_leads') OR has_permission('manage_team') AS all_leads`);
 
+      // Chat privacy (026) is a SECOND, independent filter: even a manager who
+      // can see every lead sees only their own conversations while the
+      // workspace is 'private'.
+      const scope = await chatScope(db, req.ctx.userId);
+      await applyRetention(db, scope.retentionDays);
+
       const { rows } = await db.query(
         `SELECT l.id AS lead_id, l.name, l.phone, l.project, l.stage, l.assigned_to,
                 last.notes AS last_notes, last.created_at AS last_at, agg.n AS message_count
            FROM leads l
            JOIN LATERAL (
-             SELECT notes, created_at FROM lead_activities
-              WHERE lead_id = l.id AND type = 'whatsapp'
-              ORDER BY created_at DESC LIMIT 1
+             SELECT la.notes, la.created_at FROM lead_activities la
+              WHERE la.lead_id = l.id AND la.type = 'whatsapp'
+                AND ($3::uuid IS NULL OR la.user_id = $3)
+              ORDER BY la.created_at DESC LIMIT 1
            ) last ON true
            JOIN LATERAL (
-             SELECT count(*)::int AS n FROM lead_activities
-              WHERE lead_id = l.id AND type = 'whatsapp'
+             SELECT count(*)::int AS n FROM lead_activities la
+              WHERE la.lead_id = l.id AND la.type = 'whatsapp'
+                AND ($3::uuid IS NULL OR la.user_id = $3)
            ) agg ON true
           WHERE ($1::boolean OR l.assigned_to = $2::uuid)
           ORDER BY last.created_at DESC
           LIMIT 200`,
-        [!!all_leads, req.ctx.userId || null]);
+        [!!all_leads, req.ctx.userId || null, scope.ownerId]);
 
       return {
         conversations: rows.map(r => {
@@ -288,6 +351,152 @@ export async function whatsappRoutes(app: FastifyInstance): Promise<void> {
         }),
       };
     }),
+  );
+
+  // ── Data storage: usage, export, delete, retention ──────────────────────
+
+  /** GET /api/whatsapp/storage/summary — what this caller actually holds. */
+  app.get('/api/whatsapp/storage/summary', { preHandler: requireAuth }, async (req, reply) =>
+    withTenantContext(req.ctx, async (db) => {
+      const { rows: [{ allowed }] } = await db.query(`SELECT has_permission('view_messages') AS allowed`);
+      if (!allowed) return reply.code(403).send({ error: 'Missing permission: view_messages' });
+      const scope = await chatScope(db, req.ctx.userId);
+      const { rows: [s] } = await db.query(
+        `SELECT count(*)::int AS messages,
+                count(DISTINCT lead_id)::int AS conversations,
+                min(created_at) AS oldest,
+                max(created_at) AS newest,
+                COALESCE(sum(pg_column_size(notes)), 0)::bigint AS bytes
+           FROM lead_activities la
+          WHERE la.type = 'whatsapp' AND ($1::uuid IS NULL OR la.user_id = $1)`,
+        [scope.ownerId]);
+      const { rows: [{ can_manage }] } = await db.query(`SELECT has_permission('manage_settings') AS can_manage`);
+      return {
+        summary: {
+          messages: s.messages, conversations: s.conversations,
+          oldest: s.oldest, newest: s.newest, bytes: Number(s.bytes),
+          visibility: scope.visibility, retentionDays: scope.retentionDays,
+          canManage: !!can_manage,
+        },
+      };
+    }),
+  );
+
+  /**
+   * GET /api/whatsapp/storage/export — download the caller's own chat history
+   * as CSV or JSON. Scoped identically to the inbox, so an export can never
+   * become a privacy backdoor around chat_visibility.
+   */
+  app.get<{ Querystring: { format?: string; leadId?: string; from?: string; to?: string } }>(
+    '/api/whatsapp/storage/export',
+    {
+      preHandler: requireAuth,
+      schema: { querystring: { type: 'object', additionalProperties: false, properties: {
+        format: { type: 'string', enum: ['csv', 'json'] },
+        leadId: { type: 'string', pattern: '^[0-9a-fA-F-]{36}$' },
+        from: { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
+        to: { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
+      } } },
+    },
+    async (req, reply) =>
+      withTenantContext(req.ctx, async (db) => {
+        const { rows: [{ allowed }] } = await db.query(`SELECT has_permission('view_messages') AS allowed`);
+        if (!allowed) return reply.code(403).send({ error: 'Missing permission: view_messages' });
+        const scope = await chatScope(db, req.ctx.userId);
+
+        const { rows } = await db.query(
+          `SELECT la.created_at, l.name AS lead_name, l.phone, la.notes, la.user_id
+             FROM lead_activities la
+             JOIN leads l ON l.id = la.lead_id
+            WHERE la.type = 'whatsapp'
+              AND ($1::uuid IS NULL OR la.user_id = $1)
+              AND ($2::uuid IS NULL OR la.lead_id = $2)
+              AND ($3::date IS NULL OR la.created_at >= $3::date)
+              AND ($4::date IS NULL OR la.created_at < ($4::date + 1))
+            ORDER BY l.name, la.created_at
+            LIMIT 50000`,
+          [scope.ownerId, req.query.leadId ?? null, req.query.from ?? null, req.query.to ?? null]);
+
+        // Split the stored "[direction] text" note into columns the recipient
+        // can actually filter on in a spreadsheet.
+        const split = (notes: string) => {
+          const m = String(notes).match(/^\[(sent via [^\]]+|sent from phone|received)\]\s?([\s\S]*)$/);
+          return { direction: m ? (m[1] === 'received' ? 'received' : 'sent') : 'unknown', text: m ? m[2] : String(notes) };
+        };
+        const stamp = new Date().toISOString().slice(0, 10);
+
+        if (req.query.format === 'json') {
+          reply.header('Content-Type', 'application/json; charset=utf-8');
+          reply.header('Content-Disposition', `attachment; filename="whatsapp-chats-${stamp}.json"`);
+          return {
+            exportedAt: new Date().toISOString(), scope: scope.visibility, messages: rows.length,
+            chats: rows.map(r => ({ at: r.created_at, lead: r.lead_name, phone: r.phone, ...split(r.notes as string) })),
+          };
+        }
+
+        // CSV: quote every field and double embedded quotes; prefix a cell that
+        // starts with =,+,-,@ so a spreadsheet cannot execute it as a formula.
+        const esc = (v: unknown) => {
+          const s = String(v ?? '');
+          const safe = /^[=+\-@]/.test(s) ? `'${s}` : s;
+          return `"${safe.replace(/"/g, '""')}"`;
+        };
+        const lines = [['date', 'lead', 'phone', 'direction', 'message'].join(',')];
+        for (const r of rows) {
+          const { direction, text } = split(r.notes as string);
+          lines.push([esc(r.created_at), esc(r.lead_name), esc(r.phone), esc(direction), esc(text)].join(','));
+        }
+        reply.header('Content-Type', 'text/csv; charset=utf-8');
+        reply.header('Content-Disposition', `attachment; filename="whatsapp-chats-${stamp}.csv"`);
+        // BOM so Excel reads the emoji/Devanagari as UTF-8 rather than mojibake.
+        return '﻿' + lines.join('\r\n');
+      }),
+  );
+
+  /**
+   * DELETE /api/whatsapp/storage — erase chat history. HARD delete, no
+   * soft-delete: the UI says so plainly. Only ever touches type='whatsapp'
+   * rows inside the caller's own scope, and records the count in the audit log.
+   */
+  app.delete<{ Body: { leadId?: string; olderThanDays?: number } }>(
+    '/api/whatsapp/storage',
+    {
+      preHandler: requireAuth,
+      schema: { body: { type: 'object', additionalProperties: false, properties: {
+        leadId: { type: 'string', pattern: '^[0-9a-fA-F-]{36}$' },
+        olderThanDays: { type: 'integer', minimum: 0, maximum: 3650 },
+      } } },
+    },
+    async (req, reply) =>
+      withTenantContext(req.ctx, async (db) => {
+        const { rows: [{ allowed }] } = await db.query(`SELECT has_permission('manage_settings') AS allowed`);
+        if (!allowed) return reply.code(403).send({ error: 'Missing permission: manage_settings' });
+        if (!req.body.leadId && req.body.olderThanDays === undefined) {
+          return reply.code(400).send({ error: 'Specify a conversation or an age in days — refusing to delete everything implicitly' });
+        }
+        const scope = await chatScope(db, req.ctx.userId);
+        const { rowCount } = await db.query(
+          `DELETE FROM lead_activities la
+            WHERE la.type = 'whatsapp'
+              AND ($1::uuid IS NULL OR la.user_id = $1)
+              AND ($2::uuid IS NULL OR la.lead_id = $2)
+              AND ($3::int IS NULL OR la.created_at < now() - ($3 || ' days')::interval)`,
+          [scope.ownerId, req.body.leadId ?? null, req.body.olderThanDays ?? null]);
+
+        await db.query(
+          `INSERT INTO audit_logs (tenant_id, table_name, record_id, action, actor_id, new_state)
+           VALUES (app_current_tenant(), 'lead_activities', $1, 'delete', $2, $3::jsonb)`,
+          [req.body.leadId ?? null, req.ctx.userId || null,
+           JSON.stringify({
+             channel: 'whatsapp', deleted: rowCount ?? 0,
+             leadId: req.body.leadId ?? null,
+             olderThanDays: req.body.olderThanDays ?? null,
+             scope: scope.visibility,
+           })])
+          .catch(() => { /* audit is best-effort; never block the erasure */ });
+
+        return { deleted: rowCount ?? 0 };
+      }),
   );
 
   /** POST /api/whatsapp/disconnect — unlink the CALLER's session. */

@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import IntegrationsPanel from '../components/IntegrationsPanel';
+import WhatsAppStoragePanel from '../components/WhatsAppStoragePanel';
 import PipelineSettings from '../components/PipelineSettings';
 import { PLANS, getPlanForTenant, getEffectiveLimits, withinLimit, planPriceLabel } from '../services/planService';
 import { portalUrl, portalPath, isPremium, slugify, isSlugAvailable } from '../services/portalService';
@@ -28,6 +29,7 @@ const settingsTabs = [
   { id: 'integrations', label: 'Integrations', icon: Link2 },
   { id: 'notifications', label: 'Notifications', icon: Bell },
   { id: 'billing', label: 'Billing & Plan', icon: CreditCard },
+  { id: 'storage', label: 'Data Storage', icon: Database },
   { id: 'audit', label: 'Audit Log', icon: ScrollText },
   { id: 'danger', label: 'Data & Privacy', icon: AlertTriangle },
 ];
@@ -869,6 +871,7 @@ export default function Settings() {
         {activeTab === 'pipeline' && <PipelineSettings />}
 
         {activeTab === 'integrations' && <IntegrationsPanel />}
+        {activeTab === 'storage' && <WhatsAppStoragePanel />}
 
         {activeTab === 'notifications' && (
           <div className="bg-white rounded-2xl border border-zinc-200/60 p-6 space-y-4">
@@ -1542,7 +1545,7 @@ export default function Settings() {
           </div>
         )}
 
-        {!['profile', 'team', 'brand', 'pipeline', 'permissions', 'integrations', 'notifications', 'billing', 'audit', 'danger'].includes(activeTab) && (
+        {!['profile', 'team', 'brand', 'pipeline', 'permissions', 'integrations', 'storage', 'notifications', 'billing', 'audit', 'danger'].includes(activeTab) && (
           <div className="bg-white rounded-2xl border border-zinc-200/60 p-12 text-center">
             <div className="h-16 w-16 rounded-2xl bg-zinc-100 mx-auto mb-4 flex items-center justify-center">
               <SettingsIcon className="h-7 w-7 text-zinc-300" />

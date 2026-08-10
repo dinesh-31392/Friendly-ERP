@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Search, Plus, Filter, Phone, MessageCircle, Mail, MapPin,
   Clock, X, Building2, Tag,
@@ -116,6 +116,8 @@ export default function Leads() {
   const [search, setSearch] = useState('');
   const [selectedLead, setSelectedLead] = useState<Lead | null>(null);
   const [chatLead, setChatLead] = useState<Lead | null>(null);
+  // Deep link from the WhatsApp inbox: /leads?lead=<id> opens that drawer.
+  const [searchParams, setSearchParams] = useSearchParams();
   // Whether the CALLER has a linked WhatsApp session — decides if the button
   // opens the chat thread (connected) or keeps the one-shot greeting flow.
   const [waConnected, setWaConnected] = useState(false);
@@ -193,6 +195,20 @@ export default function Leads() {
       (l.projectId ? assignedProjects.includes(l.projectId) : projectNames.has(l.project))
     );
   }, [allLeadsData, isExecutive, userId, user?.projectIds, tenantProjects]);
+  // Deep link from the WhatsApp inbox ("Lead" button): open that lead's drawer,
+  // then drop the param so a later manual selection isn't overridden.
+  useEffect(() => {
+    const wanted = searchParams.get('lead');
+    if (!wanted) return;
+    const match = leads.find(l => l.id === wanted);
+    if (match) setSelectedLead(match);
+    setSearchParams(prev => {
+      const next = new URLSearchParams(prev);
+      next.delete('lead');
+      return next;
+    }, { replace: true });
+  }, [searchParams, leads, setSearchParams]);
+
   const notes = useMemo(() => getByTenant<Note>('notes', tenantId), [tenantId, refreshKey]);
   const activities = useMemo(() => getByTenant<Activity>('activities', tenantId), [tenantId, refreshKey]);
 
@@ -1262,7 +1278,10 @@ export default function Leads() {
                   onClick={async () => {
                     // Rep has a linked WhatsApp session → open the real chat
                     // thread (send + read replies without leaving the ERP).
-                    if (isApiEnabled() && waConnected) { setChatLead(selectedLead); return; }
+                    // One inbox for all chat: hand off to Engagement → Messages
+                    // with this conversation preselected, rather than opening a
+                    // second chat UI inside the drawer.
+                    if (isApiEnabled() && waConnected) { navigate(`/messages?lead=${selectedLead.id}`); return; }
                     // Otherwise: the one-shot greeting flow, dispatched through
                     // whichever provider the tenant runs (click-to-chat / Meta).
                     const greeting = `Hi ${selectedLead.name.split(' ')[0]}, this is ${user?.name || 'your advisor'} from ${tenant?.name || 'our team'} regarding ${selectedLead.project}. Is this a good time to chat?`;

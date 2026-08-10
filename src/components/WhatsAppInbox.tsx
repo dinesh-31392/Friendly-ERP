@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { Search, MessageCircle, ArrowLeft, ExternalLink, RefreshCw, PenSquare } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
-import { isApiEnabled, apiWhatsappConversations, type WhatsAppConversation } from '../services/apiClient';
+import { isApiEnabled, apiWhatsappConversations, apiGetLeads, type WhatsAppConversation } from '../services/apiClient';
 import { inboxStamp } from '../services/whatsappThread';
 import WhatsAppThread from './WhatsAppThread';
 import NewChatPicker from './NewChatPicker';
@@ -16,7 +16,12 @@ import NewChatPicker from './NewChatPicker';
  * every 10s so new inbound conversations surface on their own; the open thread
  * polls at 5s independently.
  */
-export default function WhatsAppInbox({ tenantId }: { tenantId: string }) {
+export default function WhatsAppInbox({ tenantId, deepLinkLeadId, onDeepLinkConsumed }: {
+  tenantId: string;
+  /** From /messages?lead=<id> — preselect (or start) this conversation. */
+  deepLinkLeadId?: string;
+  onDeepLinkConsumed?: () => void;
+}) {
   const navigate = useNavigate();
   const [convs, setConvs] = useState<WhatsAppConversation[] | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -66,6 +71,33 @@ export default function WhatsAppInbox({ tenantId }: { tenantId: string }) {
   useEffect(() => {
     if (draftConv && convs?.some(c => c.leadId === draftConv.leadId)) setDraftConv(null);
   }, [convs, draftConv]);
+
+  /**
+   * Deep link from a lead's Synced Actions: /messages?lead=<id>. Selects that
+   * conversation, and when the lead has no history yet it opens as a draft so
+   * the rep can start typing immediately instead of hitting "not found".
+   * The param is consumed once so a later manual pick isn't overridden.
+   */
+  useEffect(() => {
+    const wanted = deepLinkLeadId;
+    if (!wanted || convs === null) return;
+    const existing = convs.find(c => c.leadId === wanted);
+    if (existing) {
+      setSelectedId(existing.leadId);
+      onDeepLinkConsumed?.();
+      return;
+    }
+    // No history — resolve the lead so we can open an empty thread for it.
+    apiGetLeads()
+      .then(rows => {
+        const lead = rows.find(l => l.id === wanted);
+        if (lead) startChat(lead);
+      })
+      .catch(() => { /* fall through to the default selection */ })
+      .finally(() => onDeepLinkConsumed?.());
+    // startChat is stable enough for this one-shot effect
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deepLinkLeadId, convs]);
 
   const selected = (draftConv && draftConv.leadId === selectedId)
     ? draftConv

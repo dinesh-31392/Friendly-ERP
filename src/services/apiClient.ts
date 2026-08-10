@@ -632,6 +632,8 @@ export async function apiPostJournalEntry(input: {
 // ── WhatsApp channel (adapter: free click-to-chat / paid Meta Cloud API) ─────
 
 export interface WhatsAppInstance {
+  chatVisibility?: 'private' | 'team';
+  retentionDays?: number | null;
   provider: 'click_to_chat' | 'meta_cloud_waba';
   phoneNumberId: string;
   displayPhone: string;
@@ -652,6 +654,7 @@ export async function apiSaveWhatsAppInstance(input: {
   provider: 'click_to_chat' | 'meta_cloud_waba' | 'evolution';
   phoneNumberId?: string; accessToken?: string; displayPhone?: string;
   evolutionUrl?: string; evolutionApiKey?: string;
+  chatVisibility?: 'private' | 'team'; retentionDays?: number | null;
 }): Promise<WhatsAppInstance> {
   const res = await request<{ instance: WhatsAppInstance }>('/api/whatsapp/instance', { method: 'PUT', body: JSON.stringify(input) });
   return res.instance;
@@ -688,6 +691,49 @@ export async function apiSendWhatsAppMedia(input: {
   mimetype: string; fileName?: string; caption?: string; base64: string;
 }): Promise<{ delivered: boolean; provider: string; messageId?: string; descriptor: string }> {
   return request('/api/whatsapp/send-media', { method: 'POST', body: JSON.stringify(input) });
+}
+
+// ── WhatsApp data storage ────────────────────────────────────────────────────
+
+export interface WhatsAppStorageSummary {
+  messages: number; conversations: number;
+  oldest?: string | null; newest?: string | null; bytes: number;
+  visibility: 'private' | 'team'; retentionDays: number | null; canManage: boolean;
+}
+export async function apiWhatsappStorageSummary(): Promise<WhatsAppStorageSummary> {
+  return (await request<{ summary: WhatsAppStorageSummary }>('/api/whatsapp/storage/summary')).summary;
+}
+
+/**
+ * Download the caller's chat export. A plain <a href> cannot carry the bearer
+ * token, so this fetches with auth and hands back a Blob for the caller to
+ * save. Returns the server-suggested filename when it sends one.
+ */
+export async function apiWhatsappExport(
+  opts: { format: 'csv' | 'json'; leadId?: string; from?: string; to?: string },
+): Promise<{ blob: Blob; filename: string }> {
+  const p = new URLSearchParams({ format: opts.format });
+  if (opts.leadId) p.set('leadId', opts.leadId);
+  if (opts.from) p.set('from', opts.from);
+  if (opts.to) p.set('to', opts.to);
+
+  const res = await fetch(`${getApiUrl()}/api/whatsapp/storage/export?${p.toString()}`, {
+    headers: { Authorization: `Bearer ${getApiToken()}` },
+  });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({}));
+    throw new Error((detail as { error?: string }).error ?? `Export failed (${res.status})`);
+  }
+  const disposition = res.headers.get('Content-Disposition') ?? '';
+  const named = disposition.match(/filename="([^"]+)"/)?.[1];
+  return {
+    blob: await res.blob(),
+    filename: named ?? `whatsapp-chats.${opts.format}`,
+  };
+}
+
+export async function apiWhatsappDeleteChats(input: { leadId?: string; olderThanDays?: number }): Promise<{ deleted: number }> {
+  return request('/api/whatsapp/storage', { method: 'DELETE', body: JSON.stringify(input) });
 }
 
 /** One inbox row per lead with WhatsApp history, newest first. */

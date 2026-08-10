@@ -226,8 +226,12 @@ Once your domain's A record points at the VPS, `enable-https.sh` issues the
 certificate and switches nginx to the 443 block for you:
 
 ```bash
-./deploy/enable-https.sh crm.yourdomain.com you@yourdomain.com
+bash deploy/enable-https.sh crm.yourdomain.com you@yourdomain.com
 ```
+
+Invoked via `bash` rather than `./` on purpose: files copied from Windows arrive
+without the executable bit, so `./enable-https.sh` would fail with "Permission
+denied". `bash <script>` does not care. (`chmod +x deploy/*.sh` also works.)
 
 ## Updating the app later
 

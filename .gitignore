@@ -25,3 +25,8 @@ localdb/*.log
 .idea/
 Thumbs.db
 **/.claude/settings.local.json
+.claude/
+
+# A separate product that happens to share this parent folder — the Origin Corp
+# marketing site. It is not part of the ERP and does not belong in this repo.
+origincorp-revamp/

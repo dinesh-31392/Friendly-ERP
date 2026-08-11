@@ -34,6 +34,9 @@ import { executionRoutes } from './routes/executionRoutes.js';
 import { complianceRoutes } from './routes/complianceRoutes.js';
 import { landBdRoutes } from './routes/landBdRoutes.js';
 import { branchCallRoutes } from './routes/branchCallRoutes.js';
+import { tenantRoutes } from './routes/tenantRoutes.js';
+import { invoiceRoutes } from './routes/invoiceRoutes.js';
+import { crmTaskRoutes } from './routes/crmTaskRoutes.js';
 import { portalRoutes } from './routes/portalRoutes.js';
 
 // trustProxy MUST be a hop count, not `true`. nginx sets
@@ -109,6 +112,9 @@ await app.register(executionRoutes);
 await app.register(complianceRoutes);
 await app.register(landBdRoutes);
 await app.register(branchCallRoutes);
+await app.register(tenantRoutes);
+await app.register(invoiceRoutes);
+await app.register(crmTaskRoutes);
 await app.register(portalRoutes);
 
 app.get('/api/health', async () => {

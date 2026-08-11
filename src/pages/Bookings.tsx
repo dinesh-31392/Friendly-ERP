@@ -195,19 +195,29 @@ export default function Bookings() {
         stage: 'reservation',
         createdAt: new Date().toISOString(),
       });
-      await patchUnit(unitId, { status: 'booked', bookedBy: leadId });
-      await patchLead(leadId, { stage: 'booked', lastContact: new Date().toISOString() });
+      // API mode: the server does the whole cascade inside ONE transaction —
+      // unit lock, lead stage, activity, broker commission. Doing it here as
+      // separate calls meant a failure part-way left a live booking against a
+      // unit still marked available, and PATCH /api/units needs
+      // `manage_inventory`, which a sales executive does not have — so it
+      // failed EVERY time for the role that books the most.
+      if (!isApiEnabled()) {
+        await patchUnit(unitId, { status: 'booked', bookedBy: leadId });
+        await patchLead(leadId, { stage: 'booked', lastContact: new Date().toISOString() });
+      }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Could not create booking');
       return;
     }
 
-    // Create Lead Activities
-    create<any>('activities', {
-      id: '', tenantId, leadId, userId: user?.id || '', type: 'status_change',
-      description: `Lead moved to Booked stage: Booked unit ${unit.number} at ${lead.project}`,
-      createdAt: new Date().toISOString(),
-    });
+    // Lead activity — server-side in API mode (see the cascade above).
+    if (!isApiEnabled()) {
+      create<any>('activities', {
+        id: '', tenantId, leadId, userId: user?.id || '', type: 'status_change',
+        description: `Lead moved to Booked stage: Booked unit ${unit.number} at ${lead.project}`,
+        createdAt: new Date().toISOString(),
+      });
+    }
 
     // Auto-generate the full installment schedule (sales → cash-flow bridge).
     // API mode skips this — the server schedule is created when the booking's
@@ -221,15 +231,20 @@ export default function Bookings() {
       });
     }
 
-    // Auto-generate invoice
+    // Auto-generate invoice. Demo only: there is no `invoices` table on the
+    // server — the receivable is the payment schedule, which the server builds
+    // from the booking. Writing this row in API mode produced an invoice that
+    // existed in exactly one browser and that finance never saw.
     const tokenAmount = Number(fd.get('amount')) || 300000;
-    create<Invoice>('invoices', {
-      id: '', tenantId, leadId, leadName: lead.name, project: lead.project,
-      type: 'Booking Token', amount: tokenAmount,
-      date: new Date().toISOString(),
-      dueDate: new Date(Date.now() + 86400000 * 7).toISOString(), // 7 days due date
-      status: 'Pending',
-    });
+    if (!isApiEnabled()) {
+      create<Invoice>('invoices', {
+        id: '', tenantId, leadId, leadName: lead.name, project: lead.project,
+        type: 'Booking Token', amount: tokenAmount,
+        date: new Date().toISOString(),
+        dueDate: new Date(Date.now() + 86400000 * 7).toISOString(), // 7 days due date
+        status: 'Pending',
+      });
+    }
 
     // Auto-calculate broker commission if referred by a channel partner.
     // Identity-safe attribution: the lead carries brokerId (set when a partner
@@ -239,7 +254,12 @@ export default function Bookings() {
     // commissions for a broker named e.g. "Referral Partners LLP" whenever a
     // lead's source was the plain "Referral" option. Exact-name is a fallback
     // for rows created before brokerId existed.
-    {
+    //
+    // API mode books the commission inside the booking transaction, from the
+    // broker's stored commission_structure — so it lands in commission_ledger
+    // where the broker module and finance can both see it, instead of in one
+    // salesperson's browser. bookingsClosed is derived server-side, not stored.
+    if (!isApiEnabled()) {
       const brokersList = getByTenant<any>('brokers', tenantId);
       const broker = lead.brokerId
         ? brokersList.find(b => b.id === lead.brokerId)

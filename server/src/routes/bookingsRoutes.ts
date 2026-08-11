@@ -62,7 +62,9 @@ interface BookingBody {
 }
 
 // projectId is the unit's project — derived, never stored on the booking.
-const SELECT = `SELECT b.*, u.project_id AS project_id
+// unit_code rides along so the cascade can name the unit in its activity note
+// without a second round trip; toApiBooking does not surface it.
+const SELECT = `SELECT b.*, u.project_id AS project_id, u.unit_code AS unit_code
   FROM bookings b LEFT JOIN units u ON u.id = b.unit_id`;
 
 /** Constraint violations these routes can provoke → 4xx client errors. */
@@ -142,7 +144,65 @@ export async function bookingsRoutes(app: FastifyInstance): Promise<void> {
              ${SELECT.replace('FROM bookings b', 'FROM ins b')}`,
             params,
           );
-          reply.code(201); return { booking: toApiBooking(rows[0]) };
+          const booking = rows[0];
+
+          // ── The rest of the booking, in the SAME transaction ──────────────
+          //
+          // These used to be separate calls the SPA made after this one. Two
+          // things were wrong with that. First, there was no transaction across
+          // them: a failure after the insert left a live booking against a unit
+          // still marked `available`, and the catch only raised a toast — it
+          // never undid the booking. Second, and worse, PATCH /api/units
+          // requires `manage_inventory`, which sales_executive does NOT hold.
+          // So for the role that does most of the booking, step two returned
+          // 403 every single time: the booking committed, the unit stayed on
+          // sale, and the salesperson was told it had failed. Reproduced before
+          // this change; see the cascade assertions in verify-writes.
+          //
+          // No extra permission is checked here on purpose. Locking the unit
+          // and advancing the lead are not separate privileges — they ARE the
+          // booking, and the caller already proved `create_bookings`. Demanding
+          // `manage_inventory` on top is precisely the bug.
+
+          await db.query(
+            `UPDATE units SET status = 'booked' WHERE id = $1 AND status <> 'sold'`,
+            [req.body.unitId],
+          );
+          await db.query(
+            `UPDATE leads SET stage = 'booked', last_contact_at = now() WHERE id = $1`,
+            [req.body.leadId],
+          );
+          await db.query(
+            `INSERT INTO lead_activities (tenant_id, lead_id, user_id, type, notes)
+             VALUES (app_current_tenant(), $1, app_current_user(), 'stage_change', $2)`,
+            [req.body.leadId, `Booked unit ${booking.unit_code ?? ''}`.trim()],
+          );
+
+          // Channel-partner commission. Attribution is by broker_id on the
+          // lead, never by matching the source string — one broker's name
+          // containing another's paid the wrong partner.
+          const { rows: brk } = await db.query(
+            `SELECT b.id, b.commission_structure
+               FROM leads l JOIN brokers b ON b.id = l.broker_id
+              WHERE l.id = $1`,
+            [req.body.leadId],
+          );
+          if (brk[0]) {
+            const cs = (brk[0].commission_structure ?? {}) as { type?: string; value?: number };
+            const value = Number(cs.value ?? 0);
+            const total = Number(booking.total_consideration ?? 0);
+            // A flat structure is an absolute amount; anything else is a percentage.
+            const earned = cs.type === 'flat' ? value : Math.round((total * value) / 100);
+            if (earned > 0) {
+              await db.query(
+                `INSERT INTO commission_ledger (tenant_id, broker_id, booking_id, amount_earned)
+                 VALUES (app_current_tenant(), $1, $2, $3)`,
+                [brk[0].id, booking.id, earned],
+              );
+            }
+          }
+
+          reply.code(201); return { booking: toApiBooking(booking) };
         });
       } catch (err) {
         const mapped = mapWriteError(err);

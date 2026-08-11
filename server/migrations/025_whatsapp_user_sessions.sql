@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS whatsapp_user_sessions (
 -- the portal login.
 ALTER TABLE whatsapp_user_sessions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE whatsapp_user_sessions FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS tenant_rows ON whatsapp_user_sessions;
 CREATE POLICY tenant_rows ON whatsapp_user_sessions USING (tenant_id = app_current_tenant());
 
 -- 001's blanket GRANT ran before this table existed (003 §12).

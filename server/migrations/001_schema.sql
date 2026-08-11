@@ -70,8 +70,10 @@ ALTER TABLE tenants ENABLE ROW LEVEL SECURITY;
 ALTER TABLE tenants FORCE ROW LEVEL SECURITY;
 
 -- A tenant's users can see and update ONLY their own tenant row.
+DROP POLICY IF EXISTS tenant_isolation_select ON tenants;
 CREATE POLICY tenant_isolation_select ON tenants
   FOR SELECT USING (id = app_current_tenant());
+DROP POLICY IF EXISTS tenant_isolation_update ON tenants;
 CREATE POLICY tenant_isolation_update ON tenants
   FOR UPDATE USING (id = app_current_tenant());
 -- No INSERT/DELETE policy for app_user: tenant lifecycle is app_platform-only.
@@ -135,10 +137,13 @@ ALTER TABLE role_permissions FORCE  ROW LEVEL SECURITY;
 ALTER TABLE users            ENABLE ROW LEVEL SECURITY;
 ALTER TABLE users            FORCE  ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS tenant_rows ON roles;
 CREATE POLICY tenant_rows ON roles
   USING (tenant_id = app_current_tenant());
+DROP POLICY IF EXISTS tenant_rows ON role_permissions;
 CREATE POLICY tenant_rows ON role_permissions
   USING (role_id IN (SELECT id FROM roles WHERE tenant_id = app_current_tenant()));
+DROP POLICY IF EXISTS tenant_rows ON users;
 CREATE POLICY tenant_rows ON users
   USING (tenant_id = app_current_tenant());
 
@@ -207,7 +212,9 @@ ALTER TABLE schema_definitions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE schema_definitions FORCE  ROW LEVEL SECURITY;
 ALTER TABLE meta_config        ENABLE ROW LEVEL SECURITY;
 ALTER TABLE meta_config        FORCE  ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS tenant_rows ON schema_definitions;
 CREATE POLICY tenant_rows ON schema_definitions USING (tenant_id = app_current_tenant());
+DROP POLICY IF EXISTS tenant_rows ON meta_config;
 CREATE POLICY tenant_rows ON meta_config        USING (tenant_id = app_current_tenant());
 
 -- ─── 5. Leads (core entity; custom fields ride in JSONB) ────────────────────
@@ -248,6 +255,7 @@ CREATE TABLE leads (
 
 ALTER TABLE leads ENABLE ROW LEVEL SECURITY;
 ALTER TABLE leads FORCE  ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS tenant_rows ON leads;
 CREATE POLICY tenant_rows ON leads USING (tenant_id = app_current_tenant());
 
 -- Stage values must exist in the tenant's ACTIVE pipeline definition:
@@ -293,11 +301,13 @@ ALTER TABLE audit_logs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE audit_logs FORCE  ROW LEVEL SECURITY;
 -- Tenants may READ their own trail. Nobody (via app_user) can write directly,
 -- update, or delete: the ONLY writer is the SECURITY DEFINER trigger below.
+DROP POLICY IF EXISTS tenant_read ON audit_logs;
 CREATE POLICY tenant_read ON audit_logs FOR SELECT
   USING (tenant_id = app_current_tenant());
 -- FORCE RLS applies to the trigger's definer too, so an INSERT policy must
 -- exist. It is safe to keep it permissive because app_user has INSERT revoked
 -- at the GRANT level below — the privilege check fails before the policy runs.
+DROP POLICY IF EXISTS audit_trigger_insert ON audit_logs;
 CREATE POLICY audit_trigger_insert ON audit_logs FOR INSERT WITH CHECK (true);
 REVOKE INSERT, UPDATE, DELETE ON audit_logs FROM app_user;
 
@@ -389,8 +399,11 @@ CREATE TABLE export_jobs (
 ALTER TABLE import_batches      ENABLE ROW LEVEL SECURITY; ALTER TABLE import_batches      FORCE ROW LEVEL SECURITY;
 ALTER TABLE import_rows_staging ENABLE ROW LEVEL SECURITY; ALTER TABLE import_rows_staging FORCE ROW LEVEL SECURITY;
 ALTER TABLE export_jobs         ENABLE ROW LEVEL SECURITY; ALTER TABLE export_jobs         FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS tenant_rows ON import_batches;
 CREATE POLICY tenant_rows ON import_batches      USING (tenant_id = app_current_tenant());
+DROP POLICY IF EXISTS tenant_rows ON import_rows_staging;
 CREATE POLICY tenant_rows ON import_rows_staging USING (tenant_id = app_current_tenant());
+DROP POLICY IF EXISTS tenant_rows ON export_jobs;
 CREATE POLICY tenant_rows ON export_jobs         USING (tenant_id = app_current_tenant());
 
 -- ─── 8. Indexing strategy for multi-tenant performance ──────────────────────
@@ -449,6 +462,7 @@ CREATE TABLE user_preferences (
 );
 ALTER TABLE user_preferences ENABLE ROW LEVEL SECURITY;
 ALTER TABLE user_preferences FORCE  ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS tenant_rows ON user_preferences;
 CREATE POLICY tenant_rows ON user_preferences USING (tenant_id = app_current_tenant());
 CREATE INDEX idx_userprefs_tenant ON user_preferences (tenant_id, user_id);
 
@@ -470,6 +484,7 @@ CREATE TABLE tenant_keys (
 );
 ALTER TABLE tenant_keys ENABLE ROW LEVEL SECURITY;
 ALTER TABLE tenant_keys FORCE  ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS tenant_rows ON tenant_keys;
 CREATE POLICY tenant_rows ON tenant_keys USING (tenant_id = app_current_tenant());
 -- Usage from the API (key from env, never stored in the DB):
 --   INSERT: pgp_sym_encrypt($value, current_setting('app.kms_key'))
@@ -513,6 +528,7 @@ REVOKE INSERT, UPDATE, DELETE ON permissions FROM app_user;
 REVOKE ALL ON audit_logs_default FROM app_user;
 ALTER TABLE audit_logs_default ENABLE ROW LEVEL SECURITY;
 ALTER TABLE audit_logs_default FORCE  ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS tenant_read ON audit_logs_default;
 CREATE POLICY tenant_read ON audit_logs_default FOR SELECT
   USING (tenant_id = app_current_tenant());
 -- NOTE: every future monthly partition needs the same treatment. Create them

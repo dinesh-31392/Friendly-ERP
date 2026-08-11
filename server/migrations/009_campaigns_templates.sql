@@ -35,6 +35,7 @@ BEGIN
   FOREACH t IN ARRAY ARRAY['campaigns', 'templates'] LOOP
     EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', t);
     EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', t);
+    EXECUTE format('DROP POLICY IF EXISTS tenant_rows ON %I', t);
     EXECUTE format('CREATE POLICY tenant_rows ON %I USING (tenant_id = app_current_tenant())', t);
   END LOOP;
 END $$;

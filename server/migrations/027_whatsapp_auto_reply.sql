@@ -70,6 +70,7 @@ CREATE INDEX IF NOT EXISTS whatsapp_outbox_due_idx
 
 ALTER TABLE whatsapp_outbox ENABLE ROW LEVEL SECURITY;
 ALTER TABLE whatsapp_outbox FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS tenant_rows ON whatsapp_outbox;
 CREATE POLICY tenant_rows ON whatsapp_outbox USING (tenant_id = app_current_tenant());
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON whatsapp_outbox TO app_user;

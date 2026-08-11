@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS chatbot_configs (
 -- RLS: FORCE + tenant policy, matching every other tenant table (003 §9).
 ALTER TABLE chatbot_configs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE chatbot_configs FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS tenant_rows ON chatbot_configs;
 CREATE POLICY tenant_rows ON chatbot_configs USING (tenant_id = app_current_tenant());
 
 -- 001's blanket GRANT ran before this table existed (see 003 §12).

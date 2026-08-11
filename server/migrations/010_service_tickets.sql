@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS service_tickets (
 -- RLS: FORCE + tenant policy, matching every other tenant table (003 §9).
 ALTER TABLE service_tickets ENABLE ROW LEVEL SECURITY;
 ALTER TABLE service_tickets FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS tenant_rows ON service_tickets;
 CREATE POLICY tenant_rows ON service_tickets USING (tenant_id = app_current_tenant());
 
 CREATE INDEX idx_service_tickets_tenant_created ON service_tickets (tenant_id, created_at DESC);

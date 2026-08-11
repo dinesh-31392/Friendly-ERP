@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS documents (
 -- RLS: FORCE + tenant policy, matching every other tenant table (003 §9).
 ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
 ALTER TABLE documents FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS tenant_rows ON documents;
 CREATE POLICY tenant_rows ON documents USING (tenant_id = app_current_tenant());
 
 CREATE INDEX idx_documents_tenant_created ON documents (tenant_id, created_at DESC);

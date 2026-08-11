@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS whatsapp_instances (
 -- RLS: FORCE + tenant policy, matching every other tenant table (003 §9).
 ALTER TABLE whatsapp_instances ENABLE ROW LEVEL SECURITY;
 ALTER TABLE whatsapp_instances FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS tenant_rows ON whatsapp_instances;
 CREATE POLICY tenant_rows ON whatsapp_instances USING (tenant_id = app_current_tenant());
 
 -- 001's blanket GRANT ran before this table existed (see 003 §12).

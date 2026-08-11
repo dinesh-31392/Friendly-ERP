@@ -76,6 +76,7 @@ BEGIN
   FOREACH t IN ARRAY ARRAY['employees', 'attendance', 'leave_requests', 'payroll_runs'] LOOP
     EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', t);
     EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', t);
+    EXECUTE format('DROP POLICY IF EXISTS tenant_rows ON %I', t);
     EXECUTE format('CREATE POLICY tenant_rows ON %I USING (tenant_id = app_current_tenant())', t);
     EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON %I TO app_user', t);
     EXECUTE format('GRANT ALL ON %I TO app_platform', t);

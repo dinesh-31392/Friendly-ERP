@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS call_logs (
 
 ALTER TABLE call_logs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE call_logs FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS tenant_rows ON call_logs;
 CREATE POLICY tenant_rows ON call_logs USING (tenant_id = app_current_tenant());
 GRANT SELECT, INSERT, UPDATE, DELETE ON call_logs TO app_user;
 GRANT ALL ON call_logs TO app_platform;

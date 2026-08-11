@@ -29,6 +29,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_portal_broker ON portal_users (tenant_id, b
 
 ALTER TABLE portal_users ENABLE ROW LEVEL SECURITY;
 ALTER TABLE portal_users FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS tenant_rows ON portal_users;
 CREATE POLICY tenant_rows ON portal_users USING (tenant_id = app_current_tenant());
 GRANT SELECT, INSERT, UPDATE, DELETE ON portal_users TO app_user;
 -- app_platform (BYPASSRLS) performs the pre-auth login lookup, like staff login.

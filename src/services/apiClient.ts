@@ -42,10 +42,6 @@ export function isApiEnabled(): boolean {
   return localStorage.getItem(API_URL_KEY) !== null || BUILD_API_URL !== undefined;
 }
 
-/** True only for the localStorage single-browser demo (no backend configured). */
-export function isDemoMode(): boolean {
-  return !isApiEnabled();
-}
 
 export function getApiToken(): string {
   return localStorage.getItem(TOKEN_KEY) || '';

@@ -3,19 +3,19 @@ import {
   LayoutDashboard, Users, Building2, Brain, BarChart3, TrendingUp,
   Settings, Calendar, ChevronDown, Bell, Search, Megaphone,
   MessageSquare, FileText, CreditCard, Wrench, Shield, LogOut,
-  X, AlertCircle, CheckCircle2, Clock, Menu, BookOpenCheck, Handshake, Globe, ShieldAlert,
+  X, AlertCircle, CheckCircle2, Clock, Menu, BookOpenCheck, Handshake, Globe,
   HardHat, Truck, Package, UserCheck, Scale, Map,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { getByTenant } from '../services/db';
-import { isDemoMode, isApiEnabled, apiWhatsappConversations } from '../services/apiClient';
+import { isApiEnabled, apiWhatsappConversations } from '../services/apiClient';
 import { trialDaysLeft, isModuleEnabled } from '../services/planService';
 import { lowStockMaterials } from '../services/procurementService';
 import { filingsDueSoon } from '../services/complianceService';
 import InstallAppButton from '../components/InstallAppButton';
 import ErrorBoundary from '../components/ErrorBoundary';
-import type { Lead, Task, Ticket, Conversation, SiteTask, PurchaseOrder, Vendor, Material, Employee } from '../types';
+import type { Lead, Task, Ticket, SiteTask, PurchaseOrder, Vendor, Material, Employee } from '../types';
 
 // ── Navigation model ─────────────────────────────────────────────────────────
 // The ERP outgrew a flat list (20+ destinations). Items are now grouped into
@@ -91,20 +91,8 @@ const ALL_NAV_LEAVES: NavLeaf[] = [
 // builder workspace — the demo super admin is seeded inside the demo tenant, so
 // listing it here let any sales executive escalate to full platform control.
 // AuthContext.switchRole enforces this too; this list is just the UI half.
-const roles = [
-  { role: 'builder_admin' as const, label: 'Builder Admin' },
-  { role: 'sales_manager' as const, label: 'Sales Manager' },
-  { role: 'sales_executive' as const, label: 'Sales Executive' },
-  { role: 'site_engineer' as const, label: 'Site Engineer' },
-  { role: 'telecaller' as const, label: 'Telecaller' },
-  { role: 'accountant' as const, label: 'Accountant' },
-  { role: 'auditor' as const, label: 'Auditor' },
-  { role: 'land_manager' as const, label: 'Land Manager' },
-  { role: 'bd_manager' as const, label: 'BD Manager' },
-];
-
 export default function DashboardLayout() {
-  const { user, tenant, switchRole, hasPermission, logout } = useAuth();
+  const { user, tenant, hasPermission, logout } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
   const [roleMenuOpen, setRoleMenuOpen] = useState(false);
@@ -119,7 +107,6 @@ export default function DashboardLayout() {
   // Demo-mode notice: shown when no backend is configured (data lives only in
   // this browser). Dismiss is per-session, so it re-appears on a fresh load —
   // it's a security label, not a nag.
-  const [demoNoticeDismissed, setDemoNoticeDismissed] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const searchRef = useRef<HTMLInputElement>(null);
@@ -133,12 +120,9 @@ export default function DashboardLayout() {
   const allLeads = useMemo(() => getByTenant<Lead>('leads', tenantId), [tenantId, location.pathname]);
   const allTasks = useMemo(() => getByTenant<Task>('tasks', tenantId), [tenantId, location.pathname]);
   const allTickets = useMemo(() => getByTenant<Ticket>('tickets', tenantId), [tenantId, location.pathname]);
-  const allConversations = useMemo(() => getByTenant<Conversation>('conversations', tenantId), [tenantId, location.pathname]);
 
   const leads = isExecutive ? allLeads.filter(l => l.assignedTo === userId) : allLeads;
   const tasks = isExecutive ? allTasks.filter(t => t.userId === userId) : allTasks;
-  const visibleLeadIds = new Set(leads.map(l => l.id));
-  const conversations = isExecutive ? allConversations.filter(c => visibleLeadIds.has(c.leadId)) : allConversations;
   const tickets = isExecutive ? [] : allTickets;
 
   // Module toggle helper — a super-admin-disabled module contributes nothing
@@ -178,9 +162,8 @@ export default function DashboardLayout() {
   /**
    * WhatsApp badge = conversations whose newest message came FROM the customer,
    * i.e. the ones waiting on a reply. In the live workspace this comes from the
-   * server (scoped by chat privacy, so a rep is only nudged about their own
-   * conversations); in demo mode it falls back to the simulated store's unread
-   * counters, which is all that exists there.
+   * server, scoped by chat privacy — so a rep is only nudged about their own
+   * conversations.
    */
   const [waAwaiting, setWaAwaiting] = useState(0);
   useEffect(() => {
@@ -197,9 +180,7 @@ export default function DashboardLayout() {
   }, [tenantId]);
 
   // Counts only from ENABLED modules (a disabled module must not leak counts)
-  const unreadMessages = !moduleOn('messages')
-    ? 0
-    : isApiEnabled() ? waAwaiting : conversations.reduce((s, c) => s + c.unread, 0);
+  const unreadMessages = moduleOn('messages') ? waAwaiting : 0;
   const openTickets = moduleOn('service') ? tickets.filter(t => t.status === 'open').length : 0;
   const pendingTasks = moduleOn('calendar') ? tasks.filter(t => t.status === 'pending' && t.priority === 'hot').length : 0;
   const newLeads = moduleOn('leads') ? leads.filter(l => l.stage === 'new').length : 0;
@@ -546,20 +527,6 @@ export default function DashboardLayout() {
           </button>
           {roleMenuOpen && (
             <div className={`absolute bottom-full mb-2 bg-white border border-zinc-200 rounded-xl shadow-xl p-1.5 min-w-[200px] z-50 ${sidebarCollapsed ? 'left-16' : 'left-3 right-3'}`}>
-              {/* Role switching is a localStorage demo tool — hidden in API mode where identity comes from the JWT */}
-              {isDemoMode() && (<>
-              <p className="text-[11px] font-medium text-zinc-400 uppercase tracking-wider px-3 py-1.5">Try Role (Demo)</p>
-              {roles.map(r => (
-                <button
-                  key={r.role}
-                  onClick={() => { switchRole(r.role); setRoleMenuOpen(false); }}
-                  className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-colors ${user?.role === r.role ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-zinc-700 hover:bg-zinc-100'}`}
-                >
-                  {r.label}
-                </button>
-              ))}
-              <div className="h-px bg-zinc-100 my-1.5" />
-              </>)}
               <button
                 onClick={() => { logout(); navigate('/login'); }}
                 className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-red-600 hover:bg-red-50 transition-colors"
@@ -578,23 +545,6 @@ export default function DashboardLayout() {
 
       {/* Main */}
       <div className="flex-1 flex flex-col overflow-hidden">
-        {/* Demo-mode notice — honest labelling that this build is not the
-            server-backed, multi-tenant-secure deployment. */}
-        {isDemoMode() && !demoNoticeDismissed && (
-          <div className="bg-amber-50 text-amber-800 border-b border-amber-200 px-4 py-2 text-xs flex items-center justify-between gap-3 shrink-0">
-            <span className="flex items-center gap-2">
-              <ShieldAlert className="h-3.5 w-3.5 text-amber-600 shrink-0" />
-              <span><strong>Demo mode</strong> — data is stored in this browser only and is not multi-tenant secure. Connect the backend for a production deployment.</span>
-            </span>
-            <button
-              onClick={() => setDemoNoticeDismissed(true)}
-              aria-label="Dismiss"
-              className="px-2 py-1 rounded-lg hover:bg-amber-100 font-semibold transition-colors shrink-0"
-            >
-              Dismiss
-            </button>
-          </div>
-        )}
 
         {/* Support (impersonation) mode banner */}
         {inSupportMode && (

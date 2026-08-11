@@ -1,9 +1,9 @@
 import { createContext, useContext, useState, useEffect, ReactNode, useCallback } from 'react';
-import type { User, Tenant, Role } from '../types';
+import type { User, Tenant } from '../types';
 import * as authService from '../services/authService';
 import { isApiEnabled, apiLogin, clearApiToken, getStoredApiSession } from '../services/apiClient';
 import { hydrateLedger } from '../services/accountsService';
-import { initializeDatabase, getByField } from '../services/db';
+import { initializeDatabase } from '../services/db';
 import { ensureBranchMigration } from '../services/branchService';
 import { isTrialExpired } from '../services/planService';
 
@@ -20,7 +20,6 @@ interface AuthContextType {
   needsSetup: boolean;
   setupPlatformAdmin: (name: string, email: string, password: string) => Promise<{ success: boolean; error?: string }>;
   logout: () => void;
-  switchRole: (role: Role) => void;
   hasPermission: (action: string) => boolean;
   refreshSession: () => void;
 }
@@ -200,22 +199,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUsers([]);
   }, []);
 
-  const switchRole = useCallback((role: Role) => {
-    if (!tenant) return;
-    // Platform staff are cross-tenant and are NEVER reachable from the demo
-    // switcher. The seeded super admin lives inside the demo builder tenant, so
-    // without this guard any workspace user could switch into it and gain '*'
-    // permissions (every tenant, every password, impersonation) — and it would
-    // survive a reload via the persisted session.
-    if (role === 'super_admin' || role === 'tech_team') return;
-    const roleUsers = getByField<User>('users', 'tenantId', tenant.id)
-      .filter(u => u.role === role && u.active);
-    if (roleUsers.length > 0) {
-      setUser(roleUsers[0]);
-      authService.updateSessionUser(roleUsers[0].id);
-    }
-  }, [tenant]);
-
   const hasPermission = useCallback((action: string): boolean => {
     if (!user) return false;
     return authService.hasPermission(user, action);
@@ -237,7 +220,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   return (
     <AuthContext.Provider value={{
       user, tenant, users, isAuthenticated: !!user, isLoading,
-      login, register, resetPassword, changeOwnPassword, logout, switchRole, hasPermission, refreshSession,
+      login, register, resetPassword, changeOwnPassword, logout, hasPermission, refreshSession,
       needsSetup, setupPlatformAdmin
     }}>
       {children}

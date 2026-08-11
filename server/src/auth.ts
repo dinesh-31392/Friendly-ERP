@@ -45,6 +45,17 @@ export async function requireAuth(req: FastifyRequest, reply: FastifyReply): Pro
   }
   try {
     const claims = verifyToken(token);
+    // Portal tokens are signed with the SAME secret and issuer as staff tokens,
+    // so verifyToken accepts one happily. Today nothing bad follows, because
+    // every staff route also checks a permission and a portal subject is not a
+    // row in `users` — but that makes the realm boundary depend on 184 routes
+    // each remembering their gate, forever. The first one added without it
+    // opens the whole staff API to any customer who can log into the portal.
+    // Refuse the realm here instead, where it is one check rather than 184.
+    if (claims.rol?.startsWith('portal_')) {
+      reply.code(401).send({ error: 'Invalid or expired token' });
+      return;
+    }
     req.ctx = { tenantId: claims.tid, userId: claims.sub, ip: req.ip };
   } catch {
     reply.code(401).send({ error: 'Invalid or expired token' });

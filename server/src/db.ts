@@ -4,13 +4,52 @@ import { env } from './env.js';
 
 const { Pool } = pg;
 
+/**
+ * Timeouts are the noisy-neighbour defence.
+ *
+ * Every tenant shares this pool, so an unbounded query is not one tenant's
+ * problem — it is a connection nobody else can have. Ten of them and the API is
+ * down for everybody, with no error anywhere, because the requests are not
+ * failing, they are waiting.
+ *
+ *   statement_timeout       a query that runs longer than this is killed. Set
+ *                           per-connection via the pool's `options`, so it
+ *                           applies to every statement without touching a
+ *                           single call site.
+ *   connectionTimeoutMillis a request that cannot get a connection fails fast
+ *                           instead of hanging until the client gives up.
+ *   idleTimeoutMillis       release idle connections so a burst does not hold
+ *                           the pool open forever afterwards.
+ *
+ * Tune with env vars rather than a redeploy: a reporting-heavy tenant may need
+ * a longer ceiling than the interactive default.
+ */
+const STATEMENT_TIMEOUT_MS = Number(process.env.DB_STATEMENT_TIMEOUT_MS ?? 10_000);
+const POOL_MAX = Number(process.env.DB_POOL_MAX ?? 20);
+
 /** RLS-enforced pool — the ONLY pool request handlers may use. */
-export const pool = new Pool({ connectionString: env.databaseUrl, max: 10 });
+export const pool = new Pool({
+  connectionString: env.databaseUrl,
+  max: POOL_MAX,
+  connectionTimeoutMillis: 5_000,
+  idleTimeoutMillis: 30_000,
+  options: `-c statement_timeout=${STATEMENT_TIMEOUT_MS}`,
+});
 
 /** BYPASSRLS pool — used exclusively for the login credential lookup
  *  (identity isn't known yet, so no tenant context exists) and platform jobs.
- *  NEVER hand this to a tenant-scoped request handler. */
-export const platformPool = new Pool({ connectionString: env.databasePlatformUrl, max: 2 });
+ *  NEVER hand this to a tenant-scoped request handler.
+ *
+ *  Deliberately gets a LONGER statement timeout: the outbox worker sweeps every
+ *  tenant with due rows, which is legitimately slower than any single request,
+ *  and killing it mid-sweep would strand queued messages. */
+export const platformPool = new Pool({
+  connectionString: env.databasePlatformUrl,
+  max: 4,
+  connectionTimeoutMillis: 5_000,
+  idleTimeoutMillis: 30_000,
+  options: `-c statement_timeout=${Number(process.env.DB_PLATFORM_STATEMENT_TIMEOUT_MS ?? 60_000)}`,
+});
 
 // pg-pool emits 'error' when an IDLE connection dies (Postgres restart, VPS
 // reboot, OOM-kill, `docker compose restart db`, or a NAT/firewall reaping an

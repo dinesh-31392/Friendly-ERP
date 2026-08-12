@@ -1,7 +1,7 @@
 import { createContext, useContext, useState, useEffect, ReactNode, useCallback } from 'react';
 import type { User, Tenant } from '../types';
 import * as authService from '../services/authService';
-import { isApiEnabled, apiLogin, clearApiToken, getStoredApiSession } from '../services/apiClient';
+import { isApiEnabled, apiLogin, apiVerifyLoginCode, isMfaChallenge, clearApiToken, getStoredApiSession } from '../services/apiClient';
 import { hydrateLedger } from '../services/accountsService';
 import { initializeDatabase } from '../services/db';
 import { ensureBranchMigration } from '../services/branchService';
@@ -13,7 +13,10 @@ interface AuthContextType {
   users: User[];
   isAuthenticated: boolean;
   isLoading: boolean;
-  login: (email: string, password: string, workspaceCode?: string) => Promise<{ success: boolean; error?: string }>;
+  login: (email: string, password: string, workspaceCode?: string) =>
+    Promise<{ success: boolean; error?: string; mfa?: { challengeId: string; sentTo: string } }>;
+  /** Second step of an MFA login — exchange the emailed code for a session. */
+  verifyLoginCode: (challengeId: string, code: string) => Promise<{ success: boolean; error?: string }>;
   register: (name: string, email: string, password: string, phone: string, company: string, country?: string, currency?: string) => Promise<{ success: boolean; error?: string; pending?: boolean }>;
   resetPassword: (email: string, newPassword: string) => { success: boolean; error?: string };
   changeOwnPassword: (newPassword: string) => { success: boolean; error?: string };
@@ -64,6 +67,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     hydrateLedger(tenant.id).catch(() => { /* pages fall back to whatever's cached */ });
   }, [tenant?.id]);
 
+  const verifyLoginCode = useCallback(async (challengeId: string, code: string) => {
+    try {
+      const res = await apiVerifyLoginCode(challengeId, code);
+      setUser(res.user);
+      setTenant(res.tenant);
+      authService.rememberAccount(res.user, res.tenant);
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Could not verify the code' };
+    }
+  }, []);
+
   const loadTenantUsers = (tenantId: string) => {
     const tenantUsers = authService.getTenantUsers(tenantId);
     setUsers(tenantUsers);
@@ -76,6 +91,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       try {
         // The workspace code IS the tenant slug the API disambiguates with.
         const apiResult = await apiLogin(email, password, workspaceCode?.trim() || undefined);
+        // The password was right, but this account carries a second factor. No
+        // session exists yet — the caller has to collect the emailed code.
+        if (isMfaChallenge(apiResult)) {
+          return { success: false, mfa: { challengeId: apiResult.challengeId, sentTo: apiResult.sentTo } };
+        }
         setUser(apiResult.user);
         setTenant(apiResult.tenant);
         authService.rememberAccount(apiResult.user, apiResult.tenant);
@@ -200,7 +220,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   return (
     <AuthContext.Provider value={{
       user, tenant, users, isAuthenticated: !!user, isLoading,
-      login, register, resetPassword, changeOwnPassword, logout, hasPermission, refreshSession
+      login, verifyLoginCode, register, resetPassword, changeOwnPassword, logout, hasPermission, refreshSession
     }}>
       {children}
     </AuthContext.Provider>

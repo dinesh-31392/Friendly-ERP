@@ -99,13 +99,37 @@ interface ApiLoginResponse {
   };
 }
 
+/** An account with a second factor gets this instead of a session. */
+export interface MfaChallenge { mfaRequired: true; challengeId: string; sentTo: string }
+
+export function isMfaChallenge(x: unknown): x is MfaChallenge {
+  return !!x && typeof x === 'object' && (x as MfaChallenge).mfaRequired === true;
+}
+
 export async function apiLogin(
   email: string, password: string, tenantSlug?: string,
-): Promise<{ user: User; tenant: Tenant }> {
-  const res = await request<ApiLoginResponse>('/api/auth/login', {
+): Promise<{ user: User; tenant: Tenant } | MfaChallenge> {
+  const res = await request<ApiLoginResponse & Partial<MfaChallenge>>('/api/auth/login', {
     method: 'POST',
     body: JSON.stringify({ email, password, tenantSlug }),
   });
+  // No token yet — the password was right, but a code is required.
+  if (isMfaChallenge(res)) return res;
+  return establishSession(res);
+}
+
+/** Second step of an MFA login: trade the emailed code for a session. */
+export async function apiVerifyLoginCode(
+  challengeId: string, code: string,
+): Promise<{ user: User; tenant: Tenant }> {
+  const res = await request<ApiLoginResponse>('/api/auth/verify-code', {
+    method: 'POST',
+    body: JSON.stringify({ challengeId, code }),
+  });
+  return establishSession(res);
+}
+
+function establishSession(res: ApiLoginResponse): { user: User; tenant: Tenant } {
   localStorage.setItem(TOKEN_KEY, res.token);
 
   // Map API shapes onto the SPA's existing types so no component changes

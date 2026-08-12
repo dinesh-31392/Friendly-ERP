@@ -10,7 +10,7 @@ import toast from 'react-hot-toast';
 type LoginTab = 'platform' | 'builder' | 'portal';
 
 export default function Login() {
-  const { login, register, resetPassword } = useAuth();
+  const { login, verifyLoginCode, register, resetPassword } = useAuth();
   const [tab, setTab] = useState<LoginTab>('builder');
   const [isRegistering, setIsRegistering] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
@@ -19,6 +19,10 @@ export default function Login() {
   const [pendingNotice, setPendingNotice] = useState(false);
   // Persistent inline error (in addition to the toast) — accessible via role="alert"
   const [loginError, setLoginError] = useState('');
+
+  // Second factor: set once the password is accepted but a code is required.
+  const [mfa, setMfa] = useState<{ challengeId: string; sentTo: string } | null>(null);
+  const [mfaCode, setMfaCode] = useState('');
 
   // Login fields
   const [email, setEmail] = useState('');
@@ -85,6 +89,8 @@ export default function Login() {
     setLoading(true);
     const result = await login(email, password, tab === 'builder' ? workspaceCode : undefined);
     setLoading(false);
+    // Not a failure: the password was right and a code is on its way.
+    if (result.mfa) { setMfa(result.mfa); setMfaCode(''); return; }
     if (!result.success) {
       setLoginError(result.error || 'Login failed. Please try again.');
       toast.error(result.error || 'Login failed');
@@ -92,6 +98,24 @@ export default function Login() {
       toast.success('Welcome back!');
     }
   };
+
+  const handleVerifyCode = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!mfa || mfaCode.length !== 6) { setLoginError('Enter the 6-digit code from your email.'); return; }
+    setLoginError('');
+    setLoading(true);
+    const result = await verifyLoginCode(mfa.challengeId, mfaCode);
+    setLoading(false);
+    if (!result.success) {
+      setLoginError(result.error || 'That code is not valid.');
+      setMfaCode('');
+      return;
+    }
+    toast.success('Welcome back!');
+  };
+
+  /** Back to the password form. The challenge is abandoned, not reused. */
+  const cancelMfa = () => { setMfa(null); setMfaCode(''); setPassword(''); setLoginError(''); };
 
   const switchTab = (t: LoginTab) => {
     setTab(t); setIsRegistering(false); setLoginError(''); setShowPassword(false);
@@ -231,6 +255,57 @@ export default function Login() {
           </div>
 
           <div className="bg-white rounded-2xl border border-zinc-200/60 p-6 sm:p-8 shadow-sm">
+            <>
+            {/* ── Second factor ──────────────────────────────────────────
+                Shown once the password is accepted for an account that needs a
+                code. It REPLACES the sign-in form rather than sitting beside it:
+                leaving the password fields on screen invites a re-submit, which
+                issues a second code and invalidates the one already sent. */}
+            {mfa ? (
+              <div>
+                <div className="h-11 w-11 rounded-2xl bg-indigo-50 flex items-center justify-center mb-4">
+                  <Shield className="h-5 w-5 text-indigo-500" />
+                </div>
+                <h2 className="text-xl font-bold text-zinc-900">Check your email</h2>
+                <p className="text-sm text-zinc-500 mt-1 mb-5">
+                  We sent a 6-digit code to <span className="font-medium text-zinc-700">{mfa.sentTo}</span>.
+                  It expires in 10 minutes.
+                </p>
+                <form onSubmit={handleVerifyCode} className="space-y-4">
+                  <div>
+                    <label htmlFor="mfa-code" className="block text-sm font-medium text-zinc-700 mb-1.5">Sign-in code</label>
+                    <input
+                      id="mfa-code"
+                      value={mfaCode}
+                      onChange={e => setMfaCode(e.target.value.replace(/D/g, '').slice(0, 6))}
+                      inputMode="numeric"
+                      autoComplete="one-time-code"
+                      autoFocus
+                      placeholder="000000"
+                      className="w-full px-4 py-3 rounded-xl border border-zinc-200 text-center text-2xl font-mono tracking-[0.4em] focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    />
+                  </div>
+                  {loginError && (
+                    <p role="alert" className="text-sm text-red-600 flex items-center gap-1.5">
+                      <AlertCircle className="h-4 w-4 shrink-0" /> {loginError}
+                    </p>
+                  )}
+                  <button
+                    type="submit"
+                    disabled={loading || mfaCode.length !== 6}
+                    className="w-full flex items-center justify-center gap-2 py-3 bg-indigo-600 text-white rounded-xl font-semibold hover:bg-indigo-700 transition-colors disabled:opacity-50"
+                  >
+                    {loading ? <span className="h-5 w-5 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : <>Verify and sign in <ArrowRight className="h-4 w-4" /></>}
+                  </button>
+                  <button type="button" onClick={cancelMfa} className="w-full text-xs font-medium text-zinc-500 hover:text-zinc-700">
+                    Use a different account
+                  </button>
+                </form>
+                <p className="text-[11px] text-zinc-400 mt-5 text-center">
+                  Didn't get it? Check spam, then sign in again to send a new code — that cancels this one.
+                </p>
+              </div>
+            ) : (
             <>
             {/* Login-type tabs */}
             <div className="flex items-center gap-1 bg-zinc-100 rounded-xl p-1 mb-6">
@@ -496,6 +571,8 @@ export default function Login() {
                   </button>
                 </p>
               </div>
+            )}
+            </>
             )}
             </>
             )}

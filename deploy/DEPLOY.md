@@ -96,6 +96,48 @@ The bootstrap prints the address it created. Store the generated password in you
 password manager **before** you close the terminal — it is hashed with argon2id
 and cannot be read back out of the database.
 
+### Upgrading a deployment that already exists
+
+If this VPS was set up before migrations 028–030, `run --rm migrate` above
+applies them and you should know what changes:
+
+- **028** backfills the permission catalog into tenants that already exist.
+  Permission keys were only ever written at bootstrap, so a workspace created
+  before HR, procurement, site execution or land/BD shipped was never granted
+  their keys — and `has_permission()` has no super-admin bypass, so those four
+  modules returned 403 to *every* user in that workspace, including its owner.
+  After this migration they work. Nothing is revoked: a role you widened by
+  hand keeps what you gave it, and a custom role is left untouched.
+- **029** adds 20 composite indexes and revokes the app role's write access to
+  the migration ledger. Index creation briefly blocks writes on those tables;
+  pre-launch that is free, on a busy database do it in a quiet window.
+- **030** adds the `invoices` and `crm_tasks` tables. Nothing to migrate into
+  them — they replace data that only ever lived in a browser.
+
+### Onboarding your first builder
+
+The platform admin you just created belongs to the `platform` tenant, which is
+the console — not a workspace you sell. Create a real builder workspace with:
+
+```bash
+curl -sX POST http://localhost/api/tenants \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name":"Acme Builders","slug":"acme","email":"ops@acme.com",
+       "adminName":"Priya Sharma","adminEmail":"priya@acme.com"}'
+```
+
+(`$TOKEN` comes from `POST /api/auth/login` as the platform admin.)
+
+One transaction creates the workspace, its nine roles with their grants, the
+lead pipeline, and the administrator. **The response carries `tempPassword` and
+that is the only time it is readable** — hand it over out of band; the admin is
+forced to change it on first sign-in.
+
+Do this once before you hand the system to anyone. A workspace missing its lead
+pipeline signs in perfectly and then refuses every lead with a bare constraint
+error, so "it provisioned fine" is not the same as "it works" — verify by
+creating one lead as the new admin.
+
 Verify:
 
 ```bash

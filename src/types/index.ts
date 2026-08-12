@@ -192,6 +192,10 @@ export interface Lead {
   qualification?: LeadQualification;
   lastContact: string;
   createdAt: string;
+  /** When the customer actually got in touch. Equals createdAt for a lead
+   *  captured live; for a bulk import it is the date from the file, which is
+   *  what every response-time and ageing figure must be computed from. */
+  enquiredAt?: string;
 }
 
 export type QualificationStatus = 'hot' | 'warm' | 'cold' | 'unqualified';

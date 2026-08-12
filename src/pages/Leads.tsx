@@ -62,9 +62,49 @@ function parseCsv(text: string): string[][] {
   return rows;
 }
 
+/**
+ * Read an enquiry date out of a spreadsheet cell.
+ *
+ * The trap is DD/MM/YYYY. `new Date('03/08/2026')` is parsed as 3 AUGUST by a
+ * browser in India and 8 MARCH by the Date constructor, which follows US
+ * convention — so half the rows in a real Indian CSV would land five months
+ * from where they belong, and nothing would look wrong. Day-first is parsed
+ * explicitly here rather than handed to the constructor.
+ *
+ * Returns undefined for anything unrecognised: an unparsed date must fall back
+ * to "arrived now" rather than silently become 1 January 1970.
+ */
+function parseEnquiryDate(raw: string): string | undefined {
+  const v = (raw || '').trim();
+  if (!v) return undefined;
+
+  // ISO (YYYY-MM-DD…) is unambiguous — let Date have it.
+  if (/^\d{4}-\d{2}-\d{2}/.test(v)) {
+    const d = new Date(v);
+    return Number.isNaN(d.getTime()) ? undefined : d.toISOString();
+  }
+
+  // D/M/YYYY or D-M-YYYY, optionally with a time. Day first.
+  const m = v.match(/^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})(?:[ ,]+(\d{1,2}):(\d{2}))?/);
+  if (m) {
+    const [, dd, mm, yy, hh, mi] = m;
+    const year = yy.length === 2 ? 2000 + Number(yy) : Number(yy);
+    const d = new Date(year, Number(mm) - 1, Number(dd), Number(hh ?? 9), Number(mi ?? 0));
+    // Reject 31/02 and friends: the constructor rolls them over silently.
+    if (d.getMonth() !== Number(mm) - 1 || d.getDate() !== Number(dd)) return undefined;
+    return Number.isNaN(d.getTime()) ? undefined : d.toISOString();
+  }
+
+  // "12 Aug 2026" and similar — unambiguous enough for the constructor.
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? undefined : d.toISOString();
+}
+
 interface ImportRow {
   name: string; phone: string; email: string;
   project: string; budget: number; configuration: string; source: string;
+  /** From an "enquiry date" / "date" column when the file has one. */
+  enquiredAt?: string;
 }
 
 const defaultStageBorders: Record<string, string> = {
@@ -231,7 +271,7 @@ export default function Leads() {
   const filteredLeads = leads.filter(l => {
     if (filterStage !== 'all' && l.stage !== filterStage) return false;
     if (search && !l.name.toLowerCase().includes(search.toLowerCase()) && !l.phone.includes(search)) return false;
-    if (!inRange(l.createdAt, resolvedRange)) return false;
+    if (!inRange(l.enquiredAt ?? l.createdAt, resolvedRange)) return false;
     return true;
   });
 
@@ -535,7 +575,12 @@ export default function Leads() {
 
   // ── Bulk upload (CSV import) ──────────────────────────────────────────────
   const downloadTemplate = () => {
-    const csv = 'Name,Phone,Email,Project,Budget,Configuration,Source\n"Rohan Verma","+91 98220 11223","rohan.v@email.com","Skyline Heights","15000000","3 BHK","Website"';
+    // "Enquiry Date" is optional but strongly worth filling for a backlog
+    // import — without it every row is stamped as arriving the moment you
+    // upload, and response-time reporting becomes fiction. Day-first is what a
+    // spreadsheet here produces, and what the parser expects.
+    const csv = 'Name,Phone,Email,Project,Budget,Configuration,Source,Enquiry Date\n'
+      + '"Rohan Verma","+91 98220 11223","rohan.v@email.com","Skyline Heights","15000000","3 BHK","Website","03/08/2026"';
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -573,6 +618,7 @@ export default function Leads() {
         budget: Number(cell('budget').replace(/[^0-9.]/g, '')) || 0,
         configuration: cell('configuration') || '2 BHK',
         source: cell('source') || 'Bulk Import',
+        enquiredAt: parseEnquiryDate(cell('enquiry date') || cell('enquiry_date') || cell('date') || cell('received')),
       });
     });
     setImportPreview({ valid, invalid, dupes });
@@ -589,6 +635,9 @@ export default function Leads() {
           tenantId, ...rowData,
           stage: 'new', priority: 'warm', assignedTo: userId,
           lastContact: now, createdAt: now,
+          // Absent from the file → the enquiry is treated as arriving now,
+          // which is the honest default: we genuinely do not know when it came in.
+          ...(rowData.enquiredAt ? { enquiredAt: rowData.enquiredAt } : {}),
         });
         ok++;
       } catch { failed++; }
@@ -931,8 +980,8 @@ export default function Leads() {
                         {getUserName(lead.assignedTo)}
                       </td>
                       <td className="px-5 py-3.5 whitespace-nowrap">
-                        <p className="text-sm text-zinc-700">{receivedOn(lead.createdAt, appLocale)}</p>
-                        <p className="text-[11px] text-zinc-400">{sinceArrival(lead.createdAt)}</p>
+                        <p className="text-sm text-zinc-700">{receivedOn(lead.enquiredAt ?? lead.createdAt, appLocale)}</p>
+                        <p className="text-[11px] text-zinc-400">{sinceArrival(lead.enquiredAt ?? lead.createdAt)}</p>
                       </td>
                     </tr>
                   ))}

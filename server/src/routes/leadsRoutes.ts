@@ -36,6 +36,7 @@ function toApiLead(r: Record<string, unknown>) {
     brokerId: (r.broker_id as string | null) ?? undefined,
     lastContact: r.last_contact_at,
     createdAt: r.created_at,
+    enquiredAt: r.enquired_at,
     customFields: r.custom_fields,
     score: r.score,
   };
@@ -59,6 +60,7 @@ const WRITABLE: Record<string, string> = {
   score: 'score',
   assignedTo: 'assigned_to',
   brokerId: 'broker_id',
+  enquiredAt: 'enquired_at',
   customFields: 'custom_fields',
   lastContact: 'last_contact_at',
 };
@@ -74,6 +76,7 @@ const LEAD_PROPS = {
   project: { type: 'string', maxLength: 200 },
   projectId: { type: 'string', pattern: UUID },
   budget: { type: 'number', minimum: 0, maximum: 1e12 },
+  enquiredAt: { type: 'string', format: 'date-time' },
   configuration: { type: 'string', maxLength: 64 },
   stage: { type: 'string', maxLength: 64 },
   priority: { type: 'string', enum: ['hot', 'warm', 'cold'] },
@@ -118,8 +121,19 @@ async function leadAccess(db: pg.PoolClient): Promise<LeadAccess> {
  *  error handler (which logs it with a correlation id and leaks nothing). */
 function mapWriteError(err: unknown): { error: string } | null {
   switch ((err as { code?: string })?.code) {
-    case '23514': // check_violation — incl. validate_lead_stage()
+    case '23514': { // check_violation — incl. validate_lead_stage()
+      // Name the constraint that actually failed. Collapsing every check into
+      // one message told someone importing a mistyped date that their STAGE was
+      // wrong, which sends them looking in entirely the wrong place.
+      const c = (err as { constraint?: string }).constraint;
+      if (c === 'leads_enquired_at_not_future') {
+        return { error: 'The enquiry date is in the future — check the date format in your file (day first: DD/MM/YYYY).' };
+      }
+      if (c === 'leads_lost_needs_reason') {
+        return { error: 'A lead marked lost needs a reason.' };
+      }
       return { error: 'Invalid value: stage must exist in your pipeline, priority must be hot/warm/cold, and score must be 0-100.' };
+    }
     case '23503': // foreign_key_violation — incl. the tenant-scoped assignee FK
       return { error: 'That assignee or project does not exist in this workspace.' };
     case '23502':

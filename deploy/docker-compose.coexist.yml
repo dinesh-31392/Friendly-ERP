@@ -1,0 +1,42 @@
+# ─── Coexist overlay: share a VPS that already serves another site ──────────
+#
+#   docker compose -f docker-compose.prod.yml -f docker-compose.coexist.yml up -d
+#
+# The base stack publishes 80 and 443, because it assumes it owns the machine.
+# On a VPS already running WordPress, those ports belong to the host's own web
+# server (nginx, Apache, LiteSpeed — whatever your panel installed), and Docker
+# will refuse to start with "address already in use".
+#
+# This overlay moves the ERP's nginx to a LOOPBACK port. The host web server
+# then reverse-proxies your ERP subdomain to it, which means:
+#
+#   • WordPress keeps port 80/443 and nothing about it changes.
+#   • The ERP is unreachable from the internet except through the host proxy —
+#     127.0.0.1 is not routable, so no firewall rule can accidentally expose it.
+#   • ONE certbot on the host handles certificates for both sites. Two ACME
+#     clients fighting over port 80 is the classic way to end up with neither
+#     site holding a valid certificate.
+#
+# The certbot container in the base stack becomes redundant here — the host
+# issues the certificate. Leaving it defined is harmless; just never run
+# enable-https.sh in this mode (see DEPLOY.md Step 11).
+
+# REQUIRES Docker Compose v2.24 or newer — check with `docker compose version`.
+#
+# `!override` replaces the base list. On older Compose the tag is unknown and
+# the two `ports` lists MERGE instead, so 80:80 is still published and you get
+# the port clash this file exists to prevent — with no hint as to why. If you
+# are on an older Compose, upgrade it, or delete the `ports:` block from
+# docker-compose.prod.yml's `web` service and put the loopback line there.
+#
+# Confirm the mapping took effect before pointing DNS at anything:
+#   docker compose -f docker-compose.prod.yml -f docker-compose.coexist.yml \
+#     config | grep -A3 'published'
+# You want to see 127.0.0.1:8080 and NOTHING on 80 or 443.
+
+services:
+  web:
+    ports: !override
+      # host:container — bound to loopback ONLY. Change 8080 if something else
+      # on the box already uses it (`ss -lptn 'sport = :8080'`).
+      - "127.0.0.1:8080:80"

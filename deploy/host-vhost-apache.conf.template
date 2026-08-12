@@ -1,0 +1,46 @@
+# ─── Host Apache vhost: erp.example.com → the ERP stack on 127.0.0.1:8080 ───
+#
+# Use this instead of host-vhost-nginx.conf.template if your VPS serves
+# WordPress with Apache (`apachectl -v` works, or `systemctl status apache2`).
+#
+#   a2enmod proxy proxy_http headers ssl
+#   cp this to /etc/apache2/sites-available/erp.example.com.conf
+#   (replace ERP_DOMAIN)
+#   certbot certonly --webroot -w /var/www/html -d ERP_DOMAIN
+#   a2ensite erp.example.com && apachectl configtest && systemctl reload apache2
+
+<VirtualHost *:80>
+    ServerName ERP_DOMAIN
+    # Keep ACME reachable over HTTP so renewals keep working.
+    Alias /.well-known/acme-challenge/ /var/www/html/.well-known/acme-challenge/
+    <Directory "/var/www/html/.well-known/acme-challenge/">
+        Require all granted
+    </Directory>
+    RewriteEngine On
+    RewriteCond %{REQUEST_URI} !^/\.well-known/acme-challenge/
+    RewriteRule ^(.*)$ https://%{HTTP_HOST}$1 [R=301,L]
+</VirtualHost>
+
+<VirtualHost *:443>
+    ServerName ERP_DOMAIN
+
+    SSLEngine on
+    SSLCertificateFile    /etc/letsencrypt/live/ERP_DOMAIN/fullchain.pem
+    SSLCertificateKeyFile /etc/letsencrypt/live/ERP_DOMAIN/privkey.pem
+
+    # Per-hostname, so WordPress is unaffected.
+    Header always set Strict-Transport-Security "max-age=31536000"
+
+    ProxyPreserveHost On
+    ProxyPass        / http://127.0.0.1:8080/
+    ProxyPassReverse / http://127.0.0.1:8080/
+
+    # mod_proxy_http already appends the peer to X-Forwarded-For, which is what
+    # the API's trustProxy=1 reads for rate limiting and audit_logs.ip_address.
+    # Do NOT add a manual RequestHeader set X-Forwarded-For — that REPLACES the
+    # chain with a value the client controls, and the login cap stops working.
+    RequestHeader set X-Forwarded-Proto "https"
+
+    ProxyTimeout 120
+    LimitRequestBody 26214400
+</VirtualHost>

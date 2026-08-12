@@ -379,3 +379,108 @@ new-lead greetings.
 > number being restricted by WhatsApp — that is a platform decision no code
 > here can prevent. For high-volume campaigns use the official Meta Cloud API
 > path, which the ERP also supports (Settings → Integrations).
+
+## Step 11 — Sharing a VPS that already hosts another site
+
+If this VPS already serves WordPress (or anything else) on port 80/443, the
+base stack will not start: its `web` service publishes those ports and Docker
+reports "address already in use".
+
+Nothing else conflicts. Postgres is not published at all, the API is only
+`expose`d on the compose network, and a KVM 4 has ample headroom for both — the
+ERP idles at roughly 400–700 MB across Postgres, the API and nginx. Check yours
+with `free -h` before starting; the number that matters is that Postgres has
+room to cache, not that the containers fit.
+
+**Your email is unaffected.** Adding a subdomain creates an A record. Mail
+routing is MX, and Microsoft 365 keeps those. Do not touch the MX, SPF, DKIM or
+DMARC records — an A record for `erp.` cannot alter mail delivery for the apex
+domain.
+
+### 11a — Point a subdomain at the VPS
+
+Add one DNS record wherever the domain's nameservers live:
+
+```
+Type  Name  Value            TTL
+A     erp   YOUR_VPS_IP      300
+```
+
+Wait for it to resolve before issuing a certificate — `dig +short erp.yourdomain.com`
+must return your VPS IP. Certbot fails if it does not, and Let's Encrypt rate
+limits repeated failures.
+
+### 11b — Move the ERP off ports 80/443
+
+```bash
+cd /opt/friendly-crm/deploy
+docker compose version          # must be v2.24+ for the overlay's !override
+
+docker compose -f docker-compose.prod.yml -f docker-compose.coexist.yml up -d
+```
+
+Confirm it is bound to loopback and nothing else:
+
+```bash
+ss -lptn 'sport = :8080'                  # docker-proxy on 127.0.0.1:8080
+curl -s localhost:8080/api/health          # {"ok":true,...}
+curl -s https://yourdomain.com -o /dev/null -w '%{http_code}\n'   # WordPress: 200
+```
+
+That last check matters. Verify WordPress still answers *before* you touch its
+web server config, so if something breaks later you know which change did it.
+
+### 11c — Proxy the subdomain to it
+
+Find out what is serving WordPress:
+
+```bash
+ss -lptn 'sport = :443'      # look for nginx, apache2, litespeed, or docker-proxy
+```
+
+Then issue the certificate and install the vhost. **Use `--webroot`, never
+`--standalone`** — standalone needs port 80, which your web server is holding,
+so it fails; and freeing the port means taking WordPress down to issue a cert.
+
+```bash
+certbot certonly --webroot -w /var/www/html -d erp.yourdomain.com
+
+# nginx
+cp host-vhost-nginx.conf.template /etc/nginx/sites-available/erp.yourdomain.com
+sed -i 's/ERP_DOMAIN/erp.yourdomain.com/g' /etc/nginx/sites-available/erp.yourdomain.com
+ln -s /etc/nginx/sites-available/erp.yourdomain.com /etc/nginx/sites-enabled/
+nginx -t && systemctl reload nginx
+
+# Apache
+a2enmod proxy proxy_http headers ssl
+cp host-vhost-apache.conf.template /etc/apache2/sites-available/erp.yourdomain.com.conf
+sed -i 's/ERP_DOMAIN/erp.yourdomain.com/g' /etc/apache2/sites-available/erp.yourdomain.com.conf
+a2ensite erp.yourdomain.com && apachectl configtest && systemctl reload apache2
+```
+
+`nginx -t` / `apachectl configtest` before every reload. A syntax error in the
+new vhost takes down WordPress too — same process, one bad config.
+
+Then set `PUBLIC_URL=https://erp.yourdomain.com` and
+`CORS_ORIGIN=https://erp.yourdomain.com` in `.env` and
+`docker compose -f docker-compose.prod.yml -f docker-compose.coexist.yml up -d api`.
+
+### 11d — Do NOT run enable-https.sh in this mode
+
+It drives the containerised certbot and rewrites the container's nginx.conf,
+both of which assume the stack owns port 80. In coexist mode the host owns TLS;
+the ERP's own nginx only ever speaks plain HTTP on loopback, which is correct —
+the encrypted hop ends at the host proxy, and the loopback hop never leaves the
+machine.
+
+Renewal is the host's existing certbot timer. It already runs for WordPress;
+the new certificate joins it. Confirm with `certbot renew --dry-run`.
+
+### 11e — If you use a control panel
+
+CyberPanel, Plesk, CloudPanel and hPanel all manage their own web server config
+and can overwrite hand-edited vhosts on update. Where the panel offers a
+"reverse proxy" or "proxy pass" field for a subdomain, use that instead of the
+templates here and point it at `http://127.0.0.1:8080`. The proxy headers in the
+templates are the part to carry across — particularly `X-Forwarded-For`, which
+the login rate limit and the audit trail both depend on.

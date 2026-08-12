@@ -19,7 +19,7 @@ const ok = (n, c, x = '') => { c ? (pass++, console.log('  ✓ ' + n)) : (fail++
 
 const admin = new pg.Client('postgres://postgres:postgres@localhost:5433/erp_test');
 await admin.connect();
-await admin.query('UPDATE users SET password_hash=$1, active=true WHERE email=$2',
+await admin.query('UPDATE users SET password_hash=$1, active=true, mfa_email_enabled=false WHERE email=$2',
   [await argon2.hash(PW, { type: argon2.argon2id }), 'admin@erptest.local']);
 
 const MARK = 'PRT';

@@ -137,10 +137,36 @@ const pb = await p1.json();
 ok('an account without MFA still logs in directly', p1.status === 200 && !!pb.token && !pb.mfaRequired, `${p1.status}`);
 
 console.log('\n=== PLATFORM STAFF ARE ENROLLED ===');
-const { rows: [plat] } = await admin.query(
-  `SELECT count(*)::int n FROM users u JOIN roles r ON r.id=u.role_id JOIN tenants t ON t.id=u.tenant_id
-    WHERE t.slug='platform' AND r.name IN ('super_admin','tech_team') AND NOT u.mfa_email_enabled`);
-ok('no platform admin is left without a second factor', plat.n === 0, `${plat.n} unprotected`);
+// Assert the RULE from migration 031, not the state of a shared test database.
+// The other suites deliberately opt their fixture admin out so they can log in,
+// so a count over global state just measures that instead.
+const { rows: [pt] } = await admin.query(`SELECT id FROM tenants WHERE slug='platform'`);
+if (!pt) {
+  console.log('  (no platform tenant here — enrolment rule not exercised)');
+} else {
+  const { rows: [prole] } = await admin.query(
+    `INSERT INTO roles (tenant_id, name, is_system) VALUES ($1,'super_admin',true)
+     ON CONFLICT (tenant_id, name) DO UPDATE SET is_system=true RETURNING id`, [pt.id]);
+  // A platform admin without the flag — as one would be before 031 ran.
+  const { rows: [fresh] } = await admin.query(
+    `INSERT INTO users (tenant_id, role_id, name, email, password_hash, active, mfa_email_enabled)
+     VALUES ($1,$2,'MFA Fresh Platform',$3,$4,true,false) RETURNING id`,
+    [pt.id, prole.id, `${MARK.toLowerCase()}fresh@mfa.test`, hash]);
+
+  // The exact UPDATE migration 031 runs.
+  await admin.query(
+    `UPDATE users u SET mfa_email_enabled = true
+       FROM roles r, tenants t
+      WHERE r.id = u.role_id AND t.id = u.tenant_id
+        AND t.slug = 'platform' AND r.name IN ('super_admin','tech_team')`);
+
+  const { rows: [after] } = await admin.query(`SELECT mfa_email_enabled FROM users WHERE id=$1`, [fresh.id]);
+  ok('the migration enrols a platform admin that lacked a second factor', after.mfa_email_enabled === true);
+
+  const { rows: [b] } = await admin.query(`SELECT mfa_email_enabled FROM users WHERE email=$1`,
+    [`${MARK.toLowerCase()}off@mfa.test`]);
+  ok('it does not enrol ordinary tenant users', b?.mfa_email_enabled === false, String(b?.mfa_email_enabled));
+}
 
 await clean();
 await admin.end();

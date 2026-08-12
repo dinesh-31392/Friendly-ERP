@@ -71,7 +71,7 @@ await new Promise(r => mock.listen(MOCK_PORT, r));
 const admin = new pg.Client('postgres://postgres:postgres@localhost:5433/erp_test');
 await admin.connect();
 const hash = await argon2.hash(PW, { type: argon2.argon2id });
-await admin.query('UPDATE users SET password_hash=$1, active=true WHERE email = ANY($2)',
+await admin.query('UPDATE users SET password_hash=$1, active=true, mfa_email_enabled=false WHERE email = ANY($2)',
   [hash, ['admin@erptest.local', 'exec1@erptest.local', 'badmin@rival.test']]);
 
 const MARK = 'WAE';

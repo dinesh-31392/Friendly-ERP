@@ -4,8 +4,8 @@ import {
   Plus, X, Trash2, Receipt, Landmark, PiggyBank, ArrowUpRight, ShieldCheck,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { getByTenant, create, update, remove, logAudit } from '../services/db';
-import { isApiEnabled } from '../services/apiClient';
+import { getByTenant, logAudit } from '../services/db';
+import { isApiEnabled, apiGetInvoices, apiCreateInvoice, apiUpdateInvoice, apiDeleteInvoice } from '../services/apiClient';
 import { isBillOverdue, projectActuals, formatPoNumber } from '../services/procurementService';
 import { isFilingOverdue, markFiled, nextDueDate } from '../services/complianceService';
 import { needsApproval } from '../services/approvalService';
@@ -77,12 +77,15 @@ export default function Billing() {
     return () => { cancelled = true; };
   }, [tenantId, refreshKey]);
 
-  const invoices = useMemo(
-    () => getByTenant<Invoice>('invoices', tenantId).sort((a, b) =>
-      new Date(b.date).getTime() - new Date(a.date).getTime()
-    ),
-    [tenantId, refreshKey]
-  );
+  // Server-side; the route already returns newest-first.
+  const [invoices, setInvoices] = useState<Invoice[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    apiGetInvoices()
+      .then(rows => { if (!cancelled) setInvoices(rows); })
+      .catch(err => toast.error(err instanceof Error ? err.message : 'Could not load invoices'));
+    return () => { cancelled = true; };
+  }, [tenantId, refreshKey]);
   const leads = useMemo(() => getByTenant<Lead>('leads', tenantId), [tenantId, refreshKey]);
   const vendors = useMemo(() => getByTenant<Vendor>('vendors', tenantId), [tenantId, refreshKey]);
   const bills = useMemo(
@@ -147,7 +150,7 @@ export default function Billing() {
   const totalBudgeted = projectBudgetLines.reduce((s, b) => s + b.budgeted, 0);
   const totalActual = [...actuals.values()].reduce((s, v) => s + v, 0);
 
-  const handleAdd = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleAdd = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (!canManage) { toast.error('You do not have permission to create invoices'); return; }
     const form = e.currentTarget;
@@ -158,22 +161,28 @@ export default function Billing() {
     const amount = Number(formData.get('amount'));
     if (!amount) { toast.error('Amount is required'); return; }
 
-    create<Invoice>('invoices', {
-      id: '', tenantId, leadId, leadName: lead.name, project: lead.project,
-      type: (formData.get('type') as string) || 'Quotation',
-      amount, date: new Date().toISOString(),
-      dueDate: (formData.get('dueDate') as string) ? new Date(formData.get('dueDate') as string).toISOString() : new Date(Date.now() + 86400000 * 30).toISOString(),
-      status: (formData.get('status') as InvoiceStatus) || 'Generated',
-    });
-    setShowAdd(false);
-    refresh();
-    toast.success('Invoice created');
+    try {
+      await apiCreateInvoice({
+        leadId, leadName: lead.name, project: lead.project,
+        type: (formData.get('type') as string) || 'Quotation',
+        amount, date: new Date().toISOString(),
+        dueDate: (formData.get('dueDate') as string)
+          ? new Date(formData.get('dueDate') as string).toISOString()
+          : new Date(Date.now() + 86400000 * 30).toISOString(),
+        status: (formData.get('status') as InvoiceStatus) || 'Generated',
+      });
+      setShowAdd(false);
+      refresh();
+      toast.success('Invoice created');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not create the invoice');
+    }
   };
 
   const handleStatusChange = async (id: string, status: InvoiceStatus) => {
     if (!canManage) { toast.error('You do not have permission to update invoices'); return; }
     const inv = invoices.find(i => i.id === id);
-    update<Invoice>('invoices', id, { status });
+    await apiUpdateInvoice(id, { status });
     // Cash landing → ledger, but ONCE. Skip 'Booking Token' invoices: those are
     // collected and posted through the booking's payment schedule (the single
     // ledger source), so posting here too would double-count the same money.
@@ -200,7 +209,7 @@ export default function Billing() {
     toast.success(`Marked as ${status}`);
   };
 
-  const handleDelete = (id: string) => {
+  const handleDelete = async (id: string) => {
     if (!canManage) { toast.error('You do not have permission to delete invoices'); return; }
     const inv = invoices.find(i => i.id === id);
     // A paid invoice has posted cash + income to the ledger; deleting it would
@@ -210,9 +219,13 @@ export default function Billing() {
       return;
     }
     if (!confirm('Delete this invoice?')) return;
-    remove('invoices', id);
-    refresh();
-    toast.success('Invoice deleted');
+    try {
+      await apiDeleteInvoice(id);
+      refresh();
+      toast.success('Invoice deleted');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not delete the invoice');
+    }
   };
 
   // ── Vendor bills (AP) ──────────────────────────────────────────────────────

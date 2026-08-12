@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Settings as SettingsIcon, Users, User, Shield, Building2, Palette, Bell,
@@ -17,6 +17,7 @@ import { getTenantSessions, revokeDeviceSession, currentSessionToken } from '../
 import { getApprovalRules, setApprovalThreshold } from '../services/approvalService';
 import { downloadCsv } from '../utils/csv';
 import { getByTenant, update, create, remove, clearDatabase, logAudit } from '../services/db';
+import { apiGetAuditLogs } from '../services/apiClient';
 import { useTenantUsers } from '../hooks/useTenantUsers';
 import type { User as UserType, Tenant, Role, AuditLog } from '../types';
 import toast from 'react-hot-toast';
@@ -49,12 +50,20 @@ export default function Settings() {
 
   const tenantUsers = useTenantUsers(tenant?.id || '', refreshKey);
 
-  const auditLogs = useMemo(
-    () => tenant
-      ? getByTenant<AuditLog>('auditLogs', tenant.id).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
-      : [],
-    [tenant, refreshKey]
-  );
+  // The trail is written by database triggers and read back through the API —
+  // it was previously read from a localStorage table nothing had ever written
+  // to in a real deployment, so this panel was always empty.
+  const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
+  useEffect(() => {
+    if (!tenant) return;
+    let cancelled = false;
+    apiGetAuditLogs(200)
+      .then(rows => { if (!cancelled) setAuditLogs(rows); })
+      // A role without view_audit_log gets a 403 here; that is not an error
+      // worth shouting about, the panel simply stays empty.
+      .catch(() => { if (!cancelled) setAuditLogs([]); });
+    return () => { cancelled = true; };
+  }, [tenant, refreshKey]);
   const tenantProjectsList = useMemo(
     () => getByTenant<{ id: string; tenantId: string; name: string }>('projects', tenantId),
     [tenantId, refreshKey]

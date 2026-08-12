@@ -1,4 +1,4 @@
-import type { Lead, Tenant, User, Role, Project, Tower, Unit, Booking, Document, Campaign, Template, Quotation, Ticket, Broker, Account, JournalEntry, JournalLine } from '../types';
+import type { Lead, Tenant, User, Role, Project, Tower, Unit, Booking, Document, Campaign, Template, Quotation, Ticket, Broker, Account, JournalEntry, JournalLine, Invoice, Task, AuditLog } from '../types';
 
 /**
  * Feature-flagged API client for the Fastify backend (server/).
@@ -1355,4 +1355,109 @@ export async function apiGetChatbotConfig(): Promise<ApiChatbotConfig | null> {
 export async function apiSaveChatbotConfig(cfg: Partial<ApiChatbotConfig>): Promise<ApiChatbotConfig | null> {
   const r = await request<{ config: ApiChatbotConfig | null }>('/api/chatbot/config', { method: 'PUT', body: JSON.stringify(cfg) });
   return r.config;
+}
+
+// ── Invoices, CRM tasks, audit trail, tenant provisioning ──────────────────
+// The endpoints added in migration 030 / a76f369. These replace the last of
+// the localStorage-only tables.
+
+export async function apiGetInvoices(): Promise<Invoice[]> {
+  const res = await request<{ invoices: Invoice[] }>('/api/invoices');
+  return res.invoices;
+}
+
+export async function apiCreateInvoice(input: Partial<Invoice>): Promise<Invoice> {
+  const res = await request<{ invoice: Invoice }>('/api/invoices', {
+    method: 'POST', body: JSON.stringify(invoiceBody(input)),
+  });
+  return res.invoice;
+}
+
+export async function apiUpdateInvoice(id: string, patch: Partial<Invoice>): Promise<Invoice> {
+  const res = await request<{ invoice: Invoice }>(`/api/invoices/${id}`, {
+    method: 'PATCH', body: JSON.stringify(invoiceBody(patch)),
+  });
+  return res.invoice;
+}
+
+export async function apiDeleteInvoice(id: string): Promise<void> {
+  await request<void>(`/api/invoices/${id}`, { method: 'DELETE' });
+}
+
+/** id/tenantId are server-owned; only send what the route accepts. */
+function invoiceBody(i: Partial<Invoice>): Record<string, unknown> {
+  const b: Record<string, unknown> = {};
+  if (i.leadId) b.leadId = i.leadId;
+  if (i.leadName !== undefined) b.leadName = i.leadName;
+  if (i.project !== undefined) b.project = i.project;
+  if (i.type !== undefined) b.type = i.type;
+  if (i.amount !== undefined) b.amount = i.amount;
+  // The API takes plain dates; the SPA carries ISO timestamps.
+  if (i.date) b.date = String(i.date).slice(0, 10);
+  if (i.dueDate) b.dueDate = String(i.dueDate).slice(0, 10);
+  if (i.status !== undefined) b.status = i.status;
+  return b;
+}
+
+export async function apiGetTasks(): Promise<Task[]> {
+  const res = await request<{ tasks: Task[] }>('/api/crm-tasks');
+  return res.tasks;
+}
+
+export async function apiCreateTask(input: Partial<Task>): Promise<Task> {
+  const res = await request<{ task: Task }>('/api/crm-tasks', {
+    method: 'POST', body: JSON.stringify(taskBody(input)),
+  });
+  return res.task;
+}
+
+export async function apiUpdateTask(id: string, patch: Partial<Task>): Promise<Task> {
+  const res = await request<{ task: Task }>(`/api/crm-tasks/${id}`, {
+    method: 'PATCH', body: JSON.stringify(taskBody(patch)),
+  });
+  return res.task;
+}
+
+export async function apiDeleteTask(id: string): Promise<void> {
+  await request<void>(`/api/crm-tasks/${id}`, { method: 'DELETE' });
+}
+
+function taskBody(t: Partial<Task>): Record<string, unknown> {
+  const b: Record<string, unknown> = {};
+  if (t.userId) b.userId = t.userId;
+  if (t.title !== undefined) b.title = t.title;
+  if (t.description !== undefined) b.description = t.description;
+  if (t.dueDate) b.dueDate = t.dueDate;
+  if (t.priority !== undefined) b.priority = t.priority;
+  if (t.status !== undefined) b.status = t.status;
+  if (t.category !== undefined) b.category = t.category;
+  return b;
+}
+
+export async function apiGetAuditLogs(limit = 200): Promise<AuditLog[]> {
+  const res = await request<{ auditLogs: AuditLog[] }>(`/api/audit-logs?limit=${limit}`);
+  return res.auditLogs;
+}
+
+export async function apiGetTenants(): Promise<Tenant[]> {
+  const res = await request<{ tenants: Tenant[] }>('/api/tenants');
+  return res.tenants;
+}
+
+/** The temp password comes back exactly once — it is never readable again. */
+export async function apiCreateTenant(input: {
+  name: string; company?: string; slug: string; email: string;
+  adminName: string; adminEmail: string; plan?: string; country?: string; currency?: string; phone?: string;
+}): Promise<{ tenant: Tenant; admin: { id: string; email: string }; tempPassword: string }> {
+  return request('/api/tenants', { method: 'POST', body: JSON.stringify(input) });
+}
+
+export async function apiUpdateTenant(
+  id: string,
+  patch: { plan?: string; status?: string; branchId?: string | null; name?: string; phone?: string },
+): Promise<Tenant> {
+  const res = await request<{ tenant: Tenant }>(`/api/tenants/${id}`, {
+    method: 'PATCH', body: JSON.stringify(patch),
+  });
+  return res.tenant;
 }

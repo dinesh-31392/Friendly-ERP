@@ -1,7 +1,8 @@
 import { useState, useMemo, useEffect } from 'react';
 import { ChevronLeft, ChevronRight, Plus, Clock, MapPin, Calendar as CalendarIcon, X } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { getByTenant, create, update, remove } from '../services/db';
+import { getByTenant } from '../services/db';
+import { apiGetTasks, apiCreateTask, apiUpdateTask, apiDeleteTask } from '../services/apiClient';
 import { useTenantUsers } from '../hooks/useTenantUsers';
 import { localeFor } from '../utils/format';
 import type { Task, Lead, Priority, TaskCategory, TaskStatus } from '../types';
@@ -43,10 +44,7 @@ export default function Calendar() {
   useEffect(() => {
     const focusId = localStorage.getItem('friendly_crm_focus_task');
     if (focusId) {
-      const allT = getByTenant<Task>('tasks', tenantId);
-      // Respect role filtering: executives only see their own tasks
-      const visibleTasks = isExecutive ? allT.filter(t => t.userId === userId) : allT;
-      const target = visibleTasks.find(t => t.id === focusId);
+      const target = allTasks.find(t => t.id === focusId);
       if (target) {
         const d = new Date(target.dueDate);
         setCurrentMonth(d.getMonth());
@@ -61,8 +59,18 @@ export default function Calendar() {
 
   const weeks = useMemo(() => getMonthDays(currentYear, currentMonth), [currentYear, currentMonth]);
 
-  const allTasks = useMemo(() => getByTenant<Task>('tasks', tenantId), [tenantId, refreshKey]);
-  const tasks = isExecutive ? allTasks.filter(t => t.userId === userId) : allTasks;
+  // The server already scopes tasks: a rep gets only their own, anyone who can
+  // manage the team gets everyone's. No client-side filter needed, and doing it
+  // here would only hide rows the caller is entitled to see.
+  const [allTasks, setAllTasks] = useState<Task[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    apiGetTasks()
+      .then(rows => { if (!cancelled) setAllTasks(rows); })
+      .catch(err => toast.error(err instanceof Error ? err.message : 'Could not load tasks'));
+    return () => { cancelled = true; };
+  }, [tenantId, refreshKey]);
+  const tasks = allTasks;
   const leads = useMemo(() => getByTenant<Lead>('leads', tenantId), [tenantId, refreshKey]);
   const users = useTenantUsers(tenantId, refreshKey);
 
@@ -124,21 +132,29 @@ export default function Calendar() {
     setSelectedDate(1);
   };
 
-  const handleToggleTask = (task: Task) => {
+  const handleToggleTask = async (task: Task) => {
     const newStatus: TaskStatus = task.status === 'completed' ? 'pending' : 'completed';
-    update<Task>('tasks', task.id, { status: newStatus });
-    refresh();
-    toast.success(newStatus === 'completed' ? 'Task completed' : 'Task reopened');
+    try {
+      await apiUpdateTask(task.id, { status: newStatus });
+      refresh();
+      toast.success(newStatus === 'completed' ? 'Task completed' : 'Task reopened');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not update the task');
+    }
   };
 
-  const handleDeleteTask = (id: string) => {
+  const handleDeleteTask = async (id: string) => {
     if (!confirm('Delete this task?')) return;
-    remove('tasks', id);
-    refresh();
-    toast.success('Task deleted');
+    try {
+      await apiDeleteTask(id);
+      refresh();
+      toast.success('Task deleted');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not delete the task');
+    }
   };
 
-  const handleAdd = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleAdd = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const form = e.currentTarget;
     const formData = new FormData(form);
@@ -149,18 +165,22 @@ export default function Calendar() {
 
     const dueDate = new Date(`${dateStr}T${timeStr || '10:00'}`).toISOString();
 
-    create<Task>('tasks', {
-      id: '', tenantId, userId: (formData.get('userId') as string) || userId,
-      title,
-      description: (formData.get('description') as string) || '',
-      dueDate,
-      priority: (formData.get('priority') as Priority) || 'warm',
-      status: 'pending',
-      category: (formData.get('category') as TaskCategory) || 'other',
-    });
-    setShowAdd(false);
-    refresh();
-    toast.success('Task added');
+    try {
+      await apiCreateTask({
+        userId: (formData.get('userId') as string) || userId,
+        title,
+        description: (formData.get('description') as string) || '',
+        dueDate,
+        priority: (formData.get('priority') as Priority) || 'warm',
+        status: 'pending',
+        category: (formData.get('category') as TaskCategory) || 'other',
+      });
+      setShowAdd(false);
+      refresh();
+      toast.success('Task added');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not add the task');
+    }
   };
 
   const upcomingTasks = tasks.filter(t => t.status !== 'completed')

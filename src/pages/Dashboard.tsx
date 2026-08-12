@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import {
   Users, TrendingUp, IndianRupee, Building2, CheckCircle, BarChart3,
@@ -8,6 +8,8 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { getByTenant, update, logAudit } from '../services/db';
+import { apiGetLeads, apiGetUnits, apiGetProjects, apiGetTasks, apiGetLeadActivities } from '../services/apiClient';
+import { toActivity } from '../services/leadActivityWrites';
 import { useTenantUsers } from '../hooks/useTenantUsers';
 import { getLeadStages } from '../services/metaService';
 import { isModuleEnabled } from '../services/planService';
@@ -38,10 +40,23 @@ export default function Dashboard() {
   const currency = tenant?.currency || 'INR';
   const isExecutive = user?.role === 'sales_executive';
 
-  const allLeads = useMemo(() => getByTenant<Lead>('leads', tenantId), [tenantId, refreshKey]);
-  const allTasks = useMemo(() => getByTenant<Task>('tasks', tenantId), [tenantId, refreshKey]);
-  const units = useMemo(() => getByTenant<Unit>('units', tenantId), [tenantId, refreshKey]);
-  const activities = useMemo(() => getByTenant<Activity>('activities', tenantId), [tenantId, refreshKey]);
+  const [allLeads, setAllLeads] = useState<Lead[]>([]);
+  const [allTasks, setAllTasks] = useState<Task[]>([]);
+  const [units, setUnits] = useState<Unit[]>([]);
+  const [activities, setActivities] = useState<Activity[]>([]);
+  const [projects, setProjects] = useState<Project[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    const set = <T,>(fn: (v: T[]) => void) => (rows: T[]) => { if (!cancelled) fn(rows); };
+    // Each settles on its own: one slow or forbidden endpoint must not blank
+    // the whole dashboard, so every failure degrades to an empty section.
+    apiGetLeads().then(set(setAllLeads)).catch(() => {});
+    apiGetTasks().then(set(setAllTasks)).catch(() => {});
+    apiGetUnits().then(set(setUnits)).catch(() => {});
+    apiGetProjects().then(set(setProjects)).catch(() => {});
+    apiGetLeadActivities().then(rows => { if (!cancelled) setActivities(rows.map(toActivity)); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [tenantId, refreshKey]);
   const users = useTenantUsers(tenantId, refreshKey);
 
   // ERP visibility — each block needs both the permission AND the module on
@@ -50,7 +65,6 @@ export default function Dashboard() {
   const showProcurement = hasPermission('view_procurement') && moduleOn('procurement');
   const showFinance = hasPermission('view_finance') && moduleOn('billing');
 
-  const projects = useMemo(() => getByTenant<Project>('projects', tenantId), [tenantId, refreshKey]);
   const siteTasks = useMemo(
     () => showExecution ? getByTenant<SiteTask>('siteTasks', tenantId) : [],
     [tenantId, refreshKey, showExecution]

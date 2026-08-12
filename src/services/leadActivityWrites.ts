@@ -50,7 +50,7 @@ export async function addLeadNote(leadId: string, content: string): Promise<void
 
 /** Shape a server activity row for the SPA's Activity type. */
 export function toActivity(r: {
-  id: string; leadId: string; userId?: string; type: string; notes?: string; createdAt: string;
+  id: string; leadId: string; userId?: string | null; type: string; notes?: string | null; createdAt: string;
 }): Activity {
   const reverse: Record<string, ActivityType> = {
     site_visit: 'visit', stage_change: 'status_change',

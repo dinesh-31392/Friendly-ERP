@@ -1,23 +1,45 @@
-# ─── Host nginx vhost: erp.example.com → the ERP stack on 127.0.0.1:8080 ────
+# ─── Host nginx vhost: ERP_DOMAIN → the ERP stack on 127.0.0.1:8080 ─────────
 #
-# For a VPS whose port 80/443 already belong to WordPress. Copy to
-# /etc/nginx/sites-available/erp.example.com, replace ERP_DOMAIN, symlink into
-# sites-enabled, then `nginx -t && systemctl reload nginx`.
+# For a VPS whose port 80/443 already belong to another site. Works for either
+# a subdomain (erp.example.com) or a separate domain (myerp.com) — replace
+# ERP_DOMAIN throughout with whichever you are using.
 #
-# Issue the certificate FIRST (this file references it):
-#   certbot certonly --webroot -w /var/www/html -d ERP_DOMAIN
+# On a SEPARATE domain you almost certainly want the apex and www to be the same
+# site. Pick one as canonical and redirect the other; serving both is how you
+# end up with users holding two different session cookies. These blocks treat
+# the apex as canonical, which is the shorter thing to type on a phone.
+#
+# Issue the certificate FIRST (this file references it), covering both names:
+#   certbot certonly --webroot -w /var/www/html -d ERP_DOMAIN -d www.ERP_DOMAIN
 # `--webroot`, not `--standalone`: standalone needs port 80, which nginx is
 # holding, so it would fail — or worse, you would stop nginx to free the port
-# and take WordPress down to issue a certificate.
+# and take the other site down to issue a certificate.
+#
+# If ERP_DOMAIN is a SUBDOMAIN, drop every `www.ERP_DOMAIN` below and the
+# redirect block with it — www.erp.example.com is not a name anyone types.
 
 server {
     listen 80;
     listen [::]:80;
-    server_name ERP_DOMAIN;
+    server_name ERP_DOMAIN www.ERP_DOMAIN;
 
     # Leave this reachable over plain HTTP so renewals keep working.
     location /.well-known/acme-challenge/ { root /var/www/html; }
-    location / { return 301 https://$host$request_uri; }
+    location / { return 301 https://ERP_DOMAIN$request_uri; }
+}
+
+# www → apex, over TLS. Needed because a browser reaching www by HTTPS never
+# passes through the port-80 block above.
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name www.ERP_DOMAIN;
+
+    ssl_certificate     /etc/letsencrypt/live/ERP_DOMAIN/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/ERP_DOMAIN/privkey.pem;
+
+    return 301 https://ERP_DOMAIN$request_uri;
 }
 
 server {

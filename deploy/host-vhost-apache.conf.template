@@ -9,8 +9,15 @@
 #   certbot certonly --webroot -w /var/www/html -d ERP_DOMAIN
 #   a2ensite erp.example.com && apachectl configtest && systemctl reload apache2
 
+# On a SEPARATE domain, pick one of apex / www as canonical and redirect the
+# other — serving both leaves users holding two different session cookies.
+# These blocks treat the apex as canonical. Issue the cert for both names:
+#   certbot certonly --webroot -w /var/www/html -d ERP_DOMAIN -d www.ERP_DOMAIN
+# If ERP_DOMAIN is a SUBDOMAIN, drop every www.ERP_DOMAIN line below.
+
 <VirtualHost *:80>
     ServerName ERP_DOMAIN
+    ServerAlias www.ERP_DOMAIN
     # Keep ACME reachable over HTTP so renewals keep working.
     Alias /.well-known/acme-challenge/ /var/www/html/.well-known/acme-challenge/
     <Directory "/var/www/html/.well-known/acme-challenge/">
@@ -18,7 +25,17 @@
     </Directory>
     RewriteEngine On
     RewriteCond %{REQUEST_URI} !^/\.well-known/acme-challenge/
-    RewriteRule ^(.*)$ https://%{HTTP_HOST}$1 [R=301,L]
+    RewriteRule ^(.*)$ https://ERP_DOMAIN$1 [R=301,L]
+</VirtualHost>
+
+# www → apex over TLS. A browser reaching www by HTTPS never passes through the
+# port-80 block above, so this cannot be skipped.
+<VirtualHost *:443>
+    ServerName www.ERP_DOMAIN
+    SSLEngine on
+    SSLCertificateFile    /etc/letsencrypt/live/ERP_DOMAIN/fullchain.pem
+    SSLCertificateKeyFile /etc/letsencrypt/live/ERP_DOMAIN/privkey.pem
+    Redirect permanent / https://ERP_DOMAIN/
 </VirtualHost>
 
 <VirtualHost *:443>

@@ -392,23 +392,46 @@ ERP idles at roughly 400–700 MB across Postgres, the API and nginx. Check your
 with `free -h` before starting; the number that matters is that Postgres has
 room to cache, not that the containers fit.
 
-**Your email is unaffected.** Adding a subdomain creates an A record. Mail
-routing is MX, and Microsoft 365 keeps those. Do not touch the MX, SPF, DKIM or
-DMARC records — an A record for `erp.` cannot alter mail delivery for the apex
-domain.
+**Your existing email is unaffected either way.** Mail routing is MX. Whether
+you add a subdomain to the WordPress domain or use a completely separate
+domain, the Microsoft 365 records on the original domain are untouched. Do not
+edit its MX, SPF, DKIM or DMARC.
 
-### 11a — Point a subdomain at the VPS
+### 11a — Point the ERP's domain at the VPS
 
-Add one DNS record wherever the domain's nameservers live:
+**A separate domain (recommended).** Keeping the ERP off the marketing domain
+means a WordPress compromise and an ERP compromise stay separate incidents, and
+cookies cannot be shared between them. At the new domain's DNS host:
 
 ```
-Type  Name  Value            TTL
-A     erp   YOUR_VPS_IP      300
+Type  Name  Value          TTL
+A     @     YOUR_VPS_IP    300
+A     www   YOUR_VPS_IP    300
 ```
 
-Wait for it to resolve before issuing a certificate — `dig +short erp.yourdomain.com`
-must return your VPS IP. Certbot fails if it does not, and Let's Encrypt rate
-limits repeated failures.
+Its nameservers must be somewhere you can edit records — if the domain is
+registered at Hostinger, point it at Hostinger's nameservers and use hPanel's
+DNS zone editor.
+
+Serve **one** of apex or www and redirect the other; the vhost templates treat
+the apex as canonical. Two live hostnames means two session cookies and users
+signed in on one but not the other.
+
+That domain needs no MX record at all unless you also want mail on it. The ERP
+sends nothing by email — WhatsApp goes out through the gateway, not SMTP.
+
+**A subdomain instead.** One record, `A  erp  YOUR_VPS_IP`, and drop every
+`www.ERP_DOMAIN` line from the vhost template.
+
+Either way, wait for it to resolve before issuing a certificate:
+
+```bash
+dig +short yournewdomain.com        # must return YOUR_VPS_IP
+dig +short www.yournewdomain.com
+```
+
+Certbot fails otherwise, and Let's Encrypt rate-limits repeated failures — five
+per hostname per hour, which is easy to burn while guessing at DNS.
 
 ### 11b — Move the ERP off ports 80/443
 
@@ -443,27 +466,51 @@ Then issue the certificate and install the vhost. **Use `--webroot`, never
 so it fails; and freeing the port means taking WordPress down to issue a cert.
 
 ```bash
-certbot certonly --webroot -w /var/www/html -d erp.yourdomain.com
+D=yournewdomain.com          # the ERP's domain, apex form, no www
+
+# Both names on ONE certificate. Drop -d www.$D for a subdomain.
+certbot certonly --webroot -w /var/www/html -d $D -d www.$D
 
 # nginx
-cp host-vhost-nginx.conf.template /etc/nginx/sites-available/erp.yourdomain.com
-sed -i 's/ERP_DOMAIN/erp.yourdomain.com/g' /etc/nginx/sites-available/erp.yourdomain.com
-ln -s /etc/nginx/sites-available/erp.yourdomain.com /etc/nginx/sites-enabled/
+cp host-vhost-nginx.conf.template /etc/nginx/sites-available/$D
+sed -i "s/ERP_DOMAIN/$D/g" /etc/nginx/sites-available/$D
+ln -s /etc/nginx/sites-available/$D /etc/nginx/sites-enabled/
 nginx -t && systemctl reload nginx
 
 # Apache
-a2enmod proxy proxy_http headers ssl
-cp host-vhost-apache.conf.template /etc/apache2/sites-available/erp.yourdomain.com.conf
-sed -i 's/ERP_DOMAIN/erp.yourdomain.com/g' /etc/apache2/sites-available/erp.yourdomain.com.conf
-a2ensite erp.yourdomain.com && apachectl configtest && systemctl reload apache2
+a2enmod proxy proxy_http headers ssl rewrite
+cp host-vhost-apache.conf.template /etc/apache2/sites-available/$D.conf
+sed -i "s/ERP_DOMAIN/$D/g" /etc/apache2/sites-available/$D.conf
+a2ensite $D && apachectl configtest && systemctl reload apache2
 ```
+
+Note the double quotes on `sed` — single quotes would insert the literal
+string `$D` into your config.
 
 `nginx -t` / `apachectl configtest` before every reload. A syntax error in the
 new vhost takes down WordPress too — same process, one bad config.
 
-Then set `PUBLIC_URL=https://erp.yourdomain.com` and
-`CORS_ORIGIN=https://erp.yourdomain.com` in `.env` and
-`docker compose -f docker-compose.prod.yml -f docker-compose.coexist.yml up -d api`.
+Then point the app at its own domain in `.env`:
+
+```bash
+PUBLIC_URL=https://yournewdomain.com
+CORS_ORIGIN=https://yournewdomain.com
+```
+
+```bash
+docker compose -f docker-compose.prod.yml -f docker-compose.coexist.yml up -d api
+```
+
+Both matter. `CORS_ORIGIN` is an allow-list — a mismatch and every API call
+fails in the browser while `curl` still works, which reads as "the app is
+broken" rather than "one env var is wrong". `PUBLIC_URL` is what the WhatsApp
+gateway is told to send webhooks to; if it still says the old address, inbound
+customer messages simply never arrive and nothing logs an error. If you change
+the domain later, reconnect each rep's WhatsApp session so the webhook is
+re-registered.
+
+The SPA itself needs no rebuild — it was built for same-origin `/api`, so it
+follows whatever hostname it is served from.
 
 ### 11d — Do NOT run enable-https.sh in this mode
 

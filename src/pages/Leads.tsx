@@ -11,7 +11,7 @@ import { getByTenant, logAudit } from '../services/db';
 import type { Lead, LeadStage, Note, Activity, Priority, User as UserType } from '../types';
 import { leadScoreBand, explainLeadScore, LOST_REASONS } from '../types';
 import { getLeadStages, getLeadSources, getConfigurations, type StageDef } from '../services/metaService';
-import { formatCurrency, currencySymbol } from '../utils/format';
+import { formatCurrency, currencySymbol , localeFor, receivedOn, sinceArrival } from '../utils/format';
 import { telHref, mailtoHref } from '../utils/contact';
 import { whatsappSend } from '../services/whatsappService';
 import { toCsv } from '../utils/csv';
@@ -92,6 +92,7 @@ export default function Leads() {
   const { user, tenant, hasPermission } = useAuth();
   const navigate = useNavigate();
   const tenantId = tenant?.id || '';
+  const appLocale = localeFor(tenant?.currency);
   const userId = user?.id || '';
   const currency = tenant?.currency || 'INR';
 
@@ -519,8 +520,8 @@ export default function Leads() {
 
   const handleBulkExport = () => {
     if (selectedLeads.length === 0) return;
-    const rows = [['Name', 'Phone', 'Email', 'Project', 'Stage', 'Budget', 'Source', 'Assigned To']];
-    selectedLeads.forEach(l => rows.push([l.name, l.phone, l.email, l.project, l.stage, String(l.budget), l.source, getUserName(l.assignedTo)]));
+    const rows = [['Name', 'Phone', 'Email', 'Project', 'Stage', 'Budget', 'Source', 'Assigned To', 'Received At']];
+    selectedLeads.forEach(l => rows.push([l.name, l.phone, l.email, l.project, l.stage, String(l.budget), l.source, getUserName(l.assignedTo), l.createdAt ?? '']));
     // toCsv neutralises formula-injection: a lead name from an untrusted source
     // (microsite enquiry, portal, import) must not execute when opened in Excel.
     const csv = toCsv(rows);
@@ -640,8 +641,8 @@ export default function Leads() {
             </button>
             <button
               onClick={() => {
-                const rows = [['Name', 'Phone', 'Email', 'Project', 'Stage', 'Budget', 'Source', 'Assigned To']];
-                filteredLeads.forEach(l => rows.push([l.name, l.phone, l.email, l.project, l.stage, String(l.budget), l.source, getUserName(l.assignedTo)]));
+                const rows = [['Name', 'Phone', 'Email', 'Project', 'Stage', 'Budget', 'Source', 'Assigned To', 'Received At']];
+                filteredLeads.forEach(l => rows.push([l.name, l.phone, l.email, l.project, l.stage, String(l.budget), l.source, getUserName(l.assignedTo), l.createdAt ?? '']));
                 const csv = toCsv(rows);   // formula-injection-safe (see utils/csv.ts)
                 const blob = new Blob([csv], { type: 'text/csv' });
                 const url = URL.createObjectURL(blob);
@@ -881,6 +882,7 @@ export default function Leads() {
                     <th className="text-center px-5 py-3 text-xs font-semibold text-zinc-500 uppercase tracking-wider">Stage</th>
                     <th className="text-center px-5 py-3 text-xs font-semibold text-zinc-500 uppercase tracking-wider">Priority</th>
                     <th className="text-left px-5 py-3 text-xs font-semibold text-zinc-500 uppercase tracking-wider">Assigned To</th>
+                    <th className="text-left px-5 py-3 text-xs font-semibold text-zinc-500 uppercase tracking-wider whitespace-nowrap">Received</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -927,6 +929,10 @@ export default function Leads() {
                       </td>
                       <td className="px-5 py-3.5 text-sm text-zinc-700">
                         {getUserName(lead.assignedTo)}
+                      </td>
+                      <td className="px-5 py-3.5 whitespace-nowrap">
+                        <p className="text-sm text-zinc-700">{receivedOn(lead.createdAt, appLocale)}</p>
+                        <p className="text-[11px] text-zinc-400">{sinceArrival(lead.createdAt)}</p>
                       </td>
                     </tr>
                   ))}

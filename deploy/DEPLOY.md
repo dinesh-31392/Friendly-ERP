@@ -531,3 +531,91 @@ and can overwrite hand-edited vhosts on update. Where the panel offers a
 templates here and point it at `http://127.0.0.1:8080`. The proxy headers in the
 templates are the part to carry across — particularly `X-Forwarded-For`, which
 the login rate limit and the audit trail both depend on.
+
+## Step 12 — Sign-in codes by email
+
+Platform admins sign in with a password **and** a 6-digit code emailed to them.
+The account that can reach every workspace should not be one stolen password
+away from an attacker.
+
+**Set this up before you rely on the account.** With no mail configured, an
+account with MFA enabled cannot sign in at all — the password is accepted and
+then the code cannot be delivered, which is a 503 and a locked-out admin.
+
+### 12a — Gmail
+
+Gmail needs an **App Password**, not your Google password. Google stopped
+accepting account passwords for SMTP in 2022.
+
+1. Turn on **2-Step Verification** at
+   [myaccount.google.com/security](https://myaccount.google.com/security).
+   App Passwords do not exist without it — the page simply will not offer them.
+2. Go to [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords),
+   name it "Friendly ERP", and copy the 16-character password.
+3. Put it in `.env` **with the spaces removed**:
+
+```bash
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=youraccount@gmail.com
+SMTP_PASS=abcdefghijklmnop
+SMTP_FROM=Friendly ERP <youraccount@gmail.com>
+```
+
+Google displays the password as `abcd efgh ijkl mnop` for readability. The
+spaces are not part of it, and pasting them is the most common reason
+authentication fails.
+
+`SMTP_FROM` must be the Gmail address itself or a verified alias — Gmail
+rewrites or rejects anything else.
+
+### 12b — Test it before trusting it
+
+```bash
+docker compose -f docker-compose.prod.yml -f docker-compose.coexist.yml \
+  run --rm api node scripts/test-mail.mjs you@example.com
+```
+
+It verifies the credentials, sends a real message, and translates the usual SMTP
+failures into what actually caused them. **Check spam as well as the inbox** — a
+sign-in code in a spam folder is a locked-out admin.
+
+### 12c — What Gmail is and is not good for
+
+A Gmail account is fine for a handful of platform admins: the free limit is
+around 500 messages a day, and sign-in codes are a few per person per week.
+
+It is not the right sender if you later enable codes for every user across every
+tenant. At that volume you want a transactional provider — Resend, Postmark,
+Brevo — which the same four variables already support, because Google throttles
+bulk sending from personal accounts and a throttled login code is an outage.
+
+### 12d — Bringing a server up before mail works
+
+```bash
+MAIL_TRANSPORT=console
+```
+
+Codes are printed to the container log instead of emailed:
+
+```bash
+docker compose -f docker-compose.prod.yml logs api | grep 'Sign-in code'
+```
+
+Useful for a first login on a box whose SMTP is not sorted yet. It warns on
+every send, because a deployment left in this mode is writing working
+credentials into its logs — remove it as soon as real mail works.
+
+### 12e — Turning it on or off for an account
+
+Enrolment is per user. Platform staff are enrolled by migration 031; everyone
+else is opt-in.
+
+```sql
+-- Require codes for a user
+UPDATE users SET mfa_email_enabled = true WHERE email = 'someone@example.com';
+
+-- Emergency: an admin locked out because mail broke. Fix the mail instead
+-- where you can — this leaves the account on a password alone.
+UPDATE users SET mfa_email_enabled = false WHERE email = 'someone@example.com';
+```

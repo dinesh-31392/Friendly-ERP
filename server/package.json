@@ -20,7 +20,9 @@
     "verify:whatsapp": "node scripts/verify-whatsapp.mjs",
     "verify:golive": "node scripts/verify-golive.mjs",
     "verify:cascade": "node scripts/verify-booking-cascade.mjs",
-    "verify:merge": "node scripts/verify-lead-merge.mjs"
+    "verify:merge": "node scripts/verify-lead-merge.mjs",
+    "mail:test": "node scripts/test-mail.mjs",
+    "verify:mfa": "node scripts/verify-mfa.mjs"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",

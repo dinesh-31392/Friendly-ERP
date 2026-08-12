@@ -17,8 +17,6 @@ interface AuthContextType {
   register: (name: string, email: string, password: string, phone: string, company: string, country?: string, currency?: string) => Promise<{ success: boolean; error?: string; pending?: boolean }>;
   resetPassword: (email: string, newPassword: string) => { success: boolean; error?: string };
   changeOwnPassword: (newPassword: string) => { success: boolean; error?: string };
-  needsSetup: boolean;
-  setupPlatformAdmin: (name: string, email: string, password: string) => Promise<{ success: boolean; error?: string }>;
   logout: () => void;
   hasPermission: (action: string) => boolean;
   refreshSession: () => void;
@@ -33,7 +31,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [isLoading, setIsLoading] = useState(true);
   // A fresh deployment ships with zero accounts (no seed data, no default
   // credentials), so the login page must offer setup rather than a sign-in form.
-  const [needsSetup, setNeedsSetup] = useState(false);
 
   // Initialize DB and restore session. API mode restores the JWT session
   // captured at login so a page refresh doesn't log the user out.
@@ -52,10 +49,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         loadTenantUsers(session.tenant.id);
       }
     }
-    // First-run "setup" is a localStorage-demo concept only. In API mode the
-    // platform admin is created server-side (seed.ts / bootstrap), so the
-    // sign-in form must show even though this browser's localStorage is empty.
-    setNeedsSetup(!isApiEnabled() && authService.needsSetup());
+    // No browser-side first-run setup exists any more — the platform admin is
+    // created server-side by the seed bootstrap.
     setIsLoading(false);
   }, []);
 
@@ -68,21 +63,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (!isApiEnabled() || !tenant?.id) return;
     hydrateLedger(tenant.id).catch(() => { /* pages fall back to whatever's cached */ });
   }, [tenant?.id]);
-
-  const setupPlatformAdmin = useCallback(async (name: string, email: string, password: string) => {
-    if (password.length < 8) {
-      return { success: false, error: 'Password must be at least 8 characters.' };
-    }
-    const result = authService.createPlatformAdmin(name, email, password);
-    if (!result) {
-      // needsSetup() was false — an account already exists. Never mint a second
-      // super admin on a live install.
-      setNeedsSetup(false);
-      return { success: false, error: 'Setup has already been completed on this deployment.' };
-    }
-    setNeedsSetup(false);
-    return { success: true };
-  }, []);
 
   const loadTenantUsers = (tenantId: string) => {
     const tenantUsers = authService.getTenantUsers(tenantId);
@@ -220,8 +200,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   return (
     <AuthContext.Provider value={{
       user, tenant, users, isAuthenticated: !!user, isLoading,
-      login, register, resetPassword, changeOwnPassword, logout, hasPermission, refreshSession,
-      needsSetup, setupPlatformAdmin
+      login, register, resetPassword, changeOwnPassword, logout, hasPermission, refreshSession
     }}>
       {children}
     </AuthContext.Provider>

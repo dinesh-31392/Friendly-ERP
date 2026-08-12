@@ -10,12 +10,7 @@ import toast from 'react-hot-toast';
 type LoginTab = 'platform' | 'builder' | 'portal';
 
 export default function Login() {
-  const { login, register, resetPassword, needsSetup, setupPlatformAdmin } = useAuth();
-  // First-run setup fields (fresh deployment, zero accounts)
-  const [suName, setSuName] = useState('');
-  const [suEmail, setSuEmail] = useState('');
-  const [suPassword, setSuPassword] = useState('');
-  const [suConfirm, setSuConfirm] = useState('');
+  const { login, register, resetPassword } = useAuth();
   const [tab, setTab] = useState<LoginTab>('builder');
   const [isRegistering, setIsRegistering] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
@@ -143,23 +138,6 @@ export default function Login() {
     }
   };
 
-  const handleSetup = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!suName || !suEmail || !suPassword) { toast.error('Please fill all fields'); return; }
-    if (!emailValid(suEmail)) { toast.error('Please enter a valid email address'); return; }
-    if (suPassword.length < 8) { toast.error('Password must be at least 8 characters'); return; }
-    if (suPassword !== suConfirm) { toast.error('Passwords do not match'); return; }
-    setLoading(true);
-    const result = await setupPlatformAdmin(suName, suEmail, suPassword);
-    setLoading(false);
-    if (!result.success) { toast.error(result.error || 'Setup failed'); return; }
-    toast.success('Platform administrator created — sign in to continue');
-    setTab('platform');
-    setEmail(suEmail);
-    setPassword('');
-    setSuName(''); setSuEmail(''); setSuPassword(''); setSuConfirm('');
-  };
-
   const openForgot = () => {
     setFpEmail(!isRegistering ? email : regEmail);
     setFpNew(''); setFpConfirm(''); setFpShow(false);
@@ -253,68 +231,6 @@ export default function Login() {
           </div>
 
           <div className="bg-white rounded-2xl border border-zinc-200/60 p-6 sm:p-8 shadow-sm">
-            {needsSetup ? (
-              /* ── First run: no accounts exist yet ──────────────────────────
-                 This build ships with NO seed data and NO default credentials,
-                 so there is nothing to sign in with until the operator creates
-                 the first platform administrator here. createPlatformAdmin is
-                 guarded by needsSetup(), so this can only ever run once. */
-              <div>
-                <div className="h-11 w-11 rounded-2xl bg-indigo-50 flex items-center justify-center mb-4">
-                  <Shield className="h-5 w-5 text-indigo-500" />
-                </div>
-                <h2 className="text-xl font-bold text-zinc-900">Set up Friendly ERP</h2>
-                <p className="text-sm text-zinc-500 mt-1 mb-5">
-                  This is a fresh installation. Create your platform administrator account — you'll use it to onboard builders and run the platform.
-                </p>
-                <form onSubmit={handleSetup} className="space-y-4">
-                  <div>
-                    <label className="block text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-1.5">Your Name</label>
-                    <div className="relative">
-                      <User className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-zinc-400" />
-                      <input value={suName} onChange={e => setSuName(e.target.value)} placeholder="Jane Doe" autoFocus
-                        className="w-full pl-9 pr-4 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-400" />
-                    </div>
-                  </div>
-                  <div>
-                    <label className="block text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-1.5">Email</label>
-                    <div className="relative">
-                      <Mail className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-zinc-400" />
-                      <input type="email" value={suEmail} onChange={e => setSuEmail(e.target.value)} placeholder="admin@yourcompany.com"
-                        className="w-full pl-9 pr-4 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-400" />
-                    </div>
-                  </div>
-                  <div>
-                    <label className="block text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-1.5">Password</label>
-                    <div className="relative">
-                      <Lock className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-zinc-400" />
-                      <input type={showPassword ? 'text' : 'password'} value={suPassword} onChange={e => setSuPassword(e.target.value)} placeholder="At least 8 characters"
-                        className="w-full pl-9 pr-10 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-400" />
-                      <button type="button" onClick={() => setShowPassword(!showPassword)} aria-label={showPassword ? 'Hide password' : 'Show password'}
-                        className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600">
-                        {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                      </button>
-                    </div>
-                  </div>
-                  <div>
-                    <label className="block text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-1.5">Confirm Password</label>
-                    <div className="relative">
-                      <Lock className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-zinc-400" />
-                      <input type={showPassword ? 'text' : 'password'} value={suConfirm} onChange={e => setSuConfirm(e.target.value)} placeholder="Re-enter password"
-                        className="w-full pl-9 pr-4 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-400" />
-                    </div>
-                  </div>
-                  <button type="submit" disabled={loading}
-                    className="w-full flex items-center justify-center gap-2 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed">
-                    {loading ? <span className="h-5 w-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                      : <>Create Administrator <ArrowRight className="h-4 w-4" /></>}
-                  </button>
-                </form>
-                <p className="text-[11px] text-zinc-400 mt-4 text-center">
-                  This runs once. No demo accounts or sample data are installed.
-                </p>
-              </div>
-            ) : (
             <>
             {/* Login-type tabs */}
             <div className="flex items-center gap-1 bg-zinc-100 rounded-xl p-1 mb-6">
@@ -584,7 +500,6 @@ export default function Login() {
             </>
             )}
             </>
-            )}
           </div>
 
 

@@ -17,7 +17,10 @@
     "verify:accounts": "node scripts/verify-accounts.mjs",
     "verify:landbd": "node scripts/verify-landbd.mjs",
     "verify:portal": "node scripts/verify-portal.mjs",
-    "verify:whatsapp": "node scripts/verify-whatsapp.mjs"
+    "verify:whatsapp": "node scripts/verify-whatsapp.mjs",
+    "verify:golive": "node scripts/verify-golive.mjs",
+    "verify:cascade": "node scripts/verify-booking-cascade.mjs",
+    "verify:merge": "node scripts/verify-lead-merge.mjs"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",

@@ -1461,3 +1461,11 @@ export async function apiUpdateTenant(
   });
   return res.tenant;
 }
+
+/** Move a lead's activity timeline to another lead (duplicate merge). */
+export async function apiReassignLeadActivities(fromLeadId: string, toLeadId: string): Promise<number> {
+  const res = await request<{ moved: number }>('/api/lead-activities/reassign', {
+    method: 'POST', body: JSON.stringify({ fromLeadId, toLeadId }),
+  });
+  return res.moved;
+}

@@ -179,4 +179,36 @@ export async function crmRoutes(app: FastifyInstance): Promise<void> {
         return { commission: commToApi(rows[0]) };
       }),
   );
+  /**
+   * POST /api/lead-activities/reassign — move a lead's timeline to another lead.
+   *
+   * Merging duplicates is the only caller. Without this the SPA reparented rows
+   * in localStorage and then deleted the duplicate server-side, so the merged
+   * lead's history was destroyed by the FK cascade while the UI claimed it had
+   * been moved. Same tenant only, enforced by RLS on both ids.
+   */
+  app.post<{ Body: { fromLeadId: string; toLeadId: string } }>(
+    '/api/lead-activities/reassign',
+    {
+      preHandler: requireAuth,
+      schema: { body: { type: 'object', required: ['fromLeadId', 'toLeadId'], additionalProperties: false, properties: {
+        fromLeadId: { type: 'string', pattern: UUID }, toLeadId: { type: 'string', pattern: UUID },
+      } } },
+    },
+    async (req, reply) =>
+      withTenantContext(req.ctx, async (db) => {
+        if (!await gate(db, 'manage_leads')) return reply.code(403).send({ error: 'Missing permission: manage_leads' });
+        if (req.body.fromLeadId === req.body.toLeadId) {
+          return reply.code(400).send({ error: 'A lead cannot be merged into itself' });
+        }
+        // Both must be visible in this tenant; RLS makes a cross-tenant id a miss.
+        const { rows: seen } = await db.query(
+          'SELECT id FROM leads WHERE id = ANY($1::uuid[])', [[req.body.fromLeadId, req.body.toLeadId]]);
+        if (seen.length !== 2) return reply.code(404).send({ error: 'Lead not found' });
+        const { rowCount } = await db.query(
+          'UPDATE lead_activities SET lead_id = $1 WHERE lead_id = $2', [req.body.toLeadId, req.body.fromLeadId]);
+        return { moved: rowCount ?? 0 };
+      }),
+  );
+
 }

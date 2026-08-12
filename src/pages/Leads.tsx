@@ -7,8 +7,8 @@ import {
   List, LayoutGrid, Kanban, UserCheck
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { getByTenant, create, update, logAudit } from '../services/db';
-import type { Lead, LeadStage, Note, Activity, Task, Priority, User as UserType } from '../types';
+import { getByTenant, logAudit } from '../services/db';
+import type { Lead, LeadStage, Note, Activity, Priority, User as UserType } from '../types';
 import { leadScoreBand, explainLeadScore, LOST_REASONS } from '../types';
 import { getLeadStages, getLeadSources, getConfigurations, type StageDef } from '../services/metaService';
 import { formatCurrency, currencySymbol } from '../utils/format';
@@ -16,7 +16,8 @@ import { telHref, mailtoHref } from '../utils/contact';
 import { whatsappSend } from '../services/whatsappService';
 import { toCsv } from '../utils/csv';
 import { inviteCustomer, portalPath } from '../services/portalService';
-import { isApiEnabled, apiGetLeads } from '../services/apiClient';
+import { isApiEnabled, apiGetLeads, apiCreateTask, apiReassignLeadActivities } from '../services/apiClient';
+import { logLeadActivity, addLeadNote } from '../services/leadActivityWrites';
 import { createLead, patchLead, deleteLead as removeLead, patchLeads, deleteLeads } from '../services/leadWrites';
 import { useTenantUsers } from '../hooks/useTenantUsers';
 import DateRangeFilter from '../components/DateRangeFilter';
@@ -287,13 +288,16 @@ export default function Leads() {
 
   const handleMerge = async (primary: Lead, secondary: Lead) => {
     if (!confirm(`Merge "${secondary.name}" into "${primary.name}"? Notes & activities will be moved to the primary lead and the duplicate will be deleted.`)) return;
-    // Move notes & activities to the primary lead
-    getByTenant<Note>('notes', tenantId).filter(n => n.leadId === secondary.id).forEach(n => {
-      update<Note>('notes', n.id, { leadId: primary.id });
-    });
-    getByTenant<Activity>('activities', tenantId).filter(a => a.leadId === secondary.id).forEach(a => {
-      update<Activity>('activities', a.id, { leadId: primary.id });
-    });
+    // Move the timeline to the primary lead FIRST. Notes are activities of type
+    // 'note', so one call moves both. This has to happen before the duplicate is
+    // deleted — the FK cascades, and reparenting afterwards would have nothing
+    // left to reparent.
+    try {
+      await apiReassignLeadActivities(secondary.id, primary.id);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not move the activity history — merge cancelled');
+      return;
+    }
     // Keep the most advanced stage and highest budget ('lost' ranks below
     // everything so an active stage always wins regardless of merge order)
     const stageOrder = leadStages.map(s => s.id);
@@ -348,10 +352,9 @@ export default function Leads() {
       toast.error(err instanceof Error ? err.message : 'Could not update the stage');
       return;
     }
-    create<Activity>('activities', {
-      id: '', tenantId, leadId, userId, type: 'status_change',
+    void logLeadActivity({
+      leadId, type: 'status_change',
       description: `Stage changed to ${leadStages.find(s => s.id === newStage)?.label}${lostReason ? ` — reason: ${lostReason}` : ''}`,
-      createdAt: now,
     });
     audit('stage_change', leadId, `Stage changed to ${leadStages.find(s => s.id === newStage)?.label}${lostReason ? ` (${lostReason})` : ''}`);
     refresh();
@@ -363,15 +366,9 @@ export default function Leads() {
 
   const handleAddNote = async () => {
     if (!noteInput.trim() || !selectedLead) return;
-    create<Note>('notes', {
-      id: '', tenantId, leadId: selectedLead.id, userId, content: noteInput.trim(),
-      createdAt: new Date().toISOString(),
-    });
-    create<Activity>('activities', {
-      id: '', tenantId, leadId: selectedLead.id, userId, type: 'note',
-      description: `Note added: ${noteInput.trim().slice(0, 50)}...`,
-      createdAt: new Date().toISOString(),
-    });
+    // A note IS an activity of type 'note' — logging one separately wrote the
+    // timeline entry twice, once with the note and once with a truncated echo.
+    void addLeadNote(selectedLead.id, noteInput.trim());
     const now = new Date().toISOString();
     // Non-fatal: the note itself is already saved, so a failed "last contact"
     // touch must not present as the note having failed.
@@ -488,10 +485,7 @@ export default function Leads() {
     const now = new Date().toISOString();
     const { ok, failed } = await patchLeads(selectedLeads.map(l => l.id), { stage, lastContact: now });
     selectedLeads.forEach(l => {
-      create<Activity>('activities', {
-        id: '', tenantId, leadId: l.id, userId, type: 'status_change',
-        description: `Stage changed to ${label} (bulk update)`, createdAt: now,
-      });
+      void logLeadActivity({ leadId: l.id, type: 'status_change', description: `Stage changed to ${label} (bulk update)` });
     });
     audit('bulk_stage', 'bulk', `Bulk-moved ${ok} lead(s) to ${label}`);
     if (ok) toast.success(`${ok} lead(s) moved to ${label}`);
@@ -1289,12 +1283,11 @@ export default function Leads() {
                     audit('whatsapp_log', selectedLead.id, out.delivered
                       ? `Sent WhatsApp to ${selectedLead.name} via ${viaLabel}`
                       : `Opened WhatsApp chat with ${selectedLead.name} (${out.provider})`);
-                    create<Activity>('activities', {
-                      id: '', tenantId, leadId: selectedLead.id, userId, type: 'whatsapp',
+                    void logLeadActivity({
+                      leadId: selectedLead.id, type: 'whatsapp',
                       description: out.delivered
                         ? `WhatsApp sent to ${selectedLead.name} via ${viaLabel}`
                         : `WhatsApp conversation opened with ${selectedLead.name}`,
-                      createdAt: new Date().toISOString(),
                     });
                     refresh();
                     if (out.delivered) toast.success(out.provider === 'evolution' ? 'Sent from your WhatsApp' : 'Message sent via WhatsApp Business API');
@@ -1309,11 +1302,7 @@ export default function Leads() {
                   onClick={() => {
                     if (!selectedLead.email) { toast.error('This lead has no email address on file'); return; }
                     audit('email_log', selectedLead.id, `Drafted email to ${selectedLead.name}`);
-                    create<Activity>('activities', {
-                      id: '', tenantId, leadId: selectedLead.id, userId, type: 'email',
-                      description: `Email drafted to ${selectedLead.name} (${selectedLead.email})`,
-                      createdAt: new Date().toISOString(),
-                    });
+                    void logLeadActivity({ leadId: selectedLead.id, type: 'email', description: `Email drafted to ${selectedLead.name} (${selectedLead.email})` });
                     refresh();
                     // Open the default mail client with a prefilled draft
                     const subject = `${selectedLead.project} — your enquiry with ${tenant?.name || 'us'}`;
@@ -1344,16 +1333,8 @@ export default function Leads() {
                     const draft = `Hi ${selectedLead.name.split(' ')[0]}, this is ${user?.name || 'your advisor'} from ${tenant?.name || 'Friendly ERP'}. We loved hosting our buyers at ${selectedLead.project} recently! We've got a hot new matching ${selectedLead.configuration} unit within your ${formatCurrency(selectedLead.budget, currency)} budget limit. Would Saturday at 11am work for a call?`;
                     
                     // Add Note & Activity
-                    create<Note>('notes', {
-                      id: '', tenantId, leadId: selectedLead.id, userId,
-                      content: `✨ AI Brand-Voice Draft generated: "${draft}"`,
-                      createdAt: new Date().toISOString(),
-                    });
-                    create<Activity>('activities', {
-                      id: '', tenantId, leadId: selectedLead.id, userId, type: 'note',
-                      description: `AI brand-voice follow-up suggested and logged`,
-                      createdAt: new Date().toISOString(),
-                    });
+                    void addLeadNote(selectedLead.id, `✨ AI Brand-Voice Draft generated: "${draft}"`);
+                    void logLeadActivity({ leadId: selectedLead.id, type: 'note', description: `AI brand-voice follow-up suggested and logged` });
                     toast.success('AI brand-voice follow-up suggested & saved as Note!');
                     refresh();
                   }}
@@ -1375,11 +1356,7 @@ export default function Leads() {
                     async pos => {
                       const { latitude, longitude, accuracy } = pos.coords;
                       const mapsLink = `https://maps.google.com/?q=${latitude.toFixed(6)},${longitude.toFixed(6)}`;
-                      create<Activity>('activities', {
-                        id: '', tenantId, leadId: targetId, userId, type: 'visit',
-                        description: `📍 Geo-verified site check-in with ${targetName} at ${latitude.toFixed(5)}, ${longitude.toFixed(5)} (±${Math.round(accuracy)}m) — ${mapsLink}`,
-                        createdAt: new Date().toISOString(),
-                      });
+                      void logLeadActivity({ leadId: targetId, type: 'visit', description: `📍 Geo-verified site check-in with ${targetName} at ${latitude.toFixed(5)}, ${longitude.toFixed(5)} (±${Math.round(accuracy)}m) — ${mapsLink}` });
                       audit('site_checkin', targetId, `Geo-verified site visit check-in (${latitude.toFixed(5)}, ${longitude.toFixed(5)})`);
                       const now = new Date().toISOString();
                       await patchLead(targetId, { lastContact: now }).catch(() => {});
@@ -1509,20 +1486,16 @@ export default function Leads() {
                 if (Number.isNaN(when.getTime())) { toast.error('Please pick a valid date and time'); return; }
                 if (when.getTime() < Date.now()) { toast.error('Pick a future date and time'); return; }
 
-                create<Task>('tasks', {
-                  id: '', tenantId, userId,
+                void apiCreateTask({
+                  userId,
                   title: `Site Visit - ${selectedLead.name}`,
                   description: `Guided tour of ${selectedLead.project} with ${selectedLead.name}`,
                   dueDate: when.toISOString(),
                   priority: 'hot', status: 'pending', category: 'visit',
-                });
+                }).catch(() => toast.error('Could not add the visit to the calendar'));
                 handleStageChange(selectedLead.id, 'visit_scheduled');
                 const label = when.toLocaleString('en-IN', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
-                create<Activity>('activities', {
-                  id: '', tenantId, leadId: selectedLead.id, userId, type: 'visit',
-                  description: `Site visit scheduled for ${label}`,
-                  createdAt: new Date().toISOString(),
-                });
+                void logLeadActivity({ leadId: selectedLead.id, type: 'visit', description: `Site visit scheduled for ${label}` });
                 audit('schedule_visit', selectedLead.id, `Scheduled site visit for ${selectedLead.name} on ${label}`);
                 toast.success(`Site visit scheduled for ${label}`);
                 setVisitModal(null);
@@ -1576,11 +1549,7 @@ export default function Leads() {
                 const note = (fd.get('note') as string || '').trim();
                 const statusLabel = CALL_STATUSES.find(s => s.id === status)?.label || status;
                 const now = new Date().toISOString();
-                create<Activity>('activities', {
-                  id: '', tenantId, leadId: callLogModal.leadId, userId, type: 'call',
-                  description: `Call via ${callLogModal.mode === 'API_CLOUD' ? 'Cloud (Exotel)' : 'SIM'} — ${statusLabel}${duration ? `, ${duration} min` : ''}${note ? ` — "${note}"` : ''}`,
-                  createdAt: now,
-                });
+                void logLeadActivity({ leadId: callLogModal.leadId, type: 'call', description: `Call via ${callLogModal.mode === 'API_CLOUD' ? 'Cloud (Exotel)' : 'SIM'} — ${statusLabel}${duration ? `, ${duration} min` : ''}${note ? ` — "${note}"` : ''}` });
                 audit('call_log', callLogModal.leadId, `Logged ${callLogModal.mode === 'API_CLOUD' ? 'cloud' : 'SIM'} call: ${statusLabel}, ${duration} min`);
                 await patchLead(callLogModal.leadId, { lastContact: now }).catch(() => {});
                 setSelectedLead(prev => prev && prev.id === callLogModal.leadId ? { ...prev, lastContact: now } : prev);

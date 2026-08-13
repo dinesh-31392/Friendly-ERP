@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import {
   Globe, Building2, Users, IndianRupee, Activity, Plus, X,
   ScrollText, Settings2, LifeBuoy, CheckCircle2, Power,
@@ -6,12 +6,13 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { getAll, create, update, remove, removeByTenant, logAudit, getByTenant } from '../services/db';
+import { apiGetTenants, apiCreateTenant, apiUpdateTenant, apiGetAuditLogs } from '../services/apiClient';
 import { PLANS, platformMrrUsd, tenantMrrUsd, CONTROLLABLE_MODULES } from '../services/planService';
 import { getBranches, getLegacyBranch, branchName, visibleTenantsForUser } from '../services/branchService';
 import { uniqueSlug } from '../services/portalService';
 import { setTemporaryPassword, generateToken } from '../services/authService';
 import type { TenantOverrides, Branch } from '../types';
-import type { Tenant, User as UserType, Lead, AuditLog, Role } from '../types';
+import type { Tenant, User as UserType, Lead, AuditLog } from '../types';
 import toast from 'react-hot-toast';
 
 const tabs = [
@@ -32,6 +33,8 @@ export default function SuperAdmin() {
   const [refreshKey, setRefreshKey] = useState(0);
   const refresh = () => setRefreshKey(k => k + 1);
   const [showAddBuilder, setShowAddBuilder] = useState(false);
+  /** Holds the one-time password after provisioning, until it is dismissed. */
+  const [newWorkspace, setNewWorkspace] = useState<{ company: string; email: string; tempPassword: string } | null>(null);
   const [manageTenant, setManageTenant] = useState<Tenant | null>(null);
   const [showAddBranch, setShowAddBranch] = useState(false);
   const [impersonateUserId, setImpersonateUserId] = useState('');
@@ -41,7 +44,23 @@ export default function SuperAdmin() {
   const [pwUser, setPwUser] = useState<UserType | null>(null);
   const [pwValue, setPwValue] = useState('');
 
-  const allTenants = useMemo(() => getAll<Tenant>('tenants'), [refreshKey]);
+  // The platform console runs on the server: tenants and the audit trail are
+  // cross-tenant, which is exactly what localStorage could never represent —
+  // this page showed only what the current browser happened to have done.
+  const [allTenants, setAllTenants] = useState<Tenant[]>([]);
+  const [allAuditRows, setAllAuditRows] = useState<AuditLog[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    apiGetTenants()
+      .then(rows => { if (!cancelled) setAllTenants(rows); })
+      .catch(err => toast.error(err instanceof Error ? err.message : 'Could not load workspaces'));
+    // A tech_team account may not hold view_audit_log; an empty panel is the
+    // right outcome there, not an error.
+    apiGetAuditLogs(300)
+      .then(rows => { if (!cancelled) setAllAuditRows(rows); })
+      .catch(() => { if (!cancelled) setAllAuditRows([]); });
+    return () => { cancelled = true; };
+  }, [refreshKey]);
   const allUsers = useMemo(() => getAll<UserType>('users'), [refreshKey]);
   const allLeads = useMemo(() => getAll<Lead>('leads'), [refreshKey]);
   const branches = useMemo(() => getBranches(), [refreshKey]);
@@ -53,10 +72,10 @@ export default function SuperAdmin() {
   // tech_team sees only their own branch's builders — never platform-wide
   // governance actions or other branches.
   const allAudit = useMemo(
-    () => getAll<AuditLog>('auditLogs')
+    () => allAuditRows
       .filter(a => isSuperAdmin || visibleTenantIds.has(a.tenantId))
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
-    [refreshKey, isSuperAdmin, visibleTenantIds]
+    [allAuditRows, isSuperAdmin, visibleTenantIds]
   );
 
   // Active users across visible tenants, excluding platform staff accounts
@@ -69,7 +88,7 @@ export default function SuperAdmin() {
     logAudit({ tenantId: 'platform', userId: user.id, userName: user.name, action, entity: 'tenant', entityId, details });
   };
 
-  const handleAddBuilder = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleAddBuilder = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const fd = new FormData(e.currentTarget);
     const company = fd.get('company') as string;
@@ -89,30 +108,44 @@ export default function SuperAdmin() {
     // admin onboarding directly is auto-approved and billable immediately.
     const approvalStatus = isSuperAdmin ? 'approved' as const : 'pending' as const;
 
-    const createdTenant = create<Tenant>('tenants', {
-      id: '', name: company, company, logo: '',
-      brandVoice: 'Professional, warm, and trustworthy.',
-      audience: 'Home buyers', channels: ['WhatsApp', 'Email'],
-      plan: (fd.get('plan') as string) || 'Starter',
-      status: 'active', currency: 'INR', country: 'India', primaryColor: '#6366f1',
-      // uniqueSlug, not slugify: two builders with the same company name would
-      // otherwise share a subdomain and hijack each other's portal/microsite.
-      slug: uniqueSlug(company),
-      branchId, approvalStatus,
-      email: adminEmail, phone: (fd.get('phone') as string) || '', address: '',
-      createdAt: new Date().toISOString(),
-    });
-    create<UserType>('users', {
-      id: '', tenantId: createdTenant.id, name: adminName,
-      email: adminEmail.toLowerCase(), password,
-      role: 'builder_admin' as Role, avatar: '',
-      phone: (fd.get('phone') as string) || '', active: true,
-      createdAt: new Date().toISOString(),
-    });
-    platformAudit(approvalStatus === 'pending' ? 'submit' : 'create', createdTenant.id,
-      `Onboarded builder "${company}" in ${branchName(branchId)} branch (${approvalStatus})`);
+    // ONE server call provisions the workspace, its nine roles with grants, the
+    // lead pipeline and the administrator, in a single transaction. A
+    // half-provisioned tenant signs in and then refuses every write, so this
+    // either lands whole or not at all.
+    //
+    // uniqueSlug, not slugify: two builders with the same company name would
+    // otherwise share a subdomain and hijack each other's portal/microsite. The
+    // server also rejects a duplicate with a 409, so this is belt and braces.
+    let created: Awaited<ReturnType<typeof apiCreateTenant>>;
+    try {
+      created = await apiCreateTenant({
+        name: company, company, slug: uniqueSlug(company),
+        email: adminEmail,
+        adminName, adminEmail: adminEmail.toLowerCase(),
+        plan: ((fd.get('plan') as string) || 'trial').toLowerCase(),
+        country: 'India', currency: 'INR',
+        phone: (fd.get('phone') as string) || undefined,
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not create the workspace');
+      return;
+    }
+
+    // The branch is a platform grouping the provisioning route does not own.
+    if (branchId) {
+      await apiUpdateTenant(created.tenant.id, { branchId }).catch(() => {
+        toast.error('Workspace created, but the branch could not be assigned');
+      });
+    }
+
+    platformAudit('create', created.tenant.id,
+      `Onboarded builder "${company}" in ${branchName(branchId)} branch`);
     setShowAddBuilder(false);
     refresh();
+    // The temporary password is readable exactly once — it is stored as an
+    // argon2id hash and cannot be recovered. Show it until dismissed rather
+    // than in a toast that disappears while the operator is looking away.
+    setNewWorkspace({ company, email: adminEmail.toLowerCase(), tempPassword: created.tempPassword });
     toast.success(approvalStatus === 'pending'
       ? `"${company}" submitted for approval — a super admin must activate it`
       : `Builder "${company}" onboarded — workspace ready`);
@@ -932,6 +965,47 @@ export default function SuperAdmin() {
       </div>
 
       {/* Onboard builder modal */}
+      {/* The temporary password, shown ONCE. It is stored as an argon2id hash
+          and cannot be recovered, so a toast that fades while the operator is
+          looking elsewhere would lose it permanently. Dismissed deliberately. */}
+      {newWorkspace && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl border border-zinc-200 shadow-xl max-w-md w-full p-6">
+            <h3 className="text-lg font-bold text-zinc-900 mb-1">{newWorkspace.company} is ready</h3>
+            <p className="text-sm text-zinc-500 mb-4">
+              Send these to the administrator. They will be asked to change the password on first sign-in.
+            </p>
+            <dl className="space-y-2 mb-4">
+              <div className="bg-zinc-50 rounded-xl px-3 py-2">
+                <dt className="text-[11px] uppercase tracking-wider text-zinc-400">Email</dt>
+                <dd className="font-mono text-sm text-zinc-800 break-all">{newWorkspace.email}</dd>
+              </div>
+              <div className="bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
+                <dt className="text-[11px] uppercase tracking-wider text-amber-700">Temporary password — shown once</dt>
+                <dd className="font-mono text-sm text-zinc-900 break-all">{newWorkspace.tempPassword}</dd>
+              </div>
+            </dl>
+            <div className="flex gap-2">
+              <button
+                onClick={() => {
+                  navigator.clipboard?.writeText(`${newWorkspace.email}  /  ${newWorkspace.tempPassword}`);
+                  toast.success('Copied');
+                }}
+                className="flex-1 py-2.5 rounded-xl border border-zinc-200 text-sm font-medium hover:bg-zinc-50"
+              >
+                Copy
+              </button>
+              <button
+                onClick={() => setNewWorkspace(null)}
+                className="flex-1 py-2.5 rounded-xl bg-indigo-600 text-white text-sm font-semibold hover:bg-indigo-700"
+              >
+                I've saved it
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showAddBuilder && (
         <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => setShowAddBuilder(false)}>
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 animate-fade-in" onClick={e => e.stopPropagation()}>

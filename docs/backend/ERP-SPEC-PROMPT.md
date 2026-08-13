@@ -47,11 +47,12 @@ from a half-built tower. Design for that.
 **Scale of the current implementation**
 | Layer | Files | Lines |
 |---|---|---|
-| Client (`src/`) | 96 | 32,511 |
-| Server routes | 29 | 6,920 |
-| Migrations | 27 | 2,306 |
-| Tables | 74 (71 tenant-scoped) | — |
-| API routes | 184 | — |
+| Client (`src/`) | 97 | 32,105 |
+| Server routes | 32 | 7,671 |
+| Migrations | 35 | 3,024 |
+| Verification suites | 13 | 294 assertions |
+| Tables | 78 (72 tenant-scoped) | — |
+| API routes | 204 | — |
 
 ---
 
@@ -65,7 +66,7 @@ These are load-bearing. Each one exists because breaking it caused a real bug.
 
 2. **Every tenant table has RLS `ENABLE`d *and* `FORCE`d.** Without `FORCE`, the
    table owner silently bypasses the policy. Every policy is
-   `USING (tenant_id = app_current_tenant())`. Currently 71/71 tables comply.
+   `USING (tenant_id = app_current_tenant())`. Currently 72/72 tables comply.
 
 3. **Tenant context is transaction-local.** `withTenantContext` opens a
    transaction and calls `set_config('app.current_tenant_id', $1, true)` — the
@@ -79,8 +80,12 @@ These are load-bearing. Each one exists because breaking it caused a real bug.
 
 5. **Authorization is re-derived from the database on every request.** The JWT
    carries identity only. `has_permission(key)` is a `SECURITY DEFINER STABLE`
-   function that joins `users → role_permissions` and checks `users.active`.
-   Consequence: deactivating a user takes effect immediately, not at token expiry.
+   function that checks `users.active` and walks the role's `parent_role_id`
+   chain with a recursive CTE, depth-capped at 16. Consequence: deactivating a
+   user takes effect immediately, not at token expiry. There is deliberately **no
+   super-admin bypass** — a super_admin who has not been granted a key is refused
+   it, which is why the permission catalog must be backfilled by migration and
+   not only by `seed.ts`.
 
 6. **Three database roles, separated by privilege.**
    - `postgres` — migrations and bootstrap only. Never used at runtime.
@@ -99,6 +104,21 @@ These are load-bearing. Each one exists because breaking it caused a real bug.
    `X-Forwarded-For` append means the *client-supplied* leftmost entry becomes
    `req.ip` — which lets an attacker rotate the rate-limit key and forge
    `audit_logs.ip_address`.
+
+9. **Every tenant→tenant foreign key is composite.** `(child_col, tenant_id)
+   REFERENCES parent (id, tenant_id)`, never `REFERENCES parent (id)`. RLS
+   answers "does this row belong to my tenant?" and says nothing about the rows
+   it *points at*, so a plain single-column key let tenant A store a reference to
+   tenant B's user with both the policy and the constraint satisfied. This was
+   reproduced, not theorised. Currently 0 single-column tenant→tenant keys
+   remain; a new table with a plain `REFERENCES` reopens the hole.
+
+10. **The rate limiter keys on identity, not address.** Authenticated requests
+    key on tenant + user; unauthenticated ones fall back to IP. Keying purely on
+    IP means one office behind one NAT shares a single budget, and normal work
+    starts returning 429. The token is *verified* in the key generator — decoding
+    it without verifying would let anyone mint a fresh bucket per request by
+    inventing a `sub`.
 
 ---
 
@@ -172,7 +192,17 @@ token choose how it is verified. 24-hour expiry. `JWT_SECRET` is validated at
 boot: minimum 32 characters, and any value matching `/change[_-]?me/i` throws, so
 a copy-pasted example config cannot start the server.
 
-**Authorization.** 37+ granular permission keys (`view_leads`, `manage_finance`,
+**Second factor.** Platform staff (`super_admin`, `tech_team`) carry
+`users.mfa_email_enabled`. Login returns a challenge rather than a token; a code
+is mailed and exchanged at `/api/auth/mfa/verify`. The code is an HMAC keyed with
+`JWT_SECRET` salted by the challenge id, compared with `timingSafeEqual`, and the
+attempt is counted *before* the comparison so a wrong guess costs an attempt
+regardless of how the comparison exits. Consumption is a conditional `UPDATE`, so
+two racing verifications yield one session. The `login_challenges` table
+deliberately has no RLS — it operates before a tenant session exists — and is
+granted only to `app_platform`.
+
+**Authorization.** 62 granular permission keys (`view_leads`, `manage_finance`,
 `approve_bookings`, `manage_own_leads`, …) attached to roles per tenant. Route
 handlers gate with one of four idioms — all resolve to `has_permission()`:
 - `has_permission('key')` inline
@@ -184,10 +214,19 @@ handlers gate with one of four idioms — all resolve to `has_permission()`:
 assigned to them. Misses return **404, not 403**, so the endpoint never confirms
 the existence of a record the caller may not see.
 
+**Role inheritance.** A role may name a `parent_role_id` and inherit its grants,
+so "a sales executive who can also see finance" is one parent plus one key rather
+than a re-enumerated list that drifts. The FK is composite, so a role cannot
+inherit across tenants; a `BEFORE INSERT OR UPDATE` trigger refuses cycles at the
+point of misconfiguration rather than letting requests hang later.
+
 **Transport.** Helmet security headers, CORS allow-list from `CORS_ORIGIN`
-(comma-separated), rate limiting (120/min global, tighter on auth), and an error
-handler that logs internals against a correlation ID and returns only
-`{ error: 'Internal server error', correlationId }` — never DB text.
+(comma-separated), rate limiting (120/min per user, tighter on auth — see
+invariant 10), and an error handler that logs internals against a correlation ID
+and returns only `{ error: 'Internal server error', correlationId }` — never DB
+text. The login cap is `AUTH_RATE_LIMIT_MAX`, default 5; production must leave it
+at the default, and it exists only so the verification suites can sign in one
+after another.
 
 ---
 
@@ -282,27 +321,41 @@ the base stack works without it.
 
 ## 10. Known gaps — current state, be honest about these
 
-1. **CRITICAL — the booking cascade leaks into `localStorage`.** In API mode a
-   booking sends the booking, unit lock and lead stage to the server, then writes
-   the token invoice, broker commission and lead activity via `create()` from
-   `services/db` — a localStorage write. Finance never sees the invoice. 65
-   unguarded write sites across 19 tables remain.
-2. **CRITICAL — the booking cascade has no transaction.** Three sequential HTTP
-   calls with no compensation; a failure mid-way leaves a live booking against a
-   unit still marked `available`.
-3. **HIGH — permission keys are never migrated into existing tenants.** New keys
-   (`view_hr`, `manage_hr`, `view_procurement`, `view_execution`, `view_land`,
-   `manage_attendance`) are granted only by `seed.ts` at tenant creation; no
-   migration backfills them. A tenant provisioned before those modules shipped
-   gets a permanent 403 on all of them — including its super_admin, because
-   `has_permission()` has no super-admin bypass.
-4. **HIGH — no `statement_timeout` and one shared 10-connection pool.** One
-   tenant's slow report can starve every other tenant.
-5. **HIGH — 20 tenant tables lack an index leading on `tenant_id`.**
-6. **MEDIUM — no token revocation.** 24h JWT, no `jti`, no deny-list.
-7. **MEDIUM — `requireAuth` accepts portal tokens.** Safe today only because
-   every staff route also checks a permission.
-8. **MEDIUM — `app_user` holds write privileges on `_migrations`.**
+Everything the earlier revision of this list called CRITICAL or HIGH has been
+closed, each with a migration and an assertion. Kept here in short form because
+knowing *what used to be wrong* is how you avoid rebuilding it:
+
+- The booking cascade is one server-side transaction (unit lock, lead stage,
+  activity, commission), not three HTTP calls with no compensation.
+- The permission catalog is backfilled by migration 028, not only by `seed.ts`.
+- `statement_timeout` is set; pools are sized and separated.
+- Every tenant table has a composite index leading on `tenant_id` (029).
+- Tenant→tenant foreign keys are composite (033, 035).
+- `app_user` no longer holds write privileges on `_migrations`.
+
+**Still open — do not claim otherwise:**
+
+1. **MEDIUM — no token revocation.** 24h JWT, no `jti`, no deny-list. A stolen
+   token stays valid for its full life and there is no way to kill a session.
+   Deactivating the *user* does take effect immediately (invariant 5), which is
+   the partial mitigation, but a compromised token for a still-active user cannot
+   be revoked. This is the largest remaining security gap.
+2. **MEDIUM — `requireAuth` accepts portal tokens.** Safe today only because
+   every staff route also checks a permission a portal subject cannot hold. That
+   is an emergent property, not an enforced one: a staff route added without a
+   permission check would be reachable from a portal token.
+3. **LOW — no CSP.** Helmet is registered with `contentSecurityPolicy: false`
+   because the single-file build inlines its own scripts. Belongs at the nginx
+   layer with a hash or nonce.
+4. **LOW — no metrics or APM.** Structured logs with correlation IDs exist;
+   nothing aggregates them, so "is it slow for one tenant or everyone?" is
+   currently unanswerable without a shell.
+5. **LOW — no data retention or erasure policy.** Not a code gap so much as an
+   unmade decision; it becomes a real one the moment a customer asks for
+   deletion.
+6. **Client — some SuperAdmin user/branch management still writes to
+   `localStorage`,** as do roughly 38 write sites on smaller pages. These are not
+   in the booking, finance, or lead paths, which are fully server-authoritative.
 
 ---
 
@@ -313,8 +366,18 @@ the base stack works without it.
 - Raw parameterised SQL. No ORM, no query builder.
 - Every module cutover follows the same order: migration → route (RLS + RBAC +
   schema) → `apiClient` function → `*Writes` dispatcher → wire the page →
-  verify (HTTP end-to-end *and* a demo-mode browser pass) → `npx vite build`.
-- Verification scripts live in `server/scripts/verify-*.mjs`. Six suites,
-  196 assertions: rls 9, writes 15, portal 35, accounts 28, landbd 28,
-  whatsapp 82. They run against a real Postgres, not mocks.
-- Demo mode must stay byte-identical after any API-mode change.
+  verify (HTTP end-to-end and a browser pass) → `VITE_API_URL=/ npm run build`.
+- Verification scripts live in `server/scripts/verify-*.mjs`. Thirteen suites,
+  294 assertions: rls 9, hardening 6, booking-cascade 16, lead-merge 7, golive
+  30, writes 15, portal 35, accounts 28, landbd 28, whatsapp 82, mfa 16,
+  role-hierarchy 14, ratelimit 8. They run against a real Postgres and a real
+  HTTP server, not mocks — what this codebase gets wrong is RLS policies,
+  permission grants and transaction boundaries, none of which a mocked database
+  can be wrong about.
+- **There is no demo mode.** It was deleted. `BuildGuard` refuses to render when
+  `VITE_API_URL` is unset, so a browser-only build fails loudly at startup
+  instead of silently writing business data to `localStorage`.
+- A new tenant table is not finished until it has: `tenant_id NOT NULL`, RLS
+  `ENABLE` + `FORCE`, a `tenant_rows` policy, an explicit `GRANT` to `app_user`,
+  `UNIQUE (id, tenant_id)`, a composite index leading on `tenant_id`, and
+  composite foreign keys. Six of those seven have been forgotten at least once.

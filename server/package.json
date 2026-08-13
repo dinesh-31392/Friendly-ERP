@@ -23,7 +23,8 @@
     "verify:merge": "node scripts/verify-lead-merge.mjs",
     "mail:test": "node scripts/test-mail.mjs",
     "verify:mfa": "node scripts/verify-mfa.mjs",
-    "verify:roles": "node scripts/verify-role-hierarchy.mjs"
+    "verify:roles": "node scripts/verify-role-hierarchy.mjs",
+    "verify:ratelimit": "node scripts/verify-ratelimit.mjs"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",

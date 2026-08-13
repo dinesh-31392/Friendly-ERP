@@ -43,4 +43,16 @@ export const env = {
   jwtSecret: requiredSecret('JWT_SECRET'),
   port: port('PORT', 4000),
   corsOrigin: process.env.CORS_ORIGIN || 'http://localhost:5173',
+  /**
+   * Login attempts allowed per address per minute. Five is the production
+   * value and the default, because the login route is the one place an
+   * attacker can guess a password and the cap is what makes guessing
+   * expensive.
+   *
+   * It is settable only so the verification suites can run back to back.
+   * Thirteen suites signing in sequentially exhaust five attempts in the
+   * first minute, and every suite after that fails for a reason that has
+   * nothing to do with what it tests. CI raises this; nothing else should.
+   */
+  authRateLimitMax: Number(process.env.AUTH_RATE_LIMIT_MAX) || 5,
 };

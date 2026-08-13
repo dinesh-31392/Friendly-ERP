@@ -3,6 +3,7 @@ import type { FastifyInstance } from 'fastify';
 import { platformPool, withTenantContext } from '../db.js';
 import { startEmailChallenge, verifyEmailChallenge } from '../mfa.js';
 import { signToken, verifyPassword, hashPassword, requireAuth } from '../auth.js';
+import { env } from '../env.js';
 
 /**
  * A real argon2id hash of a random value, computed once at boot. Login verifies
@@ -71,8 +72,8 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
    * route allowed to touch that pool, and it reads exactly one user row.
    */
   app.post<{ Body: LoginBody }>('/api/auth/login', {
-    // Tight brute-force cap: 5 login attempts per IP per minute
-    config: { rateLimit: { max: 5, timeWindow: '1 minute' } },
+    // Tight brute-force cap, per address — see env.authRateLimitMax.
+    config: { rateLimit: { max: env.authRateLimitMax, timeWindow: '1 minute' } },
     schema: {
       body: {
         type: 'object',

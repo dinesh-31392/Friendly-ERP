@@ -38,6 +38,8 @@ import { tenantRoutes } from './routes/tenantRoutes.js';
 import { invoiceRoutes } from './routes/invoiceRoutes.js';
 import { crmTaskRoutes } from './routes/crmTaskRoutes.js';
 import { portalRoutes } from './routes/portalRoutes.js';
+// Used by the rate limiter to key on identity rather than address.
+import { verifyToken } from './auth.js';
 
 // trustProxy MUST be a hop count, not `true`. nginx sets
 // `X-Forwarded-For: $proxy_add_x_forwarded_for`, which APPENDS the real peer to
@@ -53,12 +55,42 @@ const app = Fastify({ logger: true, trustProxy: 1 });
 // CSP is left to nginx, which serves the HTML the browser actually renders.
 await app.register(helmet, { contentSecurityPolicy: false });
 
-// Rate limiting — blunts brute force and abuse. Auth routes get a tighter cap
-// applied per-route (see authRoutes). This is the global default.
+/**
+ * Rate limiting, keyed by WHO rather than by where they are sitting.
+ *
+ * The default key is the IP, which is wrong for this product. A builder's
+ * sales team shares one office and therefore one public address, so ten reps
+ * doing ordinary work spend a single 120/min budget between them and the app
+ * starts returning 429 for no reason the user can see. The opposite also
+ * failed: one tenant's runaway integration could not be throttled without
+ * throttling everyone else behind that address.
+ *
+ * So an authenticated request is keyed on tenant + user, and each person gets
+ * their own budget. Anything unauthenticated — login, the public chatbot,
+ * portal sign-in — still keys on IP, because that is where brute force lives
+ * and there is no identity to key on yet.
+ *
+ * The token is VERIFIED here, not merely decoded. A decoded-only key would let
+ * anyone mint a fresh bucket per request by inventing a `sub`, which is a
+ * rate limiter that does nothing.
+ */
 await app.register(rateLimit, {
   global: true,
   max: 120,
   timeWindow: '1 minute',
+  keyGenerator: (req) => {
+    const header = req.headers.authorization || '';
+    if (header.startsWith('Bearer ')) {
+      try {
+        const claims = verifyToken(header.slice(7));
+        return `u:${claims.tid}:${claims.sub}`;
+      } catch {
+        // Expired or forged: fall through to IP so a stream of bad tokens is
+        // still throttled rather than being handed an unlimited bucket.
+      }
+    }
+    return `ip:${req.ip}`;
+  },
   // @fastify/rate-limit THROWS whatever this returns. A plain object carries no
   // `statusCode`, so the error handler below fell through to 500 — clients saw
   // "Internal server error" instead of 429, and every throttled bot scan logged

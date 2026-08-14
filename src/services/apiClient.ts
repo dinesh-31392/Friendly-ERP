@@ -52,6 +52,31 @@ export function clearApiToken(): void {
   localStorage.removeItem(SESSION_KEY);
 }
 
+/**
+ * Tell the server this session is over, so the token stops working.
+ *
+ * Dropping the token locally was the whole of "logging out" before this, which
+ * left it valid for the rest of its 24 hours in whoever's hands it was already
+ * in — the shared site tablet being the case that matters.
+ *
+ * Never throws and never blocks the caller on the result. Signing out must
+ * succeed with no network, an expired token, or a server that is down; the
+ * local state is cleared either way. The worst case is a token that outlives
+ * the click, which is exactly where we started.
+ *
+ * @param scope 'all' also ends every other session for this user — the honest
+ *              answer to a lost phone.
+ */
+export async function apiLogout(scope: 'this' | 'all' = 'this'): Promise<void> {
+  if (!isApiEnabled() || !getApiToken()) return;
+  const path = scope === 'all' ? '/api/auth/logout-all' : '/api/auth/logout';
+  try {
+    await request<{ ok: boolean }>(path, { method: 'POST' });
+  } catch {
+    // Deliberately swallowed — see above.
+  }
+}
+
 /** The user/tenant captured at API login — lets the session survive reloads
  *  without an extra round-trip. Cleared with the token. */
 export function getStoredApiSession(): { user: User; tenant: Tenant } | null {

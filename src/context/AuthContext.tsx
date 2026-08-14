@@ -1,7 +1,7 @@
 import { createContext, useContext, useState, useEffect, ReactNode, useCallback } from 'react';
 import type { User, Tenant } from '../types';
 import * as authService from '../services/authService';
-import { isApiEnabled, apiLogin, apiVerifyLoginCode, isMfaChallenge, clearApiToken, getStoredApiSession } from '../services/apiClient';
+import { isApiEnabled, apiLogin, apiVerifyLoginCode, isMfaChallenge, clearApiToken, apiLogout, getStoredApiSession } from '../services/apiClient';
 import { hydrateLedger } from '../services/accountsService';
 import { initializeDatabase } from '../services/db';
 import { ensureBranchMigration } from '../services/branchService';
@@ -21,6 +21,8 @@ interface AuthContextType {
   resetPassword: (email: string, newPassword: string) => { success: boolean; error?: string };
   changeOwnPassword: (newPassword: string) => { success: boolean; error?: string };
   logout: () => void;
+  /** Ends every session for this user, not just this device. */
+  logoutEverywhere: () => void;
   hasPermission: (action: string) => boolean;
   refreshSession: () => void;
 }
@@ -191,13 +193,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return { success: true };
   }, []);
 
-  const logout = useCallback(() => {
+  // Deliberately takes no arguments. It is passed straight to onClick in a
+  // couple of places, and a signature with an optional first parameter would
+  // quietly receive a MouseEvent there — which typechecks as nothing useful and
+  // reads as a scope. Signing out everywhere is its own function below.
+  const endSession = useCallback((scope: 'this' | 'all') => {
+    // Tell the server first, while the token is still usable — clearing it
+    // locally would leave nothing to authenticate the revocation with. Not
+    // awaited: the UI must sign out instantly and must still work offline, and
+    // apiLogout is written never to throw.
+    void apiLogout(scope);
     authService.logout();
     clearApiToken();
     setUser(null);
     setTenant(null);
     setUsers([]);
   }, []);
+
+  const logout = useCallback(() => endSession('this'), [endSession]);
+  const logoutEverywhere = useCallback(() => endSession('all'), [endSession]);
 
   const hasPermission = useCallback((action: string): boolean => {
     if (!user) return false;
@@ -220,7 +234,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   return (
     <AuthContext.Provider value={{
       user, tenant, users, isAuthenticated: !!user, isLoading,
-      login, verifyLoginCode, register, resetPassword, changeOwnPassword, logout, hasPermission, refreshSession
+      login, verifyLoginCode, register, resetPassword, changeOwnPassword, logout, logoutEverywhere, hasPermission, refreshSession
     }}>
       {children}
     </AuthContext.Provider>

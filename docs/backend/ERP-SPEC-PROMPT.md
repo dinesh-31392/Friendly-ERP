@@ -49,9 +49,9 @@ from a half-built tower. Design for that.
 |---|---|---|
 | Client (`src/`) | 97 | 32,105 |
 | Server routes | 32 | 7,671 |
-| Migrations | 38 | 3,300 |
-| Verification suites | 15 | 338 assertions |
-| Tables | 86 (80 tenant-scoped) | — |
+| Migrations | 39 | 3,420 |
+| Verification suites | 15 | 347 assertions |
+| Tables | 87 (81 tenant-scoped) | — |
 | API routes | 204 | — |
 
 ---
@@ -99,9 +99,10 @@ These are load-bearing. Each one exists because breaking it caused a real bug.
    Portal routes use `requirePortalAuth`, staff routes use `requireAuth`, which
    **refuses a `portal_*` token outright** rather than relying on every staff
    route to check a permission the portal subject cannot hold. The realm also
-   travels on `RequestCtx.realm`, because only staff subjects are rows in
-   `users` — a portal id looked up there finds nothing, and the revocation check
-   would refuse every portal request.
+   travels on `RequestCtx.realm`, which selects the revocation function:
+   staff ids resolve in `users`, portal ids in `portal_users`. Asking the wrong
+   one finds nothing and refuses the request — which is exactly what happened
+   to every portal call before the field existed.
 
 8. **`trustProxy` is a hop count (`1`), never `true`.** With `true`, nginx's
    `X-Forwarded-For` append means the *client-supplied* leftmost entry becomes
@@ -335,25 +336,21 @@ knowing *what used to be wrong* is how you avoid rebuilding it:
 - Every tenant table has a composite index leading on `tenant_id` (029).
 - Tenant→tenant foreign keys are composite (033, 035).
 - `app_user` no longer holds write privileges on `_migrations`.
+- Sessions are revocable in BOTH realms — staff by 037, portal by 039. Every
+  token carries a jti; a deny-list kills one, a per-user watermark kills all.
 
 **Still open — do not claim otherwise:**
 
-1. **MEDIUM — portal sessions are not revocable.** Staff sessions are, by
-   migration 037: every staff token carries a `jti`, `revoked_tokens` kills one,
-   and `users.sessions_valid_from` kills all of them. Portal customers and
-   brokers have neither — `portal_users` needs its own watermark. Smaller blast
-   radius (a portal subject sees only their own bookings) but the same shape of
-   gap.
-2. **LOW — no CSP.** Helmet is registered with `contentSecurityPolicy: false`
+1. **LOW — no CSP.** Helmet is registered with `contentSecurityPolicy: false`
    because the single-file build inlines its own scripts. Belongs at the nginx
    layer with a hash or nonce.
-3. **LOW — no metrics or APM.** Structured logs with correlation IDs exist;
+2. **LOW — no metrics or APM.** Structured logs with correlation IDs exist;
    nothing aggregates them, so "is it slow for one tenant or everyone?" is
    currently unanswerable without a shell.
-4. **LOW — no data retention or erasure policy.** Not a code gap so much as an
+3. **LOW — no data retention or erasure policy.** Not a code gap so much as an
    unmade decision; it becomes a real one the moment a customer asks for
    deletion.
-5. **Client — some SuperAdmin user/branch management still writes to
+4. **Client — some SuperAdmin user/branch management still writes to
    `localStorage`,** as do roughly 38 write sites on smaller pages. These are not
    in the booking, finance, or lead paths, which are fully server-authoritative.
 

@@ -1,8 +1,9 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { withTenantContext, platformPool } from '../db.js';
+import { withTenantContext, platformPool, type RequestCtx } from '../db.js';
 import { requireAuth, hashPassword, verifyPassword, signToken, verifyToken } from '../auth.js';
 import { enqueueAutoReply } from '../autoReply.js';
+import { env } from '../env.js';
 
 /**
  * Customer / channel-partner portal — a SEPARATE auth realm from staff.
@@ -33,7 +34,32 @@ function tempPassword(): string {
   return out;
 }
 
-interface PortalCtx { portalUserId: string; tenantId: string; role: string; ip: string }
+interface PortalCtx {
+  portalUserId: string; tenantId: string; role: string; ip: string;
+  /** Token identity, so a single portal session can be signed out. */
+  jti?: string;
+  /** JWT iat, compared against portal_users.sessions_valid_from. */
+  issuedAt?: number;
+}
+
+/**
+ * PortalCtx → RequestCtx.
+ *
+ * One function rather than the object literal that used to be repeated at each
+ * call site, because `realm` is what makes the session revocable and a call
+ * site that forgets it is not an error anyone would notice — the request simply
+ * keeps working after the customer signs out.
+ */
+function portalCtx(ctx: PortalCtx): RequestCtx {
+  return {
+    tenantId: ctx.tenantId,
+    userId: ctx.portalUserId,
+    ip: ctx.ip,
+    jti: ctx.jti,
+    issuedAt: ctx.issuedAt,
+    realm: 'portal',
+  };
+}
 
 function requirePortalAuth(req: FastifyRequest, reply: FastifyReply): PortalCtx | null {
   const header = req.headers.authorization || '';
@@ -44,7 +70,8 @@ function requirePortalAuth(req: FastifyRequest, reply: FastifyReply): PortalCtx 
       reply.code(403).send({ error: 'Portal accounts only' });
       return null;
     }
-    return { portalUserId: claims.sub, tenantId: claims.tid, role: claims.rol, ip: req.ip };
+    return { portalUserId: claims.sub, tenantId: claims.tid, role: claims.rol, ip: req.ip,
+             jti: claims.jti, issuedAt: claims.iat };
   } catch {
     reply.code(401).send({ error: 'Invalid or missing portal token' });
     return null;
@@ -103,7 +130,10 @@ export async function portalRoutes(app: FastifyInstance): Promise<void> {
   app.post<{ Body: { email: string; password: string; tenantSlug?: string } }>(
     '/api/portal/login',
     {
-      config: { rateLimit: { max: 5, timeWindow: '1 minute' } },
+      // Same cap and same reasoning as the staff login — see env.authRateLimitMax.
+      // Production leaves it at 5; only the suites raise it, because portal
+      // sign-in is the other place an attacker gets to guess a password.
+      config: { rateLimit: { max: env.authRateLimitMax, timeWindow: '1 minute' } },
       schema: { body: { type: 'object', required: ['email', 'password'], additionalProperties: false, properties: {
         email: { type: 'string', maxLength: 160 }, password: { type: 'string', maxLength: 200 }, tenantSlug: { type: 'string', maxLength: 80 },
       } } },
@@ -136,11 +166,58 @@ export async function portalRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
+  /**
+   * POST /api/portal/logout — end this portal session.
+   *
+   * The staff twin of this is /api/auth/logout; see migration 037 for why
+   * dropping the token client-side is not a sign-out. It matters at least as
+   * much here: a customer checking their payment schedule is often doing it on
+   * a borrowed or shared phone.
+   */
+  app.post('/api/portal/logout', async (req, reply) => {
+    const ctx = requirePortalAuth(req, reply);
+    if (!ctx) return;
+    return withTenantContext(portalCtx(ctx), async (db) => {
+      if (!ctx.jti) {
+        reply.code(409);
+        return { error: 'This session predates revocation support — sign out everywhere instead.' };
+      }
+      await db.query(
+        `INSERT INTO revoked_portal_tokens (jti, tenant_id, portal_user_id, expires_at, reason)
+         VALUES ($1, app_current_tenant(), $2, to_timestamp($3), 'logout')
+         ON CONFLICT (jti) DO NOTHING`,
+        [ctx.jti, ctx.portalUserId, (ctx.issuedAt ?? 0) + 24 * 60 * 60]);
+      // Opportunistic pruning, as on the staff side: once a token's own expiry
+      // has passed the row is dead weight, and doing it here means there is no
+      // scheduled job to forget to deploy.
+      await db.query(`DELETE FROM revoked_portal_tokens WHERE expires_at < now()`);
+      reply.code(200);
+      return { ok: true, scope: 'this-session' };
+    });
+  });
+
+  /** POST /api/portal/logout-all — end every session for this portal account. */
+  app.post('/api/portal/logout-all', async (req, reply) => {
+    const ctx = requirePortalAuth(req, reply);
+    if (!ctx) return;
+    return withTenantContext(portalCtx(ctx), async (db) => {
+      // Start of the next second — a JWT iat counts whole seconds, so a
+      // watermark of "now" would leave a token issued during this same second
+      // alive. See /api/auth/logout-all for the full reasoning.
+      await db.query(
+        `UPDATE portal_users
+            SET sessions_valid_from = date_trunc('second', now()) + interval '1 second'
+          WHERE id = $1`, [ctx.portalUserId]);
+      reply.code(200);
+      return { ok: true, scope: 'all-sessions' };
+    });
+  });
+
   /** GET /api/portal/overview — the caller's own data, and nothing else. */
   app.get('/api/portal/overview', async (req, reply) => {
     const ctx = requirePortalAuth(req, reply);
     if (!ctx) return;
-    return withTenantContext({ tenantId: ctx.tenantId, userId: ctx.portalUserId, ip: ctx.ip }, async (db) => {
+    return withTenantContext(portalCtx(ctx), async (db) => {
       // Revocation guard: the account must still exist and be active.
       const { rows: pu } = await db.query('SELECT * FROM portal_users WHERE id = $1 AND active', [ctx.portalUserId]);
       if (!pu[0]) return reply.code(401).send({ error: 'Portal account is no longer active' });
@@ -248,7 +325,7 @@ export async function portalRoutes(app: FastifyInstance): Promise<void> {
     async (req, reply) => {
       const ctx = requirePortalAuth(req, reply);
       if (!ctx) return;
-      return withTenantContext({ tenantId: ctx.tenantId, userId: ctx.portalUserId, ip: ctx.ip }, async (db) => {
+      return withTenantContext(portalCtx(ctx), async (db) => {
         const { rows: pu } = await db.query(`SELECT * FROM portal_users WHERE id = $1 AND active AND role = 'customer'`, [ctx.portalUserId]);
         if (!pu[0]) return reply.code(403).send({ error: 'Customer portal accounts only' });
         const { rows: lead } = await db.query('SELECT id, name, project FROM leads WHERE id = $1', [pu[0].lead_id]);
@@ -288,7 +365,7 @@ export async function portalRoutes(app: FastifyInstance): Promise<void> {
     async (req, reply) => {
       const ctx = requirePortalAuth(req, reply);
       if (!ctx) return;
-      return withTenantContext({ tenantId: ctx.tenantId, userId: ctx.portalUserId, ip: ctx.ip }, async (db) => {
+      return withTenantContext(portalCtx(ctx), async (db) => {
         const { rows: pu } = await db.query(`SELECT * FROM portal_users WHERE id = $1 AND active AND role = 'partner'`, [ctx.portalUserId]);
         if (!pu[0]) return reply.code(403).send({ error: 'Partner portal accounts only' });
         const { rows: br } = await db.query('SELECT id, name FROM brokers WHERE id = $1', [pu[0].broker_id]);
@@ -329,7 +406,7 @@ export async function portalRoutes(app: FastifyInstance): Promise<void> {
     async (req, reply) => {
       const ctx = requirePortalAuth(req, reply);
       if (!ctx) return;
-      return withTenantContext({ tenantId: ctx.tenantId, userId: ctx.portalUserId, ip: ctx.ip }, async (db) => {
+      return withTenantContext(portalCtx(ctx), async (db) => {
         const { rows: pu } = await db.query(`SELECT * FROM portal_users WHERE id = $1 AND active AND role = 'customer'`, [ctx.portalUserId]);
         if (!pu[0]) return reply.code(403).send({ error: 'Customer portal accounts only' });
         // Find-or-create the customers row for this buyer's lead.

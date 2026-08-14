@@ -72,16 +72,15 @@ export interface RequestCtx {
   /**
    * Which authentication realm this subject belongs to.
    *
-   * Only 'staff' is checked for revocation, because only staff subjects are
-   * rows in `users`. A portal customer's id lives in `portal_users`, so asking
-   * token_is_live() about one finds nothing and refuses it — which is exactly
-   * what happened when this field did not exist: every portal request started
-   * returning 401.
+   * Each realm keeps its subjects in a different table — staff in `users`,
+   * portal customers and brokers in `portal_users` — so the realm decides which
+   * revocation function is asked. Getting this wrong is not subtle: before this
+   * field existed, portal ids were looked up in `users`, found nothing, and
+   * every portal request started returning 401.
    *
-   * Set in requireAuth, the single place a staff context is built. Portal
-   * contexts are constructed by hand in portalRoutes and simply omit it.
-   * Revoking a portal session is not yet supported; it needs its own watermark
-   * on portal_users.
+   * Set in requireAuth for staff and requirePortalAuth for portal. Omitted only
+   * by the WhatsApp outbox worker, which runs with no subject at all and is
+   * therefore not checked.
    */
   realm?: 'staff' | 'portal';
 }
@@ -128,17 +127,24 @@ export async function withTenantContext<T>(
     // precisely so it does not depend on the set_config calls beside it — the
     // evaluation order of a SELECT list is not guaranteed, and a version that
     // read app_current_user() could run before the settings landed.
+    // Each realm looks its subject up in its own table — a staff id is a row in
+    // `users`, a portal id in `portal_users` — so the realm picks the function.
+    // Anything with no realm (the WhatsApp outbox worker, which runs with no
+    // subject at all) is not checked; its uuid arguments are inside the branches
+    // and therefore never evaluated, which matters because that worker passes an
+    // empty userId and ''::uuid is a cast error.
     const { rows: [gate] } = await client.query(
       `SELECT set_config('app.current_tenant_id', $1, true),
               set_config('app.current_user_id',  $2, true),
               set_config('app.request_ip',       $3, true),
-              CASE WHEN $6::boolean
-                   THEN token_is_live($1::uuid, $2::uuid, $4::uuid, $5::bigint)
-                   ELSE true END AS live`,
-      [ctx.tenantId, ctx.userId, safeIp, ctx.jti ?? null, ctx.issuedAt ?? 0, ctx.realm === 'staff'],
+              CASE $6
+                WHEN 'staff'  THEN token_is_live($1::uuid, $2::uuid, $4::uuid, $5::bigint)
+                WHEN 'portal' THEN portal_token_is_live($1::uuid, $2::uuid, $4::uuid, $5::bigint)
+                ELSE true
+              END AS live`,
+      [ctx.tenantId, ctx.userId, safeIp, ctx.jti ?? null, ctx.issuedAt ?? 0, ctx.realm ?? ''],
     );
-    // Only staff subjects are rows in `users`; see RequestCtx.realm.
-    if (ctx.realm === 'staff' && gate?.live === false) throw new RevokedSessionError();
+    if (ctx.realm && gate?.live === false) throw new RevokedSessionError();
     const result = await fn(client);
     await client.query('COMMIT');
     return result;

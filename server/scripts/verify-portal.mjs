@@ -196,6 +196,46 @@ console.log('\n=== REVOCATION ===');
 await admin.query(`UPDATE portal_users SET active = false WHERE email = 'prtana@portal.test'`);
 const afterDeactivate = await overview(TA);
 ok('deactivating the account kills the live session (401)', afterDeactivate.status === 401, `${afterDeactivate.status}`);
+await admin.query(`UPDATE portal_users SET active = true WHERE email = 'prtana@portal.test'`);
+
+// ── Portal sessions are revocable (migration 039) ──────────────────────────
+//
+// The staff realm got this in 037 and the portal realm was left as the named
+// gap: a customer who signed out kept a working token for the rest of its 24
+// hours, which matters most on the borrowed or shared phone a buyer is likely
+// checking their payment schedule from.
+console.log('\n=== PORTAL SIGN-OUT ===');
+const plogout = async (tok, all = false) => {
+  const r = await fetch(`${BASE}/api/portal/${all ? 'logout-all' : 'logout'}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tok}` } });
+  return { status: r.status, body: await r.json().catch(() => null) };
+};
+
+const phone = (await plogin('prtana@portal.test', invA.body.tempPassword)).body.token;
+const tablet = (await plogin('prtana@portal.test', invA.body.tempPassword)).body.token;
+ok('a portal token carries a jti',
+   typeof JSON.parse(Buffer.from(phone.split('.')[1], 'base64url').toString()).jti === 'string');
+ok('both portal sessions work', (await overview(phone)).status === 200 && (await overview(tablet)).status === 200);
+
+const pOut = await plogout(phone);
+ok('portal logout succeeds', pOut.status === 200, `${pOut.status}`);
+ok('the signed-out portal token is refused', (await overview(phone)).status === 401);
+// Paired survivor: without this, a server that refused everything would pass.
+ok('the other portal device still works', (await overview(tablet)).status === 200);
+
+// A different portal account must be untouched — otherwise one customer signing
+// out has signed out every buyer in the workspace.
+ok('a different portal account is unaffected', (await overview(TB)).status === 200 || (await overview(TP1)).status === 200);
+
+const pAll = await plogout(tablet, true);
+ok('portal logout-all succeeds', pAll.status === 200, `${pAll.status}`);
+ok('the session that asked is dead', (await overview(tablet)).status === 401);
+
+// The watermark is the start of the next second, so a token minted during the
+// same second is deliberately dead. See migration 037.
+await new Promise(r => setTimeout(r, 1100));
+const pFresh = (await plogin('prtana@portal.test', invA.body.tempPassword)).body.token;
+ok('signing back in works afterwards', (await overview(pFresh)).status === 200);
 
 await cleanup();
 await admin.end();

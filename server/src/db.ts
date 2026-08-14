@@ -65,6 +65,41 @@ export interface RequestCtx {
   tenantId: string;
   userId: string;
   ip: string;
+  /** Token id, for single-session revocation. Absent on pre-037 tokens. */
+  jti?: string;
+  /** JWT `iat`, whole seconds, compared against users.sessions_valid_from. */
+  issuedAt?: number;
+  /**
+   * Which authentication realm this subject belongs to.
+   *
+   * Only 'staff' is checked for revocation, because only staff subjects are
+   * rows in `users`. A portal customer's id lives in `portal_users`, so asking
+   * token_is_live() about one finds nothing and refuses it — which is exactly
+   * what happened when this field did not exist: every portal request started
+   * returning 401.
+   *
+   * Set in requireAuth, the single place a staff context is built. Portal
+   * contexts are constructed by hand in portalRoutes and simply omit it.
+   * Revoking a portal session is not yet supported; it needs its own watermark
+   * on portal_users.
+   */
+  realm?: 'staff' | 'portal';
+}
+
+/**
+ * Thrown when the token is well-formed and correctly signed but the session
+ * behind it has been ended — signed out, signed out everywhere, password
+ * changed, or the account deactivated.
+ *
+ * A distinct type because the caller must answer 401, not 500. Signature
+ * failures are already 401; this is the same answer for a different reason,
+ * and the client's handling is identical: discard the token and sign in again.
+ */
+export class RevokedSessionError extends Error {
+  constructor() {
+    super('Session is no longer valid');
+    this.name = 'RevokedSessionError';
+  }
 }
 
 /**
@@ -88,12 +123,22 @@ export async function withTenantContext<T>(
     // are valid inet. The first write route would then have thrown 22P02 inside
     // the transaction and 500'd every write. net.isIP is the real validator.
     const safeIp = isIP(ctx.ip) !== 0 ? ctx.ip : '';
-    await client.query(
+    // The revocation check rides along with the settings rather than costing a
+    // second round-trip, and token_is_live takes its subject as arguments
+    // precisely so it does not depend on the set_config calls beside it — the
+    // evaluation order of a SELECT list is not guaranteed, and a version that
+    // read app_current_user() could run before the settings landed.
+    const { rows: [gate] } = await client.query(
       `SELECT set_config('app.current_tenant_id', $1, true),
               set_config('app.current_user_id',  $2, true),
-              set_config('app.request_ip',       $3, true)`,
-      [ctx.tenantId, ctx.userId, safeIp],
+              set_config('app.request_ip',       $3, true),
+              CASE WHEN $6::boolean
+                   THEN token_is_live($1::uuid, $2::uuid, $4::uuid, $5::bigint)
+                   ELSE true END AS live`,
+      [ctx.tenantId, ctx.userId, safeIp, ctx.jti ?? null, ctx.issuedAt ?? 0, ctx.realm === 'staff'],
     );
+    // Only staff subjects are rows in `users`; see RequestCtx.realm.
+    if (ctx.realm === 'staff' && gate?.live === false) throw new RevokedSessionError();
     const result = await fn(client);
     await client.query('COMMIT');
     return result;

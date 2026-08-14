@@ -354,6 +354,28 @@ export async function usersRoutes(app: FastifyInstance): Promise<void> {
             push('must_change_password', true);
           }
 
+          // Both of these end the target's existing sessions, and a request can
+          // do both at once — pushed twice, the UPDATE would carry two
+          // assignments to one column, which Postgres rejects outright. So the
+          // decision is made once.
+          //
+          // Resetting a password: a reset that leaves the old sessions alive is
+          // not a reset. An admin resets precisely when they believe the account
+          // is compromised, and until now the attacker's existing token kept
+          // working for the rest of its 24 hours — the new password locked out
+          // the employee and nobody else.
+          //
+          // Deactivating: has_permission() already refuses an inactive user, so
+          // most routes were covered. That made the guarantee depend on every
+          // route remembering to check a permission; this makes it structural.
+          if (body.resetPassword || body.active === false) {
+            // Start of the next second, matching /api/auth/logout-all. A JWT
+            // `iat` counts whole seconds, so a watermark of "now" would leave
+            // any token issued during this same second alive — see that route
+            // for why the ambiguity is broken closed rather than open.
+            push('sessions_valid_from', new Date(Math.floor(Date.now() / 1000) * 1000 + 1000));
+          }
+
           if (sets.length === 0) {
             return reply.code(400).send({ error: 'No writable fields supplied' });
           }

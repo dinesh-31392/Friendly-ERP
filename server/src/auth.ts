@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import jwt from 'jsonwebtoken';
 import argon2 from 'argon2';
 import type { FastifyReply, FastifyRequest } from 'fastify';
@@ -8,6 +9,8 @@ export interface JwtClaims {
   sub: string;   // user id
   tid: string;   // tenant id — authoritative source of tenant identity
   rol: string;   // role name (display only; enforcement is DB-side RBAC)
+  jti?: string;  // token id — the handle a single session is revoked by
+  iat?: number;  // issued-at, whole seconds; compared against sessions_valid_from
 }
 
 export function hashPassword(plain: string): Promise<string> {
@@ -19,7 +22,12 @@ export function verifyPassword(hash: string, plain: string): Promise<boolean> {
 }
 
 export function signToken(claims: JwtClaims): string {
-  return jwt.sign(claims, env.jwtSecret, { expiresIn: '24h', issuer: 'friendly-crm' });
+  // Every token gets an identity of its own. Without one there is nothing to
+  // put on a deny-list, and "sign out this device" cannot be expressed —
+  // only "sign out everywhere", which is a blunt answer to a common request.
+  // jsonwebtoken sets `iat` itself; both are read back in withTenantContext.
+  return jwt.sign({ ...claims, jti: randomUUID() }, env.jwtSecret,
+    { expiresIn: '24h', issuer: 'friendly-crm' });
 }
 
 export function verifyToken(token: string): JwtClaims {
@@ -56,7 +64,14 @@ export async function requireAuth(req: FastifyRequest, reply: FastifyReply): Pro
       reply.code(401).send({ error: 'Invalid or expired token' });
       return;
     }
-    req.ctx = { tenantId: claims.tid, userId: claims.sub, ip: req.ip };
+    req.ctx = {
+      tenantId: claims.tid, userId: claims.sub, ip: req.ip,
+      // Carried so withTenantContext can ask whether this exact session is
+      // still live. Both are optional: a token minted before migration 037
+      // has neither, and is treated as un-revoked rather than rejected, so
+      // deploying revocation does not sign the whole company out at once.
+      jti: claims.jti, issuedAt: claims.iat, realm: 'staff',
+    };
   } catch {
     reply.code(401).send({ error: 'Invalid or expired token' });
     return;

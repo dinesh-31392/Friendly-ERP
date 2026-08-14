@@ -25,7 +25,8 @@
     "verify:mfa": "node scripts/verify-mfa.mjs",
     "verify:roles": "node scripts/verify-role-hierarchy.mjs",
     "verify:ratelimit": "node scripts/verify-ratelimit.mjs",
-    "verify:readiness": "node scripts/verify-production-readiness.mjs"
+    "verify:readiness": "node scripts/verify-production-readiness.mjs",
+    "verify:revocation": "node scripts/verify-revocation.mjs"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",

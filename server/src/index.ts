@@ -104,7 +104,37 @@ await app.register(rateLimit, {
 
 // Never leak DB/internal error text to clients — log it against a correlation
 // id, return a generic 500. 4xx errors we raised ourselves pass through.
+/**
+ * Accept an empty body on a JSON request.
+ *
+ * Fastify's default parser rejects `Content-Type: application/json` with a
+ * zero-length body as a 400. That is defensible in the abstract and wrong in
+ * practice: a browser `fetch` that sets JSON headers for every call — which is
+ * what the SPA's api client does — cannot POST to an endpoint that takes no
+ * arguments. Sign-out was the first such endpoint and returned 400 for every
+ * caller until this existed.
+ *
+ * An empty body becomes `{}`, so a route that genuinely requires fields still
+ * fails at schema validation with a message naming them, rather than at the
+ * parser with one that does not.
+ */
+app.addContentTypeParser('application/json', { parseAs: 'string' }, (_req, body: string, done) => {
+  if (body === '' || body === undefined) return done(null, {});
+  try {
+    done(null, JSON.parse(body));
+  } catch (err) {
+    (err as Error & { statusCode?: number }).statusCode = 400;
+    done(err as Error, undefined);
+  }
+});
+
 app.setErrorHandler((err: Error & { statusCode?: number }, req, reply) => {
+  // A revoked session is a 401, not a 500. It surfaces as a thrown error rather
+  // than a reply because the check runs inside withTenantContext, after the
+  // transaction has opened — throwing is what rolls it back.
+  if (err.name === 'RevokedSessionError') {
+    return reply.code(401).send({ error: 'Session is no longer valid' });
+  }
   const status = err.statusCode && err.statusCode < 500 ? err.statusCode : 500;
   if (status >= 500) {
     const correlationId = randomUUID();

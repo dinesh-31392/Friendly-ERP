@@ -207,6 +207,70 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       return { user: me, permissions: perms.map(p => p.permission_key) };
     }),
   );
+
+  /**
+   * POST /api/auth/logout — end THIS session.
+   *
+   * Discarding the token client-side was the whole of "logging out" before
+   * this, which is not a logout at all: the token stayed valid for the rest of
+   * its 24 hours in anyone's hands, including whoever picked up the shared
+   * tablet in the site office. Recording the jti is what makes the word true.
+   *
+   * Idempotent by ON CONFLICT: signing out twice is not an error, and a client
+   * retrying on a flaky connection should not see one.
+   */
+  app.post('/api/auth/logout', { preHandler: requireAuth }, async (req, reply) =>
+    withTenantContext(req.ctx, async (db) => {
+      if (!req.ctx.jti) {
+        // A token minted before migration 037 has no handle to revoke. Say so
+        // rather than reporting a success that did nothing.
+        reply.code(409);
+        return { error: 'This session predates revocation support — sign out everywhere instead.' };
+      }
+      await db.query(
+        `INSERT INTO revoked_tokens (jti, tenant_id, user_id, expires_at, reason)
+         VALUES ($1, app_current_tenant(), app_current_user(), to_timestamp($2), 'logout')
+         ON CONFLICT (jti) DO NOTHING`,
+        [req.ctx.jti, (req.ctx.issuedAt ?? 0) + 24 * 60 * 60]);
+      // Opportunistic pruning: once a token's own expiry has passed, the
+      // deny-list row is dead weight — signature verification would refuse it
+      // anyway. Doing this here means there is no scheduled job to forget to
+      // deploy, and the cost lands on the rare request rather than every one.
+      await db.query(`DELETE FROM revoked_tokens WHERE expires_at < now()`);
+      reply.code(200);
+      return { ok: true, scope: 'this-session' };
+    }),
+  );
+
+  /**
+   * POST /api/auth/logout-all — end EVERY session for this user.
+   *
+   * The deny-list cannot express this: the other outstanding jtis were never
+   * stored anywhere. Moving the watermark forward invalidates them by their
+   * issue time instead, which is why the column exists.
+   *
+   * This is the honest answer to "my phone was stolen".
+   */
+  app.post('/api/auth/logout-all', { preHandler: requireAuth }, async (req, reply) =>
+    withTenantContext(req.ctx, async (db) => {
+      // A JWT `iat` counts whole seconds, so "issued just before this call" and
+      // "issued just after" are indistinguishable within the same second. That
+      // ambiguity has to break one way or the other, and a security control
+      // breaks closed: the watermark is set to the START OF THE NEXT SECOND, so
+      // every token bearing this second or earlier is dead.
+      //
+      // The cost is that signing back in during the same second yields a token
+      // that is already invalid. That is under a second of delay for a human
+      // who just asked to be signed out everywhere, and the alternative is a
+      // one-second window in which a stolen token still works.
+      await db.query(
+        `UPDATE users
+            SET sessions_valid_from = date_trunc('second', now()) + interval '1 second'
+          WHERE id = app_current_user()`);
+      reply.code(200);
+      return { ok: true, scope: 'all-sessions' };
+    }),
+  );
   /**
    * POST /api/auth/verify-code — exchange an emailed code for a session.
    *

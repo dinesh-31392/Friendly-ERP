@@ -49,9 +49,9 @@ from a half-built tower. Design for that.
 |---|---|---|
 | Client (`src/`) | 97 | 32,105 |
 | Server routes | 32 | 7,671 |
-| Migrations | 35 | 3,024 |
-| Verification suites | 13 | 294 assertions |
-| Tables | 78 (72 tenant-scoped) | — |
+| Migrations | 38 | 3,300 |
+| Verification suites | 15 | 338 assertions |
+| Tables | 86 (80 tenant-scoped) | — |
 | API routes | 204 | — |
 
 ---
@@ -66,7 +66,7 @@ These are load-bearing. Each one exists because breaking it caused a real bug.
 
 2. **Every tenant table has RLS `ENABLE`d *and* `FORCE`d.** Without `FORCE`, the
    table owner silently bypasses the policy. Every policy is
-   `USING (tenant_id = app_current_tenant())`. Currently 72/72 tables comply.
+   `USING (tenant_id = app_current_tenant())`. Currently 80/80 tables comply.
 
 3. **Tenant context is transaction-local.** `withTenantContext` opens a
    transaction and calls `set_config('app.current_tenant_id', $1, true)` — the
@@ -96,9 +96,12 @@ These are load-bearing. Each one exists because breaking it caused a real bug.
 
 7. **Two authentication realms sharing one secret.** Staff tokens carry
    `rol: '<role_name>'`; customer/broker portal tokens carry `rol: 'portal_*'`.
-   Portal routes use `requirePortalAuth`, staff routes use `requireAuth`. The
-   boundary currently holds because every staff route also checks a permission
-   the portal subject cannot have.
+   Portal routes use `requirePortalAuth`, staff routes use `requireAuth`, which
+   **refuses a `portal_*` token outright** rather than relying on every staff
+   route to check a permission the portal subject cannot hold. The realm also
+   travels on `RequestCtx.realm`, because only staff subjects are rows in
+   `users` — a portal id looked up there finds nothing, and the revocation check
+   would refuse every portal request.
 
 8. **`trustProxy` is a hop count (`1`), never `true`.** With `true`, nginx's
    `X-Forwarded-For` append means the *client-supplied* leftmost entry becomes
@@ -335,25 +338,22 @@ knowing *what used to be wrong* is how you avoid rebuilding it:
 
 **Still open — do not claim otherwise:**
 
-1. **MEDIUM — no token revocation.** 24h JWT, no `jti`, no deny-list. A stolen
-   token stays valid for its full life and there is no way to kill a session.
-   Deactivating the *user* does take effect immediately (invariant 5), which is
-   the partial mitigation, but a compromised token for a still-active user cannot
-   be revoked. This is the largest remaining security gap.
-2. **MEDIUM — `requireAuth` accepts portal tokens.** Safe today only because
-   every staff route also checks a permission a portal subject cannot hold. That
-   is an emergent property, not an enforced one: a staff route added without a
-   permission check would be reachable from a portal token.
-3. **LOW — no CSP.** Helmet is registered with `contentSecurityPolicy: false`
+1. **MEDIUM — portal sessions are not revocable.** Staff sessions are, by
+   migration 037: every staff token carries a `jti`, `revoked_tokens` kills one,
+   and `users.sessions_valid_from` kills all of them. Portal customers and
+   brokers have neither — `portal_users` needs its own watermark. Smaller blast
+   radius (a portal subject sees only their own bookings) but the same shape of
+   gap.
+2. **LOW — no CSP.** Helmet is registered with `contentSecurityPolicy: false`
    because the single-file build inlines its own scripts. Belongs at the nginx
    layer with a hash or nonce.
-4. **LOW — no metrics or APM.** Structured logs with correlation IDs exist;
+3. **LOW — no metrics or APM.** Structured logs with correlation IDs exist;
    nothing aggregates them, so "is it slow for one tenant or everyone?" is
    currently unanswerable without a shell.
-5. **LOW — no data retention or erasure policy.** Not a code gap so much as an
+4. **LOW — no data retention or erasure policy.** Not a code gap so much as an
    unmade decision; it becomes a real one the moment a customer asks for
    deletion.
-6. **Client — some SuperAdmin user/branch management still writes to
+5. **Client — some SuperAdmin user/branch management still writes to
    `localStorage`,** as do roughly 38 write sites on smaller pages. These are not
    in the booking, finance, or lead paths, which are fully server-authoritative.
 

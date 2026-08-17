@@ -2,6 +2,9 @@ import type { FastifyInstance } from 'fastify';
 import { platformPool, withTenantContext } from '../db.js';
 import { enqueueAutoReply } from '../autoReply.js';
 
+/** projects.id is a uuid column; anything else raises 22P02 on comparison. */
+const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
 /**
  * PUBLIC, unauthenticated endpoints for the website chatbot a builder embeds on
  * their own site. These are the ONLY lead routes without requireAuth, so they
@@ -162,7 +165,17 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
         // tenant (RLS already scopes the read; this also gives us the name).
         let projectId: string | null = null;
         let projectName = '';
-        if (req.body.projectId) {
+        // The shape check is not redundant with the query. projects.id is uuid,
+        // so comparing it against anything that is not one raises 22P02 — and
+        // this is a PUBLIC endpoint, so a builder's form posting a project NAME
+        // or slug (an easy mistake, and the field is only documented as a
+        // string) turned the whole request into a 500 and the enquiry was lost.
+        //
+        // Ignoring an unusable value rather than rejecting the request is the
+        // deliberate choice: project attribution is optional metadata, the
+        // enquiry is the thing of value, and losing a real buyer over a
+        // malformed optional field is the worse failure.
+        if (req.body.projectId && UUID_RE.test(req.body.projectId)) {
           const { rows: pr } = await db.query('SELECT id, name FROM projects WHERE id = $1', [req.body.projectId]);
           if (pr[0]) { projectId = pr[0].id; projectName = pr[0].name; }
         }

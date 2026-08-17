@@ -41,7 +41,10 @@ export default function IntegrationsPanel() {
   const [showChatbotSnippet, setShowChatbotSnippet] = useState(false);
 
   const states = useMemo(() => getIntegrationStates(tenantId), [tenantId, refreshKey]);
-  const webhook = useMemo(() => getWebhookInfo(tenantId), [tenantId]);
+  // Keyed on the SLUG, not the tenant id: the public capture endpoint resolves
+  // the workspace by slug, which is also what every generated snippet carries.
+  const slug = tenant?.slug || '';
+  const webhook = useMemo(() => getWebhookInfo(slug), [slug]);
   const connectedCount = INTEGRATION_PROVIDERS.filter(p => states[p.id]?.connected).length;
 
   const handleConnectSubmit = (e: React.FormEvent<HTMLFormElement>) => {
@@ -339,8 +342,8 @@ export default function IntegrationsPanel() {
 
       {/* Chatbot embed snippet modal */}
       {showChatbotSnippet && (() => {
-        const snippet = getChatbotSnippet(tenantId, { primaryColor: tenant?.primaryColor, brandName: tenant?.name });
-        const nextJs = getChatbotNextJsInstructions();
+        const snippet = getChatbotSnippet(slug, { primaryColor: tenant?.primaryColor, brandName: tenant?.name });
+        const nextJs = getChatbotNextJsInstructions(slug);
         return (
           <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => setShowChatbotSnippet(false)}>
             <div className="bg-white rounded-2xl shadow-2xl w-full max-w-xl p-6 max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
@@ -405,9 +408,9 @@ export default function IntegrationsPanel() {
               </button>
             </div>
             <p className="text-xs text-zinc-500 mb-3">Paste this snippet on your website. Submissions post to your inbound webhook and appear as new leads with source "Website".</p>
-            <pre className="p-3 bg-zinc-900 text-zinc-100 rounded-lg text-[11px] overflow-x-auto max-h-64">{getWebsiteFormSnippet(tenantId)}</pre>
+            <pre className="p-3 bg-zinc-900 text-zinc-100 rounded-lg text-[11px] overflow-x-auto max-h-64">{getWebsiteFormSnippet(slug)}</pre>
             <button
-              onClick={() => copyToClipboard(getWebsiteFormSnippet(tenantId), 'Form snippet')}
+              onClick={() => copyToClipboard(getWebsiteFormSnippet(slug), 'Form snippet')}
               className="mt-3 w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700"
             >
               <Copy className="h-4 w-4" /> Copy Snippet

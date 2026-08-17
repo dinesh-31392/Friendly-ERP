@@ -235,26 +235,56 @@ export function disconnectIntegration(tenantId: string, providerId: string, acto
 // Inbound webhook (Zapier / Pabbly / Website forms)
 // ─────────────────────────────────────────────────────────────────────────────
 
-export function getWebhookInfo(tenantId: string): { url: string; secret: string; samplePayload: string } {
-  const secretKey = `friendly_crm_webhook_secret_${tenantId}`;
-  let secret = localStorage.getItem(secretKey);
-  if (!secret) {
-    secret = Array.from(crypto.getRandomValues(new Uint8Array(16)))
-      .map(b => b.toString(16).padStart(2, '0')).join('');
-    localStorage.setItem(secretKey, secret);
-  }
-  const url = `https://api.friendlyerp.app/v1/webhooks/leads/${tenantId}?key=${secret}`;
+/**
+ * The origin this ERP is actually served from.
+ *
+ * Every snippet below used to carry a hardcoded `api.friendlyerp.app` or
+ * `cdn.friendlyerp.app`. Nothing in this system serves either host, so every
+ * integration a builder copied out of the product pointed at a domain that
+ * answers nothing — the website form posted into the void, and the chatbot
+ * script 404'd silently. Deriving the origin means the snippet is correct for
+ * whatever domain the workspace is actually running on.
+ */
+function deploymentOrigin(): string {
+  return typeof window !== 'undefined' ? window.location.origin : '';
+}
+
+/**
+ * The public lead-capture endpoint, as it really exists.
+ *
+ * What this replaced was fiction in three ways: the host did not exist, the
+ * path (`/v1/webhooks/leads/:tenantId`) is not a route anywhere in the API, and
+ * the `?key=` secret was generated in the browser, stored in localStorage, and
+ * never sent to or checked by anything. Publishing a URL with a credential in
+ * it that nothing validates is worse than publishing one without — it tells the
+ * reader the endpoint is authenticated when it is not.
+ *
+ * The real endpoint is POST /api/public/leads. It is deliberately public: it
+ * identifies the workspace by `slug` in the body, and is protected by a
+ * per-IP rate limit and a honeypot field rather than by a shared secret, since
+ * anything embedded in a public web page is not a secret.
+ */
+export function getWebhookInfo(slug: string): { url: string; samplePayload: string } {
+  const url = `${deploymentOrigin()}/api/public/leads`;
+  // Mirrors the route's schema exactly. The previous sample carried `source`
+  // and `message`, which are not fields it accepts — they would have been
+  // silently stripped rather than rejected, so anyone copying this to build an
+  // integration would have watched those two values vanish with no error to
+  // explain it.
+  //
+  // No `projectId`: it must be a project UUID from this workspace, and there is
+  // no plausible placeholder for one. An earlier draft of this sample used a
+  // readable slug, which is exactly the mistake a builder would then copy.
   const samplePayload = JSON.stringify({
+    slug,
     name: 'Rohan Verma',
     email: 'rohan.v@email.com',
     phone: '+91 98220 11223',
-    source: 'Zapier',
-    project: 'Skyline Heights',
     budget: 15000000,
     configuration: '3 BHK',
-    message: 'Interested in a site visit this weekend',
+    timeline: '3-6 months',
   }, null, 2);
-  return { url, secret, samplePayload };
+  return { url, samplePayload };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -418,45 +448,137 @@ export function syncLeadsFromProvider(
 /** JS embed snippet for the website chatbot widget. Carries the tenant id,
  *  white-label config, and the lead-capture webhook so chats become leads
  *  instantly (and get scored like any other inbound lead). */
-export function getChatbotSnippet(tenantId: string, opts: { primaryColor?: string; brandName?: string } = {}): string {
-  const { url } = getWebhookInfo(tenantId);
+export function getChatbotSnippet(slug: string, opts: { primaryColor?: string; brandName?: string } = {}): string {
+  const color = opts.primaryColor || '#6366f1';
+  const label = opts.brandName ? `Chat with ${opts.brandName}` : 'Chat with us';
   return `<!-- Friendly ERP Chatbot -->
 <script>
-  window.FriendlyERPChat = {
-    tenantId: "${tenantId}",
-    captureEndpoint: "${url.replace('/v1/webhooks/leads/', '/api/v1/leads/capture/')}",
-    config: {
-      color: "${opts.primaryColor || '#6366f1'}",
-      greeting: "Hi! 👋 Looking for your dream home${opts.brandName ? ` with ${opts.brandName}` : ''}? I can help with prices, floor plans & site visits.",
-      position: "bottom-right",
-      qualify: ["budget", "configuration", "timeline"]
-    }
-  };
-</script>
-<script src="https://cdn.friendlyerp.app/chatbot/v1/widget.js" async></script>`;
+(function () {
+  var ORIGIN = ${JSON.stringify(deploymentOrigin())};
+  var SRC = ORIGIN + "/chat/${slug}";
+
+  var btn = document.createElement("button");
+  btn.type = "button";
+  btn.setAttribute("aria-label", ${JSON.stringify(label)});
+  btn.textContent = "💬";
+  btn.style.cssText =
+    "position:fixed;bottom:20px;right:20px;z-index:2147483000;width:56px;height:56px;" +
+    "border:0;border-radius:50%;cursor:pointer;font-size:24px;color:#fff;" +
+    "box-shadow:0 4px 14px rgba(0,0,0,.25);background:${color}";
+
+  var frame = document.createElement("iframe");
+  frame.title = ${JSON.stringify(label)};
+  frame.style.cssText =
+    "position:fixed;bottom:88px;right:20px;z-index:2147483000;width:380px;height:560px;" +
+    "max-width:calc(100vw - 40px);max-height:calc(100vh - 120px);display:none;" +
+    "border:0;border-radius:16px;box-shadow:0 12px 40px rgba(0,0,0,.28);background:#fff";
+
+  btn.addEventListener("click", function () {
+    var opening = frame.style.display === "none";
+    // Loaded on first open, not on page load — an embedded widget must not cost
+    // the host page a request until somebody actually wants it.
+    if (opening && !frame.src) frame.src = SRC;
+    frame.style.display = opening ? "block" : "none";
+    btn.textContent = opening ? "✕" : "💬";
+  });
+
+  document.body.appendChild(frame);
+  document.body.appendChild(btn);
+})();
+</script>`;
 }
 
 /** Next.js installation instructions for the chatbot snippet. */
-export function getChatbotNextJsInstructions(): string {
+export function getChatbotNextJsInstructions(slug: string): string {
   return `// app/layout.tsx  (Next.js App Router)
-import Script from 'next/script';
+//
+// The widget is an iframe, not a hosted script, so there is nothing to load
+// from a CDN and no config object to keep in sync. Render it in a client
+// component so the open/close state lives in the browser.
 
-// Inside <body>, after {children}:
-<Script id="friendly-crm-chat-config" strategy="afterInteractive">
-  {\`window.FriendlyERPChat = { /* paste the config object from the snippet */ };\`}
-</Script>
-<Script src="https://cdn.friendlyerp.app/chatbot/v1/widget.js" strategy="lazyOnload" />`;
+'use client';
+import { useState } from 'react';
+
+export function FriendlyERPChat() {
+  const [open, setOpen] = useState(false);
+  const src = '${deploymentOrigin()}/chat/${slug}';
+  return (
+    <>
+      {open && (
+        <iframe
+          src={src}
+          title="Chat with us"
+          style={{ position: 'fixed', bottom: 88, right: 20, zIndex: 2147483000,
+                   width: 380, height: 560, border: 0, borderRadius: 16,
+                   boxShadow: '0 12px 40px rgba(0,0,0,.28)', background: '#fff' }}
+        />
+      )}
+      <button
+        type="button"
+        aria-label="Chat with us"
+        onClick={() => setOpen(o => !o)}
+        style={{ position: 'fixed', bottom: 20, right: 20, zIndex: 2147483000,
+                 width: 56, height: 56, border: 0, borderRadius: '50%', cursor: 'pointer',
+                 fontSize: 24, color: '#fff', background: '#6366f1',
+                 boxShadow: '0 4px 14px rgba(0,0,0,.25)' }}
+      >
+        {open ? '✕' : '💬'}
+      </button>
+    </>
+  );
+}
+
+// Then render <FriendlyERPChat /> inside <body>, after {children}.`;
 }
 
 /** HTML snippet builders can paste on their website; posts to the inbound webhook. */
-export function getWebsiteFormSnippet(tenantId: string): string {
-  const { url } = getWebhookInfo(tenantId);
-  return `<form action="${url}" method="POST">
+export function getWebsiteFormSnippet(slug: string): string {
+  const { url } = getWebhookInfo(slug);
+  // A plain `<form action=... method=POST>` cannot work against this endpoint:
+  // a native submit sends url-encoded fields, and the route accepts JSON with
+  // additionalProperties:false. It would also navigate the visitor away from
+  // the builder's page. So the snippet submits with fetch and stays put.
+  return `<!-- Friendly ERP — website enquiry form -->
+<form id="friendly-erp-enquiry">
   <input name="name" placeholder="Your name" required />
   <input name="phone" placeholder="Phone number" required />
   <input name="email" type="email" placeholder="Email" />
-  <input type="hidden" name="source" value="Website" />
-  <textarea name="message" placeholder="I'm interested in..."></textarea>
+  <!-- Honeypot: real visitors never see or fill this; bots do, and the server
+       accepts their submission with a 200 and quietly drops it. -->
+  <input name="hp" tabindex="-1" autocomplete="off" aria-hidden="true"
+         style="position:absolute;left:-9999px;width:1px;height:1px" />
   <button type="submit">Request a callback</button>
-</form>`;
+  <p id="friendly-erp-enquiry-msg" role="status"></p>
+</form>
+
+<script>
+document.getElementById("friendly-erp-enquiry").addEventListener("submit", async function (e) {
+  e.preventDefault();
+  var form = e.target;
+  var msg = document.getElementById("friendly-erp-enquiry-msg");
+  var data = Object.fromEntries(new FormData(form).entries());
+  var button = form.querySelector("button[type=submit]");
+  button.disabled = true;
+  try {
+    var res = await fetch(${JSON.stringify(url)}, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        slug: ${JSON.stringify(slug)},
+        name: data.name,
+        phone: data.phone,
+        email: data.email || undefined,
+        hp: data.hp || undefined
+      })
+    });
+    if (!res.ok) throw new Error("Request failed");
+    form.reset();
+    msg.textContent = "Thanks — we'll call you shortly.";
+  } catch (err) {
+    // Never leave the visitor staring at a form that silently did nothing.
+    msg.textContent = "Sorry, something went wrong. Please try again.";
+    button.disabled = false;
+  }
+});
+</script>`;
 }

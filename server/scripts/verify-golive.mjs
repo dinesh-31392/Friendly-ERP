@@ -11,7 +11,9 @@
 import pg from 'pg';
 import argon2 from 'argon2';
 
-const BASE = 'http://localhost:4055';
+// CI runs the API on 4055; API_BASE lets a developer point the suite at a
+// second instance instead of stopping whatever is already on that port.
+const BASE = process.env.API_BASE ?? 'http://localhost:4055';
 const PW = 'Test1234!';
 let pass = 0, fail = 0;
 const ok = (n, c, x = '') => { c ? (pass++, console.log('  ✓ ' + n)) : (fail++, console.log('  ✗ ' + n + (x ? '  -> ' + x : ''))); };
@@ -163,6 +165,24 @@ if (!plat) {
   const grants = (await admin.query(
     `SELECT count(*)::int n FROM role_permissions rp JOIN roles r ON r.id=rp.role_id WHERE r.tenant_id=$1`, [newTenant])).rows[0].n;
   ok('roles carry their grants', grants > 50, `${grants} grants`);
+
+  // Provisioning keeps its OWN copy of the role→permission map, so a module
+  // shipped later reaches existing tenants via a migration and new ones only if
+  // that copy was updated too. Migration 028 exists because those two drifted.
+  // Assert the newest module (leasing, 036) actually lands on a fresh workspace,
+  // rather than discovering months later that every new builder gets a 403.
+  const leasingGrants = (await admin.query(
+    `SELECT r.name, rp.permission_key
+       FROM role_permissions rp JOIN roles r ON r.id = rp.role_id
+      WHERE r.tenant_id = $1 AND rp.permission_key LIKE ANY (ARRAY['%leasing%', '%owner_payouts%'])`,
+    [newTenant])).rows;
+  const held = (role) => leasingGrants.filter(g => g.name === role).map(g => g.permission_key);
+  ok('a fresh workspace can use the leasing module',
+    held('sales_manager').includes('manage_leasing') && held('builder_admin').includes('view_leasing'),
+    `sales_manager: ${held('sales_manager').join(',') || 'none'}`);
+  ok('and its accountant prepares payouts without being able to release them',
+    held('accountant').includes('manage_owner_payouts') && !held('accountant').includes('approve_owner_payouts'),
+    `accountant: ${held('accountant').join(',') || 'none'}`);
   const pipeline = (await admin.query(
     `SELECT definition FROM schema_definitions WHERE tenant_id=$1 AND entity='lead' AND kind='pipeline' AND is_active`, [newTenant])).rows[0];
   ok('the lead pipeline is seeded (without it no lead can be created)', !!pipeline);

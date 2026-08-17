@@ -17,7 +17,8 @@ import http from 'node:http';
 import pg from 'pg';
 import argon2 from 'argon2';
 
-const BASE = 'http://localhost:4055';
+// CI runs the API on 4055; API_BASE points the suite at another instance.
+const BASE = process.env.API_BASE ?? 'http://localhost:4055';
 const MOCK_PORT = 4077;
 const PW = 'Test1234!';
 const PLATFORM = 'ed3c4904-829a-4e10-ad91-e17992f400b0';

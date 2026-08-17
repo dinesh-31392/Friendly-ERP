@@ -74,6 +74,11 @@ export interface Tenant {
   overrides?: TenantOverrides;  // super-admin custom controls
   branchId?: string;       // owning platform branch (undefined = legacy)
   approvalStatus?: ApprovalStatus;  // undefined = legacy, treated as approved
+  /** Users in this workspace, counted BY THE SERVER (GET /api/tenants).
+   *  The platform console cannot count them client-side: row-level security
+   *  means the browser never holds another tenant's user rows. Undefined in
+   *  browser-only demo mode. */
+  userCount?: number;
   email: string;
   phone: string;
   address: string;

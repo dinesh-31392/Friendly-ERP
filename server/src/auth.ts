@@ -21,13 +21,22 @@ export function verifyPassword(hash: string, plain: string): Promise<boolean> {
   return argon2.verify(hash, plain).catch(() => false);
 }
 
-export function signToken(claims: JwtClaims): string {
+/**
+ * @param expiresIn  jsonwebtoken lifetime. Defaults to a normal 24h session.
+ *   Support logins pass something much shorter: a token that lets platform
+ *   staff act inside a customer's workspace should expire on its own, not sit
+ *   in a laptop's localStorage until tomorrow.
+ */
+export function signToken(
+  claims: JwtClaims,
+  expiresIn: NonNullable<jwt.SignOptions['expiresIn']> = '24h',
+): string {
   // Every token gets an identity of its own. Without one there is nothing to
   // put on a deny-list, and "sign out this device" cannot be expressed —
   // only "sign out everywhere", which is a blunt answer to a common request.
   // jsonwebtoken sets `iat` itself; both are read back in withTenantContext.
   return jwt.sign({ ...claims, jti: randomUUID() }, env.jwtSecret,
-    { expiresIn: '24h', issuer: 'friendly-crm' });
+    { expiresIn, issuer: 'friendly-crm' });
 }
 
 export function verifyToken(token: string): JwtClaims {

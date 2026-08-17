@@ -100,3 +100,57 @@ export function sinceArrival(iso: string, now: Date = new Date()): string {
   const months = Math.floor(days / 30);
   return months < 12 ? `${months}mo ago` : `${Math.floor(months / 12)}y ago`;
 }
+
+/**
+ * A calendar date as the USER sees it — `YYYY-MM-DD` in local time.
+ *
+ * `new Date().toISOString().slice(0, 10)` is UTC, and every date input, receipt
+ * date and bill date in the app used it. East of Greenwich that is yesterday
+ * for the first hours of every day: in IST (+5:30) a payment recorded at 01:00
+ * on the 5th defaults to the 4th, silently posting it to the wrong day — and,
+ * at a month boundary, the wrong month's books.
+ *
+ * Built from local components rather than a locale string, so it cannot be
+ * changed by the browser's locale settings.
+ */
+export function toLocalISODate(d: Date = new Date()): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+/** Today, local, as `YYYY-MM-DD`. */
+export function todayISO(): string {
+  return toLocalISODate();
+}
+
+/** `YYYY-MM-DD`, local, `days` from now — for due dates and validity windows. */
+export function isoInDays(days: number): string {
+  return toLocalISODate(new Date(Date.now() + days * 86400000));
+}
+
+/**
+ * Add whole months to a `YYYY-MM-DD` date, clamping to the end of the target
+ * month — the same rule PostgreSQL applies to `date + interval '1 month'`.
+ *
+ * `Date.prototype.setMonth` does NOT clamp, it overflows: 31 Jan + 1 month is
+ * asked for "31 February" and JavaScript rolls it forward to 3 March. On a
+ * recurring schedule that is not an off-by-a-few-days, it is a skipped period —
+ * a monthly filing due on the 31st jumped February entirely, and because the
+ * next due date is computed from the last one it then drifted to the 3rd of
+ * every month thereafter. Loan EMIs had the same hole.
+ *
+ * Deliberately UTC throughout: the callers parse `YYYY-MM-DD` (which JS reads
+ * as UTC midnight) and format with toISOString, so mixing in local getters
+ * would shift the result by a day in any non-UTC zone.
+ */
+export function addMonthsISO(from: string, months: number): string {
+  const d = new Date(from);
+  if (Number.isNaN(d.getTime())) return from;
+  const day = d.getUTCDate();
+  // Move to the 1st BEFORE changing the month, or the overflow happens here.
+  d.setUTCDate(1);
+  d.setUTCMonth(d.getUTCMonth() + months);
+  const lastDayOfTarget = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).getUTCDate();
+  d.setUTCDate(Math.min(day, lastDayOfTarget));
+  return d.toISOString().slice(0, 10);
+}

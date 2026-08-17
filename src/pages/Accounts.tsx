@@ -14,7 +14,7 @@ import {
 } from '../services/accountsService';
 import * as accountsWrites from '../services/accountsWrites';
 import { projectProgress } from '../services/executionService';
-import { formatCurrency, formatCurrencyFull } from '../utils/format';
+import { formatCurrency, formatCurrencyFull, todayISO } from '../utils/format';
 import { downloadCsv } from '../utils/csv';
 import type {
   Account, AccountType, JournalEntry, Project, Vendor, RaBill, RaDeduction,
@@ -342,7 +342,7 @@ export default function Accounts() {
       payment = await accountsWrites.recordRaPayment({
         tenantId, vendorId: payingRa.vendorId, raBillId: payingRa.id,
         amount: payingRa.netPayable,
-        date: (fd.get('date') as string) || new Date().toISOString().slice(0, 10),
+        date: (fd.get('date') as string) || todayISO(),
         mode: (fd.get('mode') as PaymentMode) || 'bank_transfer',
         reference: (fd.get('reference') as string) || '',
         paidBy: actor.id, createdAt: new Date().toISOString(),
@@ -402,7 +402,7 @@ export default function Accounts() {
     try {
       await accountsWrites.createBankTxn({
         tenantId, bankAccountId: activeBank.id,
-        date: (fd.get('date') as string) || new Date().toISOString().slice(0, 10),
+        date: (fd.get('date') as string) || todayISO(),
         description: (fd.get('description') as string) || 'Manual entry',
         amount,
         type: (fd.get('type') as 'debit' | 'credit') || 'debit',
@@ -442,7 +442,7 @@ export default function Accounts() {
           try {
             await accountsWrites.createBankTxn({
               tenantId, bankAccountId: activeBank.id,
-              date: cells[col('date')] || new Date().toISOString().slice(0, 10),
+              date: cells[col('date')] || todayISO(),
               description: col('description') >= 0 ? cells[col('description')] : '',
               amount, type: type as 'debit' | 'credit',
               reconciled: false, createdAt: new Date().toISOString(),
@@ -515,7 +515,7 @@ export default function Accounts() {
     const rate = Number(fd.get('rate'));
     const tenure = Number(fd.get('tenure'));
     if (!lenderName || !(principal > 0) || !(tenure > 0)) { toast.error('Lender, principal and tenure are required'); return; }
-    const startDate = (fd.get('startDate') as string) || new Date().toISOString().slice(0, 10);
+    const startDate = (fd.get('startDate') as string) || todayISO();
     let created: Loan;
     try {
       created = await accountsWrites.createLoan({
@@ -573,7 +573,7 @@ export default function Accounts() {
   };
 
   const exportStatement = () => {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayISO();
     if (statement === 'tb') {
       downloadCsv(`trial-balance-${today}.csv`, [
         ['Code', 'Account', 'Type', 'Debit', 'Credit'],
@@ -1197,7 +1197,7 @@ export default function Accounts() {
                 </div>
                 <div>
                   <label className={labelCls}>Date</label>
-                  <input name="date" type="date" defaultValue={new Date().toISOString().slice(0, 10)} className={inputCls} />
+                  <input name="date" type="date" defaultValue={todayISO()} className={inputCls} />
                 </div>
                 <div>
                   <label className={labelCls}>Reference</label>
@@ -1416,7 +1416,7 @@ export default function Accounts() {
                 </div>
                 <div>
                   <label className={labelCls}>Date</label>
-                  <input name="date" type="date" defaultValue={new Date().toISOString().slice(0, 10)} className={inputCls} />
+                  <input name="date" type="date" defaultValue={todayISO()} className={inputCls} />
                 </div>
                 <div>
                   <label className={labelCls}>Description</label>
@@ -1503,7 +1503,7 @@ export default function Accounts() {
                 </div>
                 <div>
                   <label className={labelCls}>Disbursed On</label>
-                  <input name="startDate" type="date" defaultValue={new Date().toISOString().slice(0, 10)} className={inputCls} />
+                  <input name="startDate" type="date" defaultValue={todayISO()} className={inputCls} />
                 </div>
                 <div>
                   <label className={labelCls}>Project (Cost Center)</label>
@@ -1542,7 +1542,7 @@ export default function Accounts() {
                 </div>
                 <div>
                   <label className={labelCls}>Date</label>
-                  <input name="date" type="date" defaultValue={new Date().toISOString().slice(0, 10)} className={inputCls} />
+                  <input name="date" type="date" defaultValue={todayISO()} className={inputCls} />
                 </div>
                 <div className="col-span-2">
                   <label className={labelCls}>Reference (UTR / cheque no.)</label>

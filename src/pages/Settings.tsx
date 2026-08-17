@@ -20,6 +20,7 @@ import { getByTenant, update, create, remove, clearDatabase, logAudit } from '..
 import { apiGetAuditLogs } from '../services/apiClient';
 import { useTenantUsers } from '../hooks/useTenantUsers';
 import type { User as UserType, Tenant, Role, AuditLog } from '../types';
+import { todayISO } from '../utils/format';
 import toast from 'react-hot-toast';
 
 const settingsTabs = [
@@ -1205,7 +1206,7 @@ export default function Settings() {
                     // lead/integration names), so a hand-rolled CSV that only
                     // quoted cells — as this once did — would let a value like
                     // =HYPERLINK(...) execute when an admin opens it in Excel.
-                    downloadCsv(`audit-log-${new Date().toISOString().split('T')[0]}.csv`, [
+                    downloadCsv(`audit-log-${todayISO()}.csv`, [
                       ['Timestamp', 'User', 'Action', 'Entity', 'Details'],
                       ...auditLogs.map(log => [
                         new Date(log.createdAt).toLocaleString('en-IN'),
@@ -1459,7 +1460,7 @@ export default function Settings() {
                       const url = URL.createObjectURL(blob);
                       const a = document.createElement('a');
                       a.href = url;
-                      a.download = `friendly-crm-export-${new Date().toISOString().split('T')[0]}.json`;
+                      a.download = `friendly-crm-export-${todayISO()}.json`;
                       a.click();
                       URL.revokeObjectURL(url);
                       toast.success('Data exported successfully');

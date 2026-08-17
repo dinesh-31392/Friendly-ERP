@@ -37,7 +37,8 @@
 import pg from 'pg';
 import argon2 from 'argon2';
 
-const BASE = 'http://localhost:4055';
+// CI runs the API on 4055; API_BASE points the suite at another instance.
+const BASE = process.env.API_BASE ?? 'http://localhost:4055';
 const PW = 'Test1234!';
 let pass = 0, fail = 0;
 const ok = (n, c, x = '') => { c ? (pass++, console.log('  ✓ ' + n)) : (fail++, console.log('  ✗ ' + n + (x ? '  -> ' + x : ''))); };
@@ -164,6 +165,32 @@ ok('a builder_admin cannot move another workspace between branches',
    escalate.status === 403, String(escalate.status));
 const escalateSales = await put('/api/branches/assign-tenant', sales, { tenantId: tB.id, branchId: null });
 ok('nor can a sales executive', escalateSales.status === 403, String(escalateSales.status));
+
+// GET /api/tenants/:id/usage names a workspace in the PATH, which is the same
+// shape of risk: the caller chooses which tenant is counted. It exists because
+// the platform console cannot count another tenant's rows client-side (RLS),
+// and it runs on the BYPASSRLS pool — so if the gate ever regresses, any
+// builder admin could enumerate a competitor's volumes.
+const usagePeek = await get(`/api/tenants/${tA.id}/usage`, rival);
+ok('a builder_admin cannot read another workspace\'s usage counts',
+   usagePeek.status === 403, String(usagePeek.status));
+const usageSelfPeek = await get(`/api/tenants/${tB.id}/usage`, rival);
+ok('…not even for its OWN workspace (the console is platform-staff only)',
+   usageSelfPeek.status === 403, String(usageSelfPeek.status));
+const usageSales = await get(`/api/tenants/${tA.id}/usage`, sales);
+ok('nor can a sales executive', usageSales.status === 403, String(usageSales.status));
+
+// POST /api/tenants/:id/impersonate mints a session token FOR ANOTHER TENANT's
+// user. It is the single most dangerous route in the product if its gate ever
+// slips, so the refusals are asserted here rather than trusted to the handler.
+const impOther = await post(`/api/tenants/${tA.id}/impersonate`, rival, {});
+ok('a builder_admin cannot open a support session in another workspace',
+   impOther.status === 403, String(impOther.status));
+const impOwn = await post(`/api/tenants/${tB.id}/impersonate`, rival, {});
+ok('…nor in its own — support login is platform staff only',
+   impOwn.status === 403, String(impOwn.status));
+const impSales = await post(`/api/tenants/${tA.id}/impersonate`, sales, {});
+ok('nor can a sales executive', impSales.status === 403, String(impSales.status));
 
 // ── 3. Role enforcement: sales cannot read the company's finances ──────────
 console.log('\n=== ROLE ENFORCEMENT: SALES IS BLOCKED FROM FINANCE ===');

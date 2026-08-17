@@ -82,6 +82,7 @@ export const CONTROLLABLE_MODULES: { key: string; label: string }[] = [
   { key: 'hr', label: 'HR & Workforce' },
   { key: 'inventory', label: 'Inventory' },
   { key: 'bookings', label: 'Bookings' },
+  { key: 'leasing', label: 'Leasing' },
   { key: 'sales-performance', label: 'Sales Performance' },
   { key: 'ai-studio', label: 'AI Studio' },
   { key: 'campaigns', label: 'Campaigns' },

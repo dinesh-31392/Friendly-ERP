@@ -10,7 +10,7 @@ import {
 } from '../services/procurementService';
 import { isApiEnabled } from '../services/apiClient';
 import * as procWrites from '../services/procurementWrites';
-import { formatCurrency } from '../utils/format';
+import { formatCurrency, todayISO } from '../utils/format';
 import type {
   Project, User, Vendor, PurchaseOrder, PurchaseOrderLine, Material,
   StockTransaction, Machine, MachineStatus,
@@ -291,7 +291,7 @@ export default function Procurement() {
         reference: (fd.get('reference') as string) || '',
         notes: (fd.get('notes') as string) || '',
         createdBy: user.id,
-        date: (fd.get('date') as string) || new Date().toISOString().slice(0, 10),
+        date: (fd.get('date') as string) || todayISO(),
         createdAt: new Date().toISOString(),
       });
     } catch (err) {
@@ -1054,7 +1054,7 @@ export default function Procurement() {
                   )}
                   <div>
                     <label className={labelCls}>Date</label>
-                    <input name="date" type="date" defaultValue={new Date().toISOString().slice(0, 10)} className={inputCls} />
+                    <input name="date" type="date" defaultValue={todayISO()} className={inputCls} />
                   </div>
                   <div>
                     <label className={labelCls}>Reference</label>

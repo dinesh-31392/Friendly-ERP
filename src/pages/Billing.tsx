@@ -13,7 +13,7 @@ import * as billingWrites from '../services/billingWrites';
 import { postVendorBillApproved, postApPayment, postCustomerPayment, postTaxRemitted, statutoryLiability, hydrateLedger } from '../services/accountsService';
 import type { Invoice, InvoiceStatus, Lead, Vendor, VendorBill, VendorBillStatus, Project, ProjectBudget, PurchaseOrder, ComplianceItem, FilingFrequency, PaymentMade, PaymentMode, JournalEntry } from '../types';
 import { BUDGET_CATEGORIES, FILING_AUTHORITIES, PAYMENT_MODES } from '../types';
-import { formatCurrency } from '../utils/format';
+import { formatCurrency, todayISO, isoInDays } from '../utils/format';
 import { downloadCsv } from '../utils/csv';
 import toast from 'react-hot-toast';
 
@@ -246,8 +246,8 @@ export default function Billing() {
         billNumber: (fd.get('billNumber') as string) || '',
         category: (fd.get('category') as string) || 'Materials',
         amount,
-        billDate: (fd.get('billDate') as string) || new Date().toISOString().slice(0, 10),
-        dueDate: (fd.get('dueDate') as string) || new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10),
+        billDate: (fd.get('billDate') as string) || todayISO(),
+        dueDate: (fd.get('dueDate') as string) || isoInDays(30),
         status: 'pending',
         notes: (fd.get('notes') as string) || '',
         createdAt: new Date().toISOString(),
@@ -293,7 +293,7 @@ export default function Billing() {
       payment = await billingWrites.recordApPayment({
         id: '', tenantId, vendorId: payingBill.vendorId, vendorBillId: payingBill.id,
         amount: payingBill.amount,
-        date: (fd.get('date') as string) || new Date().toISOString().slice(0, 10),
+        date: (fd.get('date') as string) || todayISO(),
         mode: (fd.get('mode') as PaymentMode) || 'bank_transfer',
         reference: (fd.get('reference') as string) || '',
         paidBy: actor.id, createdAt: new Date().toISOString(),
@@ -436,7 +436,7 @@ export default function Billing() {
 
   /** Real export of whichever tab is on screen — Excel-safe CSV. */
   const handleExport = () => {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayISO();
     if (tab === 'receivables') {
       if (invoices.length === 0) { toast.error('Nothing to export yet'); return; }
       downloadCsv(`invoices-${today}.csv`, [
@@ -891,7 +891,7 @@ export default function Billing() {
                 </div>
                 <div>
                   <label className={labelCls}>Date</label>
-                  <input name="date" type="date" defaultValue={new Date().toISOString().slice(0, 10)} className={inputCls} />
+                  <input name="date" type="date" defaultValue={todayISO()} className={inputCls} />
                 </div>
                 <div className="col-span-2">
                   <label className={labelCls}>Reference (UTR / cheque no.)</label>
@@ -1062,7 +1062,7 @@ export default function Billing() {
                 </div>
                 <div>
                   <label className={labelCls}>Bill Date</label>
-                  <input name="billDate" type="date" defaultValue={new Date().toISOString().slice(0, 10)} className={inputCls} />
+                  <input name="billDate" type="date" defaultValue={todayISO()} className={inputCls} />
                 </div>
                 <div>
                   <label className={labelCls}>Due Date</label>

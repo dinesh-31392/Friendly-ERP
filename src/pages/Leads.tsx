@@ -11,7 +11,7 @@ import { getByTenant, logAudit } from '../services/db';
 import type { Lead, LeadStage, Note, Activity, Priority, User as UserType } from '../types';
 import { leadScoreBand, explainLeadScore, LOST_REASONS } from '../types';
 import { getLeadStages, getLeadSources, getConfigurations, type StageDef } from '../services/metaService';
-import { formatCurrency, currencySymbol , localeFor, receivedOn, sinceArrival } from '../utils/format';
+import { formatCurrency, currencySymbol, localeFor, receivedOn, sinceArrival, todayISO } from '../utils/format';
 import { telHref, mailtoHref } from '../utils/contact';
 import { whatsappSend } from '../services/whatsappService';
 import { toCsv } from '../utils/csv';
@@ -568,7 +568,7 @@ export default function Leads() {
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url; a.download = `leads-selected-${new Date().toISOString().split('T')[0]}.csv`; a.click();
+    a.href = url; a.download = `leads-selected-${todayISO()}.csv`; a.click();
     URL.revokeObjectURL(url);
     toast.success(`${selectedLeads.length} lead(s) exported`);
   };
@@ -697,7 +697,7 @@ export default function Leads() {
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement('a');
                 const rangePart = dateRange.preset === 'all' ? '' : `-${rangeSlug(dateRange)}`;
-                a.href = url; a.download = `leads${rangePart}-${new Date().toISOString().split('T')[0]}.csv`; a.click();
+                a.href = url; a.download = `leads${rangePart}-${todayISO()}.csv`; a.click();
                 URL.revokeObjectURL(url);
                 toast.success(`Exported ${filteredLeads.length} lead${filteredLeads.length === 1 ? '' : 's'} to CSV`);
               }}
@@ -1561,7 +1561,7 @@ export default function Leads() {
                   <label className="block text-xs font-medium text-zinc-500 mb-1">Date</label>
                   <input
                     type="date" required value={visitModal.date}
-                    min={new Date().toISOString().split('T')[0]}
+                    min={todayISO()}
                     onChange={e => setVisitModal(v => v && { ...v, date: e.target.value })}
                     className="w-full px-3 py-2 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
                   />

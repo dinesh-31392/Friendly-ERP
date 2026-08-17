@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect } from 'react';
 import { BarChart3, TrendingUp, Users, IndianRupee, Download, Printer } from 'lucide-react';
-import { formatCurrencyFull } from '../utils/format';
+import { formatCurrencyFull, todayISO } from '../utils/format';
 import { downloadCsv } from '../utils/csv';
 import toast from 'react-hot-toast';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, AreaChart, Area } from 'recharts';
@@ -122,7 +122,7 @@ export default function Reports() {
 
   /** Export whichever report is on screen as an Excel-safe CSV. */
   const handleExport = () => {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayISO();
     const scope = dateRange.preset === 'all' ? '' : `-${rangeSlug(dateRange)}`;
     if (reportType === 'conversion') {
       if (conversionData.length === 0) { toast.error('No data to export yet'); return; }

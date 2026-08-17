@@ -8,7 +8,8 @@
 import pg from 'pg';
 import argon2 from 'argon2';
 
-const BASE = 'http://localhost:4055';
+// CI runs the API on 4055; API_BASE points the suite at another instance.
+const BASE = process.env.API_BASE ?? 'http://localhost:4055';
 const PW = 'Test1234!';
 let pass = 0, fail = 0;
 const ok = (n, c, x = '') => { c ? (pass++, console.log('  ✓ ' + n)) : (fail++, console.log('  ✗ ' + n + (x ? '  -> ' + x : ''))); };

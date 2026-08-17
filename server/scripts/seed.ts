@@ -53,6 +53,10 @@ const PERMISSIONS = [
   'view_land', 'manage_land', 'approve_land_qualify', 'approve_land_convert',
   // ERP: business development (sourcing + hand-off-to-land approval)
   'view_bd', 'manage_bd', 'approve_bd_handoff',
+  // ERP: leasing & rental portfolio (migration 036). Payout release is a
+  // separate grant from payout preparation — maker cannot be checker.
+  'view_leasing', 'manage_leasing',
+  'view_owner_payouts', 'manage_owner_payouts', 'approve_owner_payouts',
 ];
 
 /**
@@ -69,6 +73,8 @@ export const ROLE_PERMS: Record<string, string[]> = {
     'view_calendar', 'schedule_visits', 'use_ai_studio', 'create_bookings', 'approve_reminders',
     'view_campaigns', 'manage_campaigns', 'view_bookings', 'manage_bookings', 'view_brokers',
     'view_execution', 'create_quotations', 'approve_discounts',
+    // Letting is a sales function: the desk that fills a unit also papers it.
+    'view_leasing', 'manage_leasing',
   ],
   sales_executive: [
     'view_dashboard', 'view_leads', 'manage_own_leads', 'add_notes', 'view_inventory',
@@ -94,6 +100,9 @@ export const ROLE_PERMS: Record<string, string[]> = {
     'view_accounts', 'manage_accounts',
     'view_finance', 'manage_finance',
     'view_procurement', 'view_bookings', 'view_documents',
+    // Prepares the owner statement; releasing it is the account owner's call,
+    // so approve_owner_payouts is deliberately absent.
+    'view_leasing', 'view_owner_payouts', 'manage_owner_payouts',
   ],
   auditor: [
     'view_dashboard', 'view_leads', 'view_projects', 'view_inventory',
@@ -101,6 +110,7 @@ export const ROLE_PERMS: Record<string, string[]> = {
     'view_reports', 'view_messages', 'view_documents', 'view_finance',
     'view_service', 'view_brokers', 'view_execution', 'view_procurement',
     'view_hr', 'view_accounts', 'view_audit_log',
+    'view_leasing', 'view_owner_payouts',
   ],
   land_manager: [
     'view_dashboard', 'view_projects', 'view_documents',

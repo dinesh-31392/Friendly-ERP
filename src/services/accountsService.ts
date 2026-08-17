@@ -4,6 +4,7 @@ import type {
   VendorBill, RaBill, PaymentMade, Loan, LoanInstallment, PaymentPlan, Invoice,
 } from '../types';
 import { BUDGET_CATEGORIES } from '../types';
+import { todayISO, addMonthsISO } from '../utils/format';
 import { v4 as uuid } from 'uuid';
 import {
   isApiEnabled, apiGetAccounts, apiCreateAccount, apiGetJournalEntries, apiPostJournalEntry,
@@ -161,7 +162,7 @@ export async function postEntry(opts: {
   } else {
     entry = create<JournalEntry>('journalEntries', {
       id: '', tenantId: opts.tenantId,
-      date: opts.date ?? new Date().toISOString().slice(0, 10),
+      date: opts.date ?? todayISO(),
       narration: opts.narration, reference: opts.reference,
       sourceType: opts.sourceType, sourceId: opts.sourceId, projectId: opts.projectId,
       status, lines,
@@ -382,18 +383,18 @@ export function buildLoanSchedule(
   const emi = r > 0
     ? principal * r * Math.pow(1 + r, n) / (Math.pow(1 + r, n) - 1)
     : principal / n;
-  const start = new Date(startDate);
   const schedule: LoanInstallment[] = [];
   let balance = principal;
   for (let k = 1; k <= n; k++) {
     const interest = Math.round(balance * r);
     const principalPart = k === n ? balance : Math.min(balance, Math.round(emi - interest));
     balance -= principalPart;
-    const due = new Date(start);
-    due.setMonth(due.getMonth() + k);
     schedule.push({
       number: k,
-      dueDate: due.toISOString().slice(0, 10),
+      // Clamped, not overflowed: a loan drawn on the 31st used to have its
+      // February instalment land on 3 March, so the borrower saw two due dates
+      // in March and none in February.
+      dueDate: addMonthsISO(startDate, k),
       principal: principalPart,
       interest,
       tds: Math.round(interest * (tdsPct || 0) / 100),

@@ -4,7 +4,7 @@ import {
   ArrowDownToLine, FileText, Banknote,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { getByTenant, create, update, logAudit } from '../services/db';
+import { getByTenant, update, logAudit } from '../services/db';
 import { isApiEnabled } from '../services/apiClient';
 import {
   ensureCoa, postEntry, postDraft, postRaApproved, postApPayment,
@@ -152,28 +152,43 @@ export default function Accounts() {
   const fmtDate = (d?: string) => d ? new Date(d).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) : '—';
 
   // ── Chart of accounts ──────────────────────────────────────────────────────
-  const handleAddAccount = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleAddAccount = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const fd = new FormData(e.currentTarget);
     const code = (fd.get('code') as string)?.trim();
     const name = (fd.get('name') as string)?.trim();
     if (!code || !name) { toast.error('Code and name are required'); return; }
     if (accounts.some(a => a.code === code)) { toast.error(`Account code ${code} already exists`); return; }
-    const created = create<Account>('accounts', {
-      id: '', tenantId, code, name,
-      type: (fd.get('type') as AccountType) || 'expense',
-      isSystem: false, active: true, createdAt: new Date().toISOString(),
-    });
-    audit('create', 'account', created.id, `Added ledger account ${code} — ${name}`);
-    setShowAddAccount(false);
-    refresh();
-    toast.success('Account added');
+    try {
+      // Goes through the dispatcher, not straight to the local store. Written
+      // locally, the account was invisible to every other user and to the
+      // server's own reports — and hydrateLedger replaces the cached chart from
+      // the server at each sign-in, so it vanished by the next login.
+      const created = await accountsWrites.createAccount({
+        tenantId, code, name,
+        type: (fd.get('type') as AccountType) || 'expense',
+        isSystem: false, active: true, createdAt: new Date().toISOString(),
+      });
+      audit('create', 'account', created.id, `Added ledger account ${code} — ${name}`);
+      setShowAddAccount(false);
+      refresh();
+      toast.success('Account added');
+    } catch (err) {
+      // The duplicate-code check above is a courtesy; the database holds the
+      // real UNIQUE constraint and its 409 must reach the user rather than
+      // leaving a form that appears to have done nothing.
+      toast.error(err instanceof Error ? err.message : 'Could not add the account');
+    }
   };
 
-  const toggleAccount = (a: Account) => {
+  const toggleAccount = async (a: Account) => {
     if (a.isSystem) { toast.error('System accounts back automatic postings and stay active'); return; }
-    update<Account>('accounts', a.id, { active: !a.active });
-    refresh();
+    try {
+      await accountsWrites.setAccountActive(a, !a.active);
+      refresh();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not update the account');
+    }
   };
 
   // ── Manual journal entry ───────────────────────────────────────────────────

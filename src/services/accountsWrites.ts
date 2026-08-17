@@ -15,6 +15,7 @@
 import { create, update, removeByTenant } from './db';
 import {
   isApiEnabled,
+  apiCreateAccount, apiUpdateAccount,
   apiGetVendors, apiGetRaBills, apiCreateRaBill, apiUpdateRaBill,
   apiGetApPayments, apiRecordApPayment,
   apiGetBankAccounts, apiCreateBankAccount,
@@ -24,6 +25,7 @@ import {
   type ApiLoan, type ApiLoanRepayment, type ApiVendor,
 } from './apiClient';
 import type {
+  Account,
   RaBill, RaBillStatus, RaDeduction, PaymentMade, PaymentMode,
   BankAccount, BankTransaction, Loan, LoanInstallment, LoanType, Vendor,
 } from '../types';
@@ -216,6 +218,35 @@ export async function recordRaPayment(input: Omit<PaymentMade, 'id'>): Promise<P
 }
 
 // ── Banking ──────────────────────────────────────────────────────────────────
+/**
+ * Add a ledger account.
+ *
+ * The API for this existed and was never called: Accounts.tsx wrote straight to
+ * the local store with `create<Account>`, so in API mode an accountant adding a
+ * ledger account got a success toast and a row that no other user, device or
+ * report could see. Worse than invisible — hydrateLedger() replaces the cached
+ * chart from the server on every sign-in, so the account they had been posting
+ * against disappeared at the next login, taking nothing with it but leaving the
+ * accountant to wonder what happened.
+ */
+export async function createAccount(input: Omit<Account, 'id'>): Promise<Account> {
+  if (!isApiEnabled()) return create<Account>('accounts', { ...input, id: '' } as Account);
+  const created = await apiCreateAccount({
+    code: input.code, name: input.name, type: input.type,
+    isSystem: input.isSystem, active: input.active,
+  });
+  // Mirror into the read-cache so the table updates without a round trip. The
+  // server's row wins — it carries the real id and createdAt.
+  return create<Account>('accounts', { ...created, tenantId: input.tenantId });
+}
+
+/** Activate or retire a ledger account. Same story as createAccount. */
+export async function setAccountActive(account: Account, active: boolean): Promise<void> {
+  if (!isApiEnabled()) { update<Account>('accounts', account.id, { active }); return; }
+  await apiUpdateAccount(account.id, { active });
+  update<Account>('accounts', account.id, { active });
+}
+
 export async function createBankAccount(input: Omit<BankAccount, 'id'>): Promise<BankAccount> {
   if (!isApiEnabled()) return create<BankAccount>('bankAccounts', { ...input, id: '' } as BankAccount);
   const created = await apiCreateBankAccount({

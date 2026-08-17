@@ -50,7 +50,7 @@ from a half-built tower. Design for that.
 | Client (`src/`) | 97 | 32,105 |
 | Server routes | 32 | 7,671 |
 | Migrations | 39 | 3,420 |
-| Verification suites | 15 | 347 assertions |
+| Verification suites | 16 | 372 assertions |
 | Tables | 87 (81 tenant-scoped) | — |
 | API routes | 204 | — |
 
@@ -336,23 +336,35 @@ knowing *what used to be wrong* is how you avoid rebuilding it:
 - Every tenant table has a composite index leading on `tenant_id` (029).
 - Tenant→tenant foreign keys are composite (033, 035).
 - `app_user` no longer holds write privileges on `_migrations`.
+- The nginx security headers actually reach the app, and the CSP pins the
+  inline bundle by sha256 instead of allowing every inline script.
 - Sessions are revocable in BOTH realms — staff by 037, portal by 039. Every
   token carries a jti; a deny-list kills one, a per-user watermark kills all.
 
 **Still open — do not claim otherwise:**
 
-1. **LOW — no CSP.** Helmet is registered with `contentSecurityPolicy: false`
-   because the single-file build inlines its own scripts. Belongs at the nginx
-   layer with a hash or nonce.
-2. **LOW — no metrics or APM.** Structured logs with correlation IDs exist;
+1. **LOW — no metrics or APM.** Structured logs with correlation IDs exist;
    nothing aggregates them, so "is it slow for one tenant or everyone?" is
    currently unanswerable without a shell.
-3. **LOW — no data retention or erasure policy.** Not a code gap so much as an
-   unmade decision; it becomes a real one the moment a customer asks for
-   deletion.
-4. **Client — some SuperAdmin user/branch management still writes to
-   `localStorage`,** as do roughly 38 write sites on smaller pages. These are not
-   in the booking, finance, or lead paths, which are fully server-authoritative.
+2. **LOW — no data retention or erasure policy.** Not a code gap so much as an
+   unmade decision, and it collides with a deliberate design choice: posted
+   journal entries are immutable by trigger (`forbid_posted_line_change`,
+   `forbid_unposting`), so a right-to-erasure request cannot simply delete the
+   financial record. The usual resolution is to pseudonymise the personal fields
+   and keep the entry, since accounting law requires retention anyway — but that
+   is a decision to make deliberately, not to discover during a DSAR.
+3. **Client — 26 direct `services/db` write sites remain**, measured, not
+   estimated: SuperAdmin 8, Settings 6, Bookings 5, PortalDashboard 3,
+   Brokers 2, Dashboard 1, AIStudio 1. Most are either guarded by
+   `if (!isApiEnabled())` — dead code, since BuildGuard refuses to run a
+   browser-only build — or read-cache maintenance after a server write, which is
+   the intended pattern. **SuperAdmin's 8 are the ones that still matter** and
+   have not been audited one by one.
+
+   Note for anyone auditing these: "it writes to `services/db`" is not by itself
+   a bug, and "it is in the finance module" does not make it one. Accounts.tsx
+   carried three such calls; one was a documented read-cache update and correct,
+   two were silent data loss. Read the guard before judging the call.
 
 ---
 

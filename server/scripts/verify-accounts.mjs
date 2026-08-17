@@ -144,6 +144,45 @@ if (rivalTok) {
   ok('rival login', false, 'could not log in as rival tenant');
 }
 
+// ── Chart of accounts ──────────────────────────────────────────────────────
+//
+// These endpoints existed for a long time with no coverage here and no caller
+// in the SPA: the Accounts page wrote new ledger accounts straight to
+// localStorage, so an accountant added one, got a success toast, and had it
+// replaced out of existence by the next hydrateLedger. Both ends are wired now,
+// and this is what keeps the server end honest.
+console.log('\n=== CHART OF ACCOUNTS ===');
+const acctCode = `ZZ${Date.now() % 100000}`;
+const mkAccount = await fetch(`${BASE}/api/accounts`, {
+  method: 'POST', headers: H,
+  body: JSON.stringify({ code: acctCode, name: 'Verify Suspense', type: 'expense' }),
+});
+const mkBody = await mkAccount.json().catch(() => null);
+ok('an accountant can create a ledger account', mkAccount.status === 201, `${mkAccount.status} ${JSON.stringify(mkBody)?.slice(0, 120)}`);
+ok('…and it comes back with a server id', !!mkBody?.account?.id);
+
+const persisted = (await admin.query(
+  `SELECT code, name, is_active FROM chart_of_accounts WHERE code = $1`, [acctCode])).rows[0];
+ok('…and it is actually in the database, not just the response',
+   persisted?.name === 'Verify Suspense', JSON.stringify(persisted));
+
+const dupe = await fetch(`${BASE}/api/accounts`, {
+  method: 'POST', headers: H,
+  body: JSON.stringify({ code: acctCode, name: 'Clash', type: 'expense' }),
+});
+// The page pre-checks for a duplicate code, but the database holds the real
+// constraint — this is the error the user must actually see.
+ok('a duplicate code is refused', dupe.status === 409 || dupe.status === 400, `${dupe.status}`);
+
+const retire = await fetch(`${BASE}/api/accounts/${mkBody?.account?.id}`, {
+  method: 'PATCH', headers: H, body: JSON.stringify({ active: false }),
+});
+ok('an account can be retired', retire.status === 200, `${retire.status}`);
+ok('…and the retirement persisted',
+   (await admin.query(`SELECT is_active FROM chart_of_accounts WHERE code = $1`, [acctCode])).rows[0]?.is_active === false);
+
+await admin.query(`DELETE FROM chart_of_accounts WHERE code = $1`, [acctCode]);
+
 await cleanup();
 await admin.end();
 console.log(`\n===== ${pass} passed, ${fail} failed =====`);

@@ -51,12 +51,17 @@ const ROLES = {
   sales_executive: ['view_dashboard','view_leads','manage_own_leads','add_notes','view_inventory',
     'view_projects','view_messages','send_messages','view_documents','view_calendar',
     'schedule_visits','use_ai_studio','create_bookings','view_bookings','create_quotations'],
+  // Leasing keys mirror ROLE_PERMS in seed.ts: the accountant PREPARES an owner
+  // payout but has no approve_owner_payouts — verify-leasing asserts that the
+  // maker cannot be the checker, which needs a role that really lacks it.
   accountant: ['view_dashboard','view_projects','view_reports','view_accounts','manage_accounts',
     'view_finance','manage_finance','view_procurement','view_bookings','view_documents',
-    'view_invoices','manage_invoices'],
+    'view_invoices','manage_invoices',
+    'view_leasing','view_owner_payouts','manage_owner_payouts'],
   auditor: ['view_dashboard','view_leads','view_projects','view_inventory','view_bookings',
     'view_reports','view_finance','view_accounts','view_audit_log','view_execution',
-    'view_procurement','view_hr','view_invoices'],
+    'view_procurement','view_hr','view_invoices',
+    'view_leasing','view_owner_payouts'],
 };
 
 async function tenant(slug, name) {

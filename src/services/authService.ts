@@ -428,6 +428,10 @@ export function hasPermission(user: User, action: string): boolean {
       'view_land', 'manage_land', 'approve_land_qualify', 'approve_land_convert',
       // Business development: sourcing + the hand-off-to-land approval
       'view_bd', 'manage_bd', 'approve_bd_handoff',
+      // Leasing & rental portfolio: admin holds every gate, including the
+      // payout release that finance deliberately does not get
+      'view_leasing', 'manage_leasing',
+      'view_owner_payouts', 'manage_owner_payouts', 'approve_owner_payouts',
     ],
     sales_manager: [
       'view_dashboard', 'view_leads', 'manage_leads', 'assign_leads', 'add_notes', 'manage_team',
@@ -439,6 +443,8 @@ export function hasPermission(user: User, action: string): boolean {
       'view_execution',
       // Sales head quotes and approves discounts above the executive threshold
       'create_quotations', 'approve_discounts',
+      // Letting is a sales function: the desk that fills a unit also papers it
+      'view_leasing', 'manage_leasing',
     ],
     sales_executive: [
       'view_dashboard', 'view_leads', 'manage_own_leads', 'add_notes',
@@ -458,6 +464,9 @@ export function hasPermission(user: User, action: string): boolean {
       'view_accounts', 'manage_accounts',
       'view_finance', 'manage_finance',
       'view_procurement', 'view_bookings', 'view_documents',
+      // Prepares the owner payout statement but cannot release it — the
+      // maker/checker split that migration 036 enforces in the database too
+      'view_leasing', 'view_owner_payouts', 'manage_owner_payouts',
     ],
     // Read-only everywhere + the audit trail — exists to verify others' work
     auditor: [
@@ -466,6 +475,7 @@ export function hasPermission(user: User, action: string): boolean {
       'view_reports', 'view_messages', 'view_documents', 'view_finance',
       'view_service', 'view_brokers', 'view_execution', 'view_procurement',
       'view_hr', 'view_accounts', 'view_audit_log',
+      'view_leasing', 'view_owner_payouts',
     ],
     // Field staff: everything on the construction side, nothing on the sales
     // pipeline or finance. Raises POs / change orders but cannot approve them.

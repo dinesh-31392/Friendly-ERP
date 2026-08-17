@@ -240,6 +240,40 @@ Notes worth knowing before you tell customers:
   automatically via `prebuild`). Edit `BRAND` in `scripts/generate-icons.mjs` to
   re-brand, then rebuild.
 
+## Step 8c — Schedule the monthly rent run (only if you use Leasing)
+
+Skip this entirely if you do not rent units out. If you do, **read it**: rent
+invoices are not raised by a background job. Nothing bills your occupants until
+`POST /api/leasing/run-billing` is called, and a rental portfolio where nobody
+presses the button is a month of rent nobody asked for.
+
+Two ways to run it, in order of preference:
+
+**1. A cron on the VPS.** The endpoint is idempotent — it is keyed on
+`(lease_id, period_start)` in the database, so running it twice, or ten times,
+raises each period exactly once. That is what makes it safe to schedule
+aggressively rather than exactly.
+
+```bash
+# /etc/cron.d/friendly-erp-rent — 06:15 on the 1st of every month
+15 6 1 * * root curl -sS -X POST https://YOUR_DOMAIN/api/leasing/run-billing \
+  -H "Authorization: Bearer $LEASING_CRON_TOKEN" -H 'Content-Type: application/json' -d '{}' \
+  >> /var/log/friendly-erp-rent.log 2>&1
+```
+
+`LEASING_CRON_TOKEN` is an ordinary login token for a user holding
+`manage_leasing`. Tokens last 24h, so **do not** paste a personal one into cron
+and forget it — create a dedicated service account for this, and re-issue on a
+schedule, or use option 2.
+
+**2. A person.** Leasing → **Run monthly billing**, once a month. The button
+reports exactly what it newly raised ("Already up to date" when there is nothing
+to do), so it is safe to press whenever anyone is unsure.
+
+Owner payouts are deliberately *not* automated: they move money to a landlord,
+so `Prepare statements` is a human action, and approval is a second permission
+on top (`approve_owner_payouts`).
+
 ## Step 9 — Backups (do not skip)
 
 Backups are **encrypted and automatic** — the `backup` service runs a daily

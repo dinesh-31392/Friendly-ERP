@@ -6,13 +6,14 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { getAll, create, update, remove, removeByTenant, logAudit, getByTenant } from '../services/db';
-import { apiGetTenants, apiCreateTenant, apiUpdateTenant, apiGetAuditLogs } from '../services/apiClient';
+import { apiGetTenants, apiCreateTenant, apiUpdateTenant, apiGetAuditLogs, isApiEnabled, apiGetTenantUsage, apiImpersonateTenant, type TenantUsage } from '../services/apiClient';
 import { PLANS, platformMrrUsd, tenantMrrUsd, CONTROLLABLE_MODULES } from '../services/planService';
 import { getBranches, getLegacyBranch, branchName, visibleTenantsForUser } from '../services/branchService';
 import { uniqueSlug } from '../services/portalService';
 import { setTemporaryPassword, generateToken } from '../services/authService';
 import type { TenantOverrides, Branch } from '../types';
 import type { Tenant, User as UserType, Lead, AuditLog } from '../types';
+import { todayISO } from '../utils/format';
 import toast from 'react-hot-toast';
 
 const tabs = [
@@ -61,6 +62,27 @@ export default function SuperAdmin() {
       .catch(() => { if (!cancelled) setAllAuditRows([]); });
     return () => { cancelled = true; };
   }, [refreshKey]);
+  // Is the console reading a real backend? Decides whether cross-tenant figures
+  // come from the server or from the browser's demo store.
+  const apiMode = isApiEnabled();
+  /**
+   * Usage for the workspace whose Manage panel is open.
+   *
+   * Fetched, not computed: counting another tenant's rows in the browser is
+   * impossible under row-level security, which is why this panel reported an
+   * empty workspace for every busy one. Null until it arrives (or in demo mode),
+   * and the panel falls back to the local store then.
+   */
+  const [serverUsage, setServerUsage] = useState<TenantUsage | null>(null);
+  useEffect(() => {
+    if (!apiMode || !manageTenant) { setServerUsage(null); return; }
+    let cancelled = false;
+    setServerUsage(null);
+    apiGetTenantUsage(manageTenant.id)
+      .then(u => { if (!cancelled) setServerUsage(u); })
+      .catch(() => { if (!cancelled) setServerUsage(null); });
+    return () => { cancelled = true; };
+  }, [apiMode, manageTenant, refreshKey]);
   const allUsers = useMemo(() => getAll<UserType>('users'), [refreshKey]);
   const allLeads = useMemo(() => getAll<Lead>('leads'), [refreshKey]);
   const branches = useMemo(() => getBranches(), [refreshKey]);
@@ -78,8 +100,13 @@ export default function SuperAdmin() {
     [allAuditRows, isSuperAdmin, visibleTenantIds]
   );
 
-  // Active users across visible tenants, excluding platform staff accounts
-  const activeUsers = allUsers.filter(u => u.active && u.role !== 'super_admin' && u.role !== 'tech_team' && visibleTenantIds.has(u.tenantId)).length;
+  // Active users across visible tenants, excluding platform staff accounts.
+  // In API mode the local store holds no other tenant's users (RLS), so the
+  // only real figure is the server's per-tenant count — which counts every
+  // provisioned user, hence the honest relabelling of the card below.
+  const activeUsers = apiMode
+    ? tenants.reduce((sum, t) => sum + (t.userCount ?? 0), 0)
+    : allUsers.filter(u => u.active && u.role !== 'super_admin' && u.role !== 'tech_team' && visibleTenantIds.has(u.tenantId)).length;
   const mrrUsd = platformMrrUsd(tenants);
   const trialTenants = tenants.filter(t => t.status === 'trial').length;
 
@@ -174,18 +201,35 @@ export default function SuperAdmin() {
     toast.success(`Branch "${name}" created`);
   };
 
-  const handleToggleTenantUsers = (t: Tenant, activate: boolean) => {
+  const handleToggleTenantUsers = async (t: Tenant, activate: boolean) => {
     const tenantUsers = getByTenant<UserType>('users', t.id);
-    // The workspace hosting the platform admin account is the demo/home
-    // tenant — suspending it would lock out every demo login
-    if (!activate && tenantUsers.some(u => u.role === 'super_admin')) {
+    // Never let an admin suspend the workspace they are signed into. The old
+    // guard looked for a super_admin row in the LOCAL store, which is empty in
+    // API mode — so it never fired, and suspending your own workspace was one
+    // click away. Own-tenant is the check that holds in both modes.
+    if (!activate && (t.id === user?.tenantId || tenantUsers.some(u => u.role === 'super_admin'))) {
       toast.error(`"${t.name}" hosts the platform admin account and cannot be suspended`);
       return;
     }
-    tenantUsers.forEach(u => {
-      if (u.role !== 'super_admin') update<UserType>('users', u.id, { active: activate });
-    });
-    update<Tenant>('tenants', t.id, { status: activate ? 'active' : 'suspended' });
+
+    // API mode: this is a governance action on the SERVER. It previously wrote
+    // only to localStorage, so the console showed "Builder suspended" while the
+    // workspace kept running, and the next refresh — which loads tenants from
+    // the API — silently reverted the row.
+    if (apiMode) {
+      try {
+        await apiUpdateTenant(t.id, { status: activate ? 'active' : 'suspended' });
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : 'Could not update the workspace');
+        return;
+      }
+    } else {
+      tenantUsers.forEach(u => {
+        if (u.role !== 'super_admin') update<UserType>('users', u.id, { active: activate });
+      });
+      update<Tenant>('tenants', t.id, { status: activate ? 'active' : 'suspended' });
+    }
+
     platformAudit(activate ? 'activate' : 'deactivate', t.id, `${activate ? 'Activated' : 'Suspended'} builder "${t.name}" (${tenantUsers.length} users)`);
     refresh();
     toast.success(`Builder ${activate ? 'activated' : 'suspended'}`);
@@ -246,7 +290,7 @@ export default function SuperAdmin() {
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url; a.download = `tenant-${t.slug || t.id}-${new Date().toISOString().slice(0, 10)}.json`; a.click();
+    a.href = url; a.download = `tenant-${t.slug || t.id}-${todayISO()}.json`; a.click();
     URL.revokeObjectURL(url);
     platformAudit('export', t.id, `Exported full data snapshot for "${t.name}"`);
     toast.success(`"${t.name}" data exported`);
@@ -271,8 +315,25 @@ export default function SuperAdmin() {
   /** Support access: log into a builder's workspace as a chosen user (any
    *  role), keeping a return path. Available to super admin and (scoped)
    *  branch tech team. Defaults to the builder admin when no user is chosen. */
-  const handleImpersonate = (t: Tenant, targetUserId?: string) => {
+  const handleImpersonate = async (t: Tenant, targetUserId?: string) => {
     if (!visibleTenantIds.has(t.id)) { toast.error('Out of your branch scope'); return; }
+    // API mode: only the server can mint a session for somebody else's
+    // workspace. The old path wrote a fake local session, which a real backend
+    // ignores — the feature was dead in production.
+    if (apiMode) {
+      if ((t.approvalStatus ?? 'approved') !== 'approved' || t.status === 'suspended') {
+        toast.error(`"${t.name}" is not active — activate it before opening the workspace`);
+        return;
+      }
+      try {
+        const { user: opened, expiresInMinutes } = await apiImpersonateTenant(t.id, targetUserId);
+        toast.success(`Opening ${t.name} as ${opened.name} — ${expiresInMinutes} min support session`);
+        setTimeout(() => { window.location.href = '/'; }, 700);
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : 'Could not open a support session');
+      }
+      return;
+    }
     // A closed workspace rejects its own users on reload: getCurrentUser()
     // clears the session for pending/rejected/suspended tenants, which would
     // take the admin's backed-up session down with it and strand them at
@@ -387,11 +448,29 @@ export default function SuperAdmin() {
     toast.success(`Workspace "${t.name}" and all its data deleted`);
   };
 
+  /**
+   * Per-tenant figures for the console.
+   *
+   * These MUST come from the server in API mode. The browser store cannot hold
+   * another tenant's users or leads — row-level security makes that impossible —
+   * so deriving them locally returned zero for every workspace. Two consequences,
+   * both live before this: the overview badged EVERY builder "Suspended" while
+   * they were all active, and the Suspend/Activate button read the inverted
+   * state, offering "Activate" on a running workspace.
+   *
+   * `status` on the tenant row is the authoritative state (the Builder
+   * Management tab already rendered it correctly); `userCount` is the server's
+   * own count. Cross-tenant lead totals have no endpoint, so in API mode that
+   * figure is reported as unavailable rather than as a confident zero.
+   */
   const tenantStats = (t: Tenant) => {
-    const users = allUsers.filter(u => u.tenantId === t.id);
-    const leads = allLeads.filter(l => l.tenantId === t.id);
-    const active = users.some(u => u.active && u.role !== 'super_admin');
-    return { users: users.length, leads: leads.length, active };
+    const localUsers = allUsers.filter(u => u.tenantId === t.id);
+    const localLeads = allLeads.filter(l => l.tenantId === t.id);
+    return {
+      users: t.userCount ?? localUsers.length,
+      leads: apiMode ? null : localLeads.length,
+      active: (t.status ?? 'active') !== 'suspended',
+    };
   };
 
   // Role-aware tabs: tech_team gets a trimmed branch console; super admin
@@ -445,7 +524,9 @@ export default function SuperAdmin() {
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
               {[
                 { label: 'Total Builders', value: tenants.length, icon: Building2, color: 'text-indigo-600' },
-                { label: 'Active Users', value: activeUsers, icon: Users, color: 'text-violet-600' },
+                // The server counts every provisioned user, not only the active
+                // ones, so the label follows the number rather than overstating it.
+                { label: apiMode ? 'Users' : 'Active Users', value: activeUsers, icon: Users, color: 'text-violet-600' },
                 { label: 'MRR (USD)', value: `$${mrrUsd.toLocaleString()}`, icon: IndianRupee, color: 'text-emerald-600' },
                 { label: 'Trials Running', value: trialTenants, icon: Activity, color: 'text-amber-600' },
               ].map((s, i) => (
@@ -475,7 +556,9 @@ export default function SuperAdmin() {
                         <p className="text-[11px] text-zinc-500">{t.slug}.friendlyerp.app · {t.plan} plan</p>
                       </div>
                       <div className="text-right hidden sm:block">
-                        <p className="text-sm font-semibold text-zinc-900">{st.leads} leads</p>
+                        <p className="text-sm font-semibold text-zinc-900">
+                          {st.leads === null ? '—' : `${st.leads} leads`}
+                        </p>
                         <p className="text-[11px] text-zinc-500">{st.users} users</p>
                       </div>
                       <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${st.active ? 'bg-emerald-50 text-emerald-600' : 'bg-red-50 text-red-500'}`}>
@@ -1098,7 +1181,23 @@ export default function SuperAdmin() {
       {/* Tenant command center */}
       {manageTenant && (() => {
         const t = tenants.find(x => x.id === manageTenant.id) || manageTenant;
-        const usage = tenantUsage(t);
+        const local = tenantUsage(t);
+        const usage = local;
+        // Server figures win when we have them; the local store is only the
+        // browser-demo fallback. See serverUsage's effect above for why.
+        const srv = serverUsage;
+        const teamLabel = srv
+          ? `${srv.users}/${srv.userTotal} active`
+          : `${local.users.filter(u => u.active).length}/${local.users.length} active`;
+        const leadsCount = srv ? srv.leads : local.leads;
+        const bookedCount = srv ? srv.booked : local.booked;
+        const revenueVal = srv ? srv.revenue : local.revenue;
+        const portalAccounts = srv ? (srv.per.portal_users ?? 0) : (local.per.portalUsers || 0);
+        const totalRecords = srv ? srv.totalRows : local.totalRows;
+        // storageKb is deliberately not computed server-side (see the route):
+        // an em dash beats a fabricated number on a governance screen.
+        const storageKb = srv ? srv.storageKb : local.storageKb;
+        const lastActivity = srv ? srv.lastActivity : local.lastActivity;
         return (
           <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => setManageTenant(null)}>
             <div className="bg-white rounded-2xl shadow-2xl w-full max-w-xl p-6 max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
@@ -1117,12 +1216,12 @@ export default function SuperAdmin() {
               {/* Usage & health */}
               <div className="grid grid-cols-3 gap-2 mb-4">
                 {[
-                  ['Team', `${usage.users.filter(u => u.active).length}/${usage.users.length} active`],
-                  ['Leads', `${usage.leads} (${usage.booked} booked)`],
-                  ['Revenue', `₹${(usage.revenue / 10000000).toFixed(1)} Cr`],
-                  ['Portal Accounts', String(usage.per.portalUsers || 0)],
-                  ['Total Records', String(usage.totalRows)],
-                  ['Storage', `${usage.storageKb} KB`],
+                  ['Team', teamLabel],
+                  ['Leads', `${leadsCount} (${bookedCount} booked)`],
+                  ['Revenue', `₹${(revenueVal / 10000000).toFixed(1)} Cr`],
+                  ['Portal Accounts', String(portalAccounts)],
+                  ['Total Records', String(totalRecords)],
+                  ['Storage', storageKb === null ? '—' : `${storageKb} KB`],
                 ].map(([label, value]) => (
                   <div key={label} className="bg-zinc-50 rounded-xl p-3">
                     <p className="text-[10px] text-zinc-500 uppercase tracking-wider">{label}</p>
@@ -1131,7 +1230,7 @@ export default function SuperAdmin() {
                 ))}
               </div>
               <p className="text-[11px] text-zinc-400 mb-4">
-                Last activity: {usage.lastActivity ? new Date(usage.lastActivity).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : 'never'}
+                Last activity: {lastActivity ? new Date(lastActivity).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : 'never'}
               </p>
 
               {/* Trial management — governance, super admin only */}
@@ -1210,13 +1309,19 @@ export default function SuperAdmin() {
                     </div>
                   ))}
                 </div>
-                {typeof t.overrides?.storageLimitKb === 'number' && (
+                {typeof t.overrides?.storageLimitKb === 'number' && storageKb === null && (
+                  <p className="text-[11px] text-zinc-400">
+                    Storage limit set to {t.overrides.storageLimitKb} KB — actual usage is not measured
+                    server-side, so no bar is shown rather than a made-up one.
+                  </p>
+                )}
+                {typeof t.overrides?.storageLimitKb === 'number' && storageKb !== null && (
                   <div>
                     <div className="flex justify-between text-[11px] mb-1">
                       <span className="text-zinc-500">Storage usage</span>
-                      <span className={usage.storageKb > t.overrides.storageLimitKb ? 'text-red-600 font-bold' : 'text-zinc-600 font-medium'}>
-                        {usage.storageKb} / {t.overrides.storageLimitKb} KB
-                        {usage.storageKb > t.overrides.storageLimitKb && ' — OVER LIMIT'}
+                      <span className={storageKb > t.overrides.storageLimitKb ? 'text-red-600 font-bold' : 'text-zinc-600 font-medium'}>
+                        {storageKb} / {t.overrides.storageLimitKb} KB
+                        {storageKb > t.overrides.storageLimitKb && ' — OVER LIMIT'}
                       </span>
                     </div>
                     <div className="h-1.5 bg-zinc-200 rounded-full overflow-hidden">

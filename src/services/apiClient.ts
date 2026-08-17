@@ -1511,6 +1511,76 @@ export async function apiUpdateTenant(
   return res.tenant;
 }
 
+/** Per-tenant usage for the platform console's "tenant health" panel. Counted
+ *  by the SERVER — RLS means the browser can never count another tenant's rows,
+ *  which is why the panel used to report zero for every workspace. */
+export interface TenantUsage {
+  per: Record<string, number>;
+  totalRows: number;
+  storageKb: number | null;
+  users: number;
+  userTotal: number;
+  leads: number;
+  booked: number;
+  revenue: number;
+  lastActivity: string | null;
+}
+
+export async function apiGetTenantUsage(id: string): Promise<TenantUsage> {
+  const res = await request<{ usage: TenantUsage }>(`/api/tenants/${id}/usage`);
+  return res.usage;
+}
+
+/**
+ * Open a support session inside a customer workspace.
+ *
+ * The platform token is stashed first so the "Return to admin" banner can put
+ * it back; the support token deliberately expires in 30 minutes, so a forgotten
+ * session closes itself.
+ */
+export async function apiImpersonateTenant(
+  tenantId: string,
+  userId?: string,
+): Promise<{ user: { id: string; name: string; email: string; role: string }; expiresInMinutes: number }> {
+  const res = await request<{
+    token: string;
+    expiresInMinutes: number;
+    user: { id: string; name: string; email: string; role: string };
+    tenant: { id: string; name: string; company: string; slug: string; plan: string;
+              status: string; country: string; currency: string };
+  }>(`/api/tenants/${tenantId}/impersonate`, {
+    method: 'POST', body: JSON.stringify(userId ? { userId } : {}),
+  });
+  // Back up BOTH halves of the platform session. Restoring the token alone
+  // lands "Return to admin" on /login, because identity is hydrated from the
+  // stored session object, not from the token.
+  const current = localStorage.getItem(TOKEN_KEY);
+  if (current) localStorage.setItem('friendly_crm_api_token_admin_backup', current);
+  const currentSession = localStorage.getItem(SESSION_KEY);
+  if (currentSession) localStorage.setItem('friendly_crm_api_session_admin_backup', currentSession);
+  localStorage.setItem(TOKEN_KEY, res.token);
+
+  // The SPA hydrates identity from the stored session, not from the token, so
+  // swapping the token alone lands on /login. The impersonate response carries
+  // both halves precisely so no extra round-trip is needed here.
+  const user: User = {
+    id: res.user.id, tenantId: res.tenant.id, name: res.user.name,
+    email: res.user.email, password: '', role: res.user.role as Role,
+    avatar: '', phone: '', active: true, createdAt: new Date().toISOString(),
+    mustChangePassword: false,
+  };
+  const tenant: Tenant = {
+    id: res.tenant.id, name: res.tenant.name, company: res.tenant.company,
+    logo: '', brandVoice: '', audience: '', channels: [],
+    plan: res.tenant.plan, status: res.tenant.status as Tenant['status'],
+    country: res.tenant.country, currency: res.tenant.currency,
+    slug: res.tenant.slug,
+    email: '', phone: '', address: '', createdAt: new Date().toISOString(),
+  };
+  localStorage.setItem(SESSION_KEY, JSON.stringify({ user, tenant }));
+  return { user: res.user, expiresInMinutes: res.expiresInMinutes };
+}
+
 /** Move a lead's activity timeline to another lead (duplicate merge). */
 export async function apiReassignLeadActivities(fromLeadId: string, toLeadId: string): Promise<number> {
   const res = await request<{ moved: number }>('/api/lead-activities/reassign', {

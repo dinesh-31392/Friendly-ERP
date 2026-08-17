@@ -4,7 +4,7 @@ import {
   Settings, Calendar, ChevronDown, Bell, Search, Megaphone,
   MessageSquare, FileText, CreditCard, Wrench, Shield, LogOut,
   X, AlertCircle, CheckCircle2, Clock, Menu, BookOpenCheck, Handshake, Globe,
-  HardHat, Truck, Package, UserCheck, Scale, Map,
+  HardHat, Truck, Package, UserCheck, Scale, Map, KeyRound,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useState, useEffect, useMemo, useRef } from 'react';
@@ -41,6 +41,8 @@ const NAV_GROUPS: NavGroupDef[] = [
     id: 'sales', label: 'Sales & CRM', icon: Users, children: [
       { to: '/leads', icon: Users, label: 'Leads', permission: 'view_leads' },
       { to: '/bookings', icon: BookOpenCheck, label: 'Bookings', permission: 'view_bookings' },
+      // The rental portfolio sits with sales: the desk that fills a unit papers it.
+      { to: '/leasing', icon: KeyRound, label: 'Leasing', permission: 'view_leasing' },
       { to: '/sales-performance', icon: TrendingUp, label: 'Sales Performance', permission: 'view_sales_performance' },
       { to: '/campaigns', icon: Megaphone, label: 'Campaigns', permission: 'view_campaigns' },
       { to: '/brokers', icon: Handshake, label: 'Channel Partners', permission: 'view_brokers' },
@@ -66,11 +68,23 @@ const NAV_GROUPS: NavGroupDef[] = [
     ],
   },
   {
-    id: 'engagement', label: 'Engagement', icon: MessageSquare, children: [
-      { to: '/whatsapp', icon: MessageSquare, label: 'WhatsApp', permission: 'view_messages' },
+    // Was "Engagement", which grouped four things no single department owns:
+    // a messaging channel, post-sales tickets, legal records and a diary. The
+    // people who live in Service and WhatsApp all day are customer relations;
+    // the people who care about agreements and approvals are not.
+    id: 'care', label: 'Customer Care', icon: Wrench, children: [
       { to: '/service', icon: Wrench, label: 'Service', permission: 'view_service' },
-      { to: '/documents', icon: FileText, label: 'Documents', permission: 'view_documents' },
+      { to: '/whatsapp', icon: MessageSquare, label: 'WhatsApp', permission: 'view_messages' },
       { to: '/calendar', icon: Calendar, label: 'Calendar', permission: 'view_calendar' },
+    ],
+  },
+  {
+    // One item today, so the renderer draws it as a plain link rather than a
+    // group (see the single-child case below) — no disclosure click for one
+    // destination. It becomes a real group the moment compliance_items gets a
+    // page: the table has existed since migration 018 with no UI in front of it.
+    id: 'legal', label: 'Legal & Compliance', icon: Shield, children: [
+      { to: '/documents', icon: FileText, label: 'Documents', permission: 'view_documents' },
     ],
   },
   {
@@ -440,8 +454,29 @@ export default function DashboardLayout() {
 
   // SaaS banners: trial countdown + super-admin support (impersonation) mode
   const daysLeft = trialDaysLeft(tenant);
-  const inSupportMode = !!localStorage.getItem('friendly_crm_auth_admin_backup') && user?.role !== 'super_admin';
+  // Two backups, because a support session is a different object in each mode:
+  // a demo-store session (friendly_crm_auth) or a real API token. Either one
+  // present means "you are inside someone else's workspace".
+  const inSupportMode =
+    (!!localStorage.getItem('friendly_crm_auth_admin_backup') || !!localStorage.getItem('friendly_crm_api_token_admin_backup'))
+    && user?.role !== 'super_admin';
   const returnToAdmin = () => {
+    // API mode first: restoring the platform token is what actually ends the
+    // session. Without this the only way back was to sign out and back in,
+    // and the short-lived support token would linger until it expired.
+    const apiBackup = localStorage.getItem('friendly_crm_api_token_admin_backup');
+    if (apiBackup) {
+      const sessionBackup = localStorage.getItem('friendly_crm_api_session_admin_backup');
+      localStorage.setItem('friendly_crm_api_token', apiBackup);
+      // The session is the identity; without it the app treats a perfectly
+      // good token as "signed out" and bounces to /login.
+      if (sessionBackup) localStorage.setItem('friendly_crm_api_session', sessionBackup);
+      else localStorage.removeItem('friendly_crm_api_session');
+      localStorage.removeItem('friendly_crm_api_token_admin_backup');
+      localStorage.removeItem('friendly_crm_api_session_admin_backup');
+      window.location.href = '/platform';
+      return;
+    }
     const backup = localStorage.getItem('friendly_crm_auth_admin_backup');
     if (!backup) return;
     localStorage.setItem('friendly_crm_auth', backup);

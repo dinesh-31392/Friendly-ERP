@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { platformPool } from '../db.js';
-import { requireAuth, hashPassword } from '../auth.js';
+import { requireAuth, hashPassword, signToken } from '../auth.js';
 import { randomBytes } from 'node:crypto';
 
 /**
@@ -55,7 +55,9 @@ const ROLE_PERMS: Record<string, string[]> = {
     'view_reports','view_inventory','view_projects','view_sales_performance','view_finance','view_messages',
     'send_messages','view_documents','view_service','manage_service','view_calendar','schedule_visits',
     'use_ai_studio','create_bookings','approve_reminders','view_campaigns','manage_campaigns','view_bookings',
-    'manage_bookings','view_brokers','view_execution','create_quotations','approve_discounts','view_invoices'],
+    'manage_bookings','view_brokers','view_execution','create_quotations','approve_discounts','view_invoices',
+    // Letting is a sales function: the desk that fills a unit also papers it.
+    'view_leasing','manage_leasing'],
   sales_executive: ['view_dashboard','view_leads','manage_own_leads','add_notes','view_inventory',
     'view_projects','view_messages','send_messages','view_documents','view_calendar','schedule_visits',
     'use_ai_studio','create_bookings','view_bookings','create_quotations'],
@@ -66,11 +68,14 @@ const ROLE_PERMS: Record<string, string[]> = {
     'schedule_visits','view_messages','send_messages'],
   accountant: ['view_dashboard','view_projects','view_reports','view_accounts','manage_accounts',
     'view_finance','manage_finance','view_procurement','view_bookings','view_documents',
-    'view_invoices','manage_invoices'],
+    'view_invoices','manage_invoices',
+    // Prepares the owner payout; releasing it stays with the account owner, so
+    // approve_owner_payouts is deliberately absent (036 enforces this in the DB).
+    'view_leasing','view_owner_payouts','manage_owner_payouts'],
   auditor: ['view_dashboard','view_leads','view_projects','view_inventory','view_bookings',
     'view_sales_performance','view_campaigns','view_calendar','view_reports','view_messages','view_documents',
     'view_finance','view_service','view_brokers','view_execution','view_procurement','view_hr','view_accounts',
-    'view_audit_log','view_invoices'],
+    'view_audit_log','view_invoices','view_leasing','view_owner_payouts'],
   land_manager: ['view_dashboard','view_projects','view_documents','view_land','manage_land','view_bd',
     'view_calendar','view_messages','send_messages'],
   bd_manager: ['view_dashboard','view_projects','view_reports','view_bd','manage_bd','view_land',
@@ -244,6 +249,178 @@ export async function tenantRoutes(app: FastifyInstance): Promise<void> {
         `UPDATE tenants SET ${sets.join(', ')}, updated_at = now() WHERE id = $${params.length} RETURNING *`, params);
       if (!rows[0]) return reply.code(404).send({ error: 'Workspace not found' });
       return { tenant: toApiTenant(rows[0]) };
+    },
+  );
+
+  /**
+   * GET /api/tenants/:id/usage — how much of the product a workspace is using.
+   *
+   * WHY THIS HAS TO BE A SERVER ROUTE
+   *
+   * The platform console used to compute this in the browser by counting rows
+   * in localStorage. That is structurally impossible against a real backend:
+   * row-level security means one tenant's session can never hold another
+   * tenant's rows, so every figure came back zero and the "tenant health" panel
+   * reported an empty workspace for a busy one.
+   *
+   * Cross-tenant by definition, so it runs on the BYPASSRLS platform pool —
+   * behind requirePlatformStaff, exactly like the workspace list above.
+   *
+   * The table list is a HARDCODED whitelist. It is interpolated into SQL, so it
+   * must never come from the request; the id is still a bound parameter.
+   */
+  app.get<{ Params: { id: string } }>(
+    '/api/tenants/:id/usage',
+    {
+      preHandler: requireAuth,
+      schema: { params: { type: 'object', required: ['id'],
+        properties: { id: { type: 'string', pattern: '^[0-9a-fA-F-]{36}$' } } } },
+    },
+    async (req, reply) => {
+      if (!await requirePlatformStaff(req, reply)) return;
+
+      const { rows: [exists] } = await platformPool.query(
+        `SELECT 1 FROM tenants WHERE id = $1`, [req.params.id]);
+      if (!exists) return reply.code(404).send({ error: 'Workspace not found' });
+
+      // Whitelist — every one of these carries a tenant_id and a
+      // tenant-leading index, so each count is an index scan, not a seq scan.
+      const TABLES = [
+        'users', 'projects', 'towers', 'units', 'leads', 'lead_activities',
+        'customers', 'bookings', 'quotations', 'invoices', 'payments',
+        'crm_tasks', 'documents', 'campaigns', 'brokers', 'commission_ledger',
+        'service_tickets', 'portal_users',
+        // the leasing module (036) — a rental portfolio is real usage too
+        'occupants', 'lease_agreements', 'lease_invoices', 'maintenance_bills',
+        'owner_payouts',
+      ] as const;
+
+      const counts = TABLES.map(t => `(SELECT count(*) FROM ${t} WHERE tenant_id = $1) AS ${t}`).join(',\n         ');
+
+      const { rows: [row] } = await platformPool.query(
+        `SELECT ${counts},
+                (SELECT count(*) FROM leads WHERE tenant_id = $1 AND stage = 'booked') AS booked_leads,
+                (SELECT COALESCE(sum(budget), 0) FROM leads WHERE tenant_id = $1 AND stage = 'booked') AS booked_value,
+                (SELECT count(*) FROM users WHERE tenant_id = $1 AND active) AS active_users,
+                (SELECT max(created_at) FROM audit_logs WHERE tenant_id = $1) AS last_activity`,
+        [req.params.id]);
+
+      const per: Record<string, number> = {};
+      let totalRows = 0;
+      for (const t of TABLES) {
+        per[t] = Number(row[t]) || 0;
+        totalRows += per[t];
+      }
+
+      return {
+        usage: {
+          per,
+          totalRows,
+          // Deliberately absent rather than guessed: a per-tenant byte figure
+          // means summing pg_column_size across every row of every table, which
+          // is a full scan per table for a number nobody bills on. The UI shows
+          // "—" instead of a made-up one.
+          storageKb: null,
+          users: Number(row.active_users) || 0,
+          userTotal: per.users,
+          leads: per.leads,
+          booked: Number(row.booked_leads) || 0,
+          revenue: Number(row.booked_value) || 0,
+          lastActivity: row.last_activity ?? null,
+        },
+      };
+    },
+  );
+
+  /**
+   * POST /api/tenants/:id/impersonate — support login into a customer workspace.
+   *
+   * The console has always had an "Access this workspace" button. It worked by
+   * writing a fake session into localStorage, which does nothing against a real
+   * backend — the browser cannot mint a JWT. So the feature was dead in
+   * production, and the only way to reproduce a customer's bug was to ask them
+   * for their password.
+   *
+   * THIS GRANTS NO NEW PRIVILEGE. Platform staff already administer every
+   * workspace through this file (list, patch, provision) on the BYPASSRLS pool.
+   * What it adds is the ability to SEE the product as the customer sees it,
+   * which is why the guard rails below matter more than the capability:
+   *
+   *   * platform staff only — the same gate as every route here;
+   *   * never into a suspended or unapproved workspace, so a support login
+   *     cannot quietly resurrect a workspace that was shut off;
+   *   * never AS platform staff — the target must be an ordinary member of the
+   *     customer's tenant, so this cannot be used to climb to super_admin;
+   *   * 30 minutes, not 24 hours. The token is scoped to somebody else's data
+   *     and should die on its own;
+   *   * written to the audit trail BEFORE the token is returned, in the
+   *     customer's own tenant, so the workspace owner can see that support
+   *     entered and as whom.
+   */
+  app.post<{ Params: { id: string }; Body: { userId?: string } }>(
+    '/api/tenants/:id/impersonate',
+    {
+      preHandler: requireAuth,
+      schema: {
+        params: { type: 'object', required: ['id'],
+          properties: { id: { type: 'string', pattern: '^[0-9a-fA-F-]{36}$' } } },
+        body: { type: 'object', additionalProperties: false,
+          properties: { userId: { type: 'string', pattern: '^[0-9a-fA-F-]{36}$' } } },
+      },
+    },
+    async (req, reply) => {
+      if (!await requirePlatformStaff(req, reply)) return;
+
+      const { rows: [tenant] } = await platformPool.query(
+        `SELECT * FROM tenants WHERE id = $1`, [req.params.id]);
+      if (!tenant) return reply.code(404).send({ error: 'Workspace not found' });
+      if (tenant.status === 'suspended') {
+        return reply.code(409).send({ error: 'That workspace is suspended — activate it before opening a support session' });
+      }
+      if (tenant.slug === 'platform') {
+        return reply.code(400).send({ error: 'The platform workspace is not a customer workspace' });
+      }
+
+      // Ordinary members only. Ordering makes builder_admin the default target,
+      // which is the account a support question is usually about.
+      const { rows: candidates } = await platformPool.query(
+        `SELECT u.id, u.name, u.email, r.name AS role
+           FROM users u JOIN roles r ON r.id = u.role_id
+          WHERE u.tenant_id = $1 AND u.active
+            AND r.name NOT IN ('super_admin', 'tech_team')
+            AND ($2::uuid IS NULL OR u.id = $2::uuid)
+          ORDER BY (r.name = 'builder_admin') DESC, u.created_at
+          LIMIT 1`,
+        [req.params.id, req.body?.userId ?? null]);
+
+      const target = candidates[0];
+      if (!target) {
+        return reply.code(404).send({
+          error: req.body?.userId
+            ? 'That user is not an active, non-platform member of this workspace'
+            : 'No active workspace user to open a support session as',
+        });
+      }
+
+      // Audit first: if the insert fails, no token is issued. An unlogged
+      // support login is worse than a failed one.
+      await platformPool.query(
+        `INSERT INTO audit_logs (tenant_id, table_name, record_id, action, actor_id, ip_address, new_state)
+         VALUES ($1, 'support_session', $2, 'INSERT', $3, nullif($4, '')::inet, $5)`,
+        [req.params.id, target.id, req.ctx.userId, req.ctx.ip,
+         JSON.stringify({
+           event: 'support_login',
+           platform_user_id: req.ctx.userId,
+           opened_as: { id: target.id, name: target.name, email: target.email, role: target.role },
+           expires_in_minutes: 30,
+         })]);
+
+      return {
+        token: signToken({ sub: target.id, tid: req.params.id, rol: target.role }, '30m'),
+        expiresInMinutes: 30,
+        user: { id: target.id, name: target.name, email: target.email, role: target.role },
+        tenant: toApiTenant(tenant),
+      };
     },
   );
 }

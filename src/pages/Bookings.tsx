@@ -11,7 +11,7 @@ import { patchUnit } from '../services/inventoryWrites';
 import { patchLead } from '../services/leadWrites';
 import type { Booking, BookingStage, Lead, Unit, Invoice, Tower, Quotation, QuotationCharge, Commission, Broker, PaymentPlan } from '../types';
 import { BOOKING_STAGES } from '../types';
-import { formatCurrency, formatCurrencyFull } from '../utils/format';
+import { formatCurrency, formatCurrencyFull, todayISO, isoInDays } from '../utils/format';
 import {
   generatePaymentSchedule, getScheduleForBooking, setInstallmentStatus, isOverdue,
   fetchApiSchedule, apiPayInstallment, apiDemandInstallment,
@@ -462,7 +462,7 @@ export default function Bookings() {
         discountAmount: quoteDiscountNum,
         discountApprovedBy: discountNeedsApproval && canApproveDiscount ? actor.id : undefined,
         totalAmount: quoteTotal,
-        validUntil: (fd.get('validUntil') as string) || new Date(Date.now() + 15 * 86400000).toISOString().slice(0, 10),
+        validUntil: (fd.get('validUntil') as string) || isoInDays(15),
         status: parked ? 'pending_approval' : 'draft',
         createdBy: actor.id, createdAt: new Date().toISOString(),
       });
@@ -824,7 +824,7 @@ export default function Bookings() {
                       <p className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">Statement of Account</p>
                       {soa.rows.length > 0 && (
                         <button
-                          onClick={() => downloadCsv(`statement-${(lead?.name || 'buyer').replace(/\s+/g, '-').toLowerCase()}-${new Date().toISOString().slice(0, 10)}.csv`, [
+                          onClick={() => downloadCsv(`statement-${(lead?.name || 'buyer').replace(/\s+/g, '-').toLowerCase()}-${todayISO()}.csv`, [
                             ['Date', 'Description', 'Demand', 'Receipt', 'Balance'],
                             ...soa.rows.map(r => [new Date(r.date).toLocaleDateString('en-IN'), r.description, r.debit || '', r.credit || '', r.balance]),
                             ['', 'TOTAL', soa.demanded, soa.received, soa.balance],
@@ -1015,7 +1015,7 @@ export default function Bookings() {
                 </div>
                 <div>
                   <label className="block text-xs font-semibold text-zinc-500 uppercase mb-1">Valid Until</label>
-                  <input name="validUntil" type="date" defaultValue={new Date(Date.now() + 15 * 86400000).toISOString().slice(0, 10)} className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm" />
+                  <input name="validUntil" type="date" defaultValue={isoInDays(15)} className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm" />
                 </div>
               </div>
 

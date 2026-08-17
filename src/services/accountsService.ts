@@ -4,6 +4,7 @@ import type {
   VendorBill, RaBill, PaymentMade, Loan, LoanInstallment, PaymentPlan, Invoice,
 } from '../types';
 import { BUDGET_CATEGORIES } from '../types';
+import { todayISO } from '../utils/format';
 import { v4 as uuid } from 'uuid';
 import {
   isApiEnabled, apiGetAccounts, apiCreateAccount, apiGetJournalEntries, apiPostJournalEntry,
@@ -161,7 +162,7 @@ export async function postEntry(opts: {
   } else {
     entry = create<JournalEntry>('journalEntries', {
       id: '', tenantId: opts.tenantId,
-      date: opts.date ?? new Date().toISOString().slice(0, 10),
+      date: opts.date ?? todayISO(),
       narration: opts.narration, reference: opts.reference,
       sourceType: opts.sourceType, sourceId: opts.sourceId, projectId: opts.projectId,
       status, lines,

@@ -13,7 +13,7 @@ import {
   buildChecklistItems, inspectionOutcome,
 } from '../services/executionService';
 import { compressImage } from '../utils/image';
-import { formatCurrency } from '../utils/format';
+import { formatCurrency, todayISO } from '../utils/format';
 import { raiseConstructionDemands } from '../services/demandService';
 import { isApiEnabled } from '../services/apiClient';
 import * as execWrites from '../services/executionWrites';
@@ -238,7 +238,7 @@ export default function Execution() {
     try {
       created = await execWrites.createUpdate({
         id: '', tenantId, projectId: project.id, userId: user.id,
-        date: (fd.get('date') as string) || new Date().toISOString().slice(0, 10),
+        date: (fd.get('date') as string) || todayISO(),
         summary,
         workforce: workforce > 0 ? workforce : undefined,
         photos: pendingPhotos,
@@ -374,7 +374,7 @@ export default function Execution() {
       created = await execWrites.createInspection({
         id: '', tenantId, projectId: project.id, type: inspectionType,
         title: draftTitle.trim(),
-        date: (fd.get('date') as string) || new Date().toISOString().slice(0, 10),
+        date: (fd.get('date') as string) || todayISO(),
         inspectorId: (fd.get('inspectorId') as string) || user.id,
         status: 'scheduled',
         items: buildChecklistItems(items),
@@ -925,7 +925,7 @@ export default function Execution() {
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className={labelCls}>Date</label>
-                  <input name="date" type="date" defaultValue={new Date().toISOString().slice(0, 10)} className={inputCls} />
+                  <input name="date" type="date" defaultValue={todayISO()} className={inputCls} />
                 </div>
                 <div>
                   <label className={labelCls}>Workforce on Site</label>
@@ -1112,7 +1112,7 @@ export default function Execution() {
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className={labelCls}>Date</label>
-                  <input name="date" type="date" defaultValue={new Date().toISOString().slice(0, 10)} className={inputCls} />
+                  <input name="date" type="date" defaultValue={todayISO()} className={inputCls} />
                 </div>
                 <div>
                   <label className={labelCls}>Inspector</label>

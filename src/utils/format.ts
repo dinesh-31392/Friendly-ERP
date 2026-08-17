@@ -100,3 +100,30 @@ export function sinceArrival(iso: string, now: Date = new Date()): string {
   const months = Math.floor(days / 30);
   return months < 12 ? `${months}mo ago` : `${Math.floor(months / 12)}y ago`;
 }
+
+/**
+ * A calendar date as the USER sees it — `YYYY-MM-DD` in local time.
+ *
+ * `new Date().toISOString().slice(0, 10)` is UTC, and every date input, receipt
+ * date and bill date in the app used it. East of Greenwich that is yesterday
+ * for the first hours of every day: in IST (+5:30) a payment recorded at 01:00
+ * on the 5th defaults to the 4th, silently posting it to the wrong day — and,
+ * at a month boundary, the wrong month's books.
+ *
+ * Built from local components rather than a locale string, so it cannot be
+ * changed by the browser's locale settings.
+ */
+export function toLocalISODate(d: Date = new Date()): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+/** Today, local, as `YYYY-MM-DD`. */
+export function todayISO(): string {
+  return toLocalISODate();
+}
+
+/** `YYYY-MM-DD`, local, `days` from now — for due dates and validity windows. */
+export function isoInDays(days: number): string {
+  return toLocalISODate(new Date(Date.now() + days * 86400000));
+}

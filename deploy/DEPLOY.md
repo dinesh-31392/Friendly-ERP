@@ -40,7 +40,16 @@ Build on your local machine, from the project root:
 ```bash
 npm ci
 VITE_API_URL=/ npm run build      # → dist/index.html, API mode (same-origin /api)
+node deploy/gen-csp.mjs           # → deploy/security-headers*.conf
 ```
+
+**`gen-csp.mjs` is not optional, and it must run after every build.** The entire
+app is inlined into `index.html`, so the Content-Security-Policy pins that inline
+script by its sha256 hash rather than allowing `'unsafe-inline'` — which, for a
+single-file build, would permit exactly what the policy exists to prevent. The
+hash changes with the bundle, so a stale one means the browser refuses the only
+script on the page and users get a blank screen. Ship the two generated
+`.conf` files alongside `dist/`.
 
 `VITE_API_URL=/` trims to an empty base URL, meaning "same origin" — the app calls
 `/api/...`, which nginx proxies to the API container. **Omit it and you ship the
@@ -277,8 +286,9 @@ denied". `bash <script>` does not care. (`chmod +x deploy/*.sh` also works.)
 
 ## Updating the app later
 
-Rebuild the SPA locally (`npm run build` in the project root), replace the
-`dist/` folder on the VPS, then:
+Rebuild the SPA locally (`npm run build` in the project root), **re-run
+`node deploy/gen-csp.mjs`**, then replace both the `dist/` folder and the two
+`deploy/security-headers*.conf` files on the VPS, and:
 
 ```bash
 docker compose -f docker-compose.prod.yml restart web        # SPA only

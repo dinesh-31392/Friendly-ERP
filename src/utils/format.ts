@@ -127,3 +127,30 @@ export function todayISO(): string {
 export function isoInDays(days: number): string {
   return toLocalISODate(new Date(Date.now() + days * 86400000));
 }
+
+/**
+ * Add whole months to a `YYYY-MM-DD` date, clamping to the end of the target
+ * month — the same rule PostgreSQL applies to `date + interval '1 month'`.
+ *
+ * `Date.prototype.setMonth` does NOT clamp, it overflows: 31 Jan + 1 month is
+ * asked for "31 February" and JavaScript rolls it forward to 3 March. On a
+ * recurring schedule that is not an off-by-a-few-days, it is a skipped period —
+ * a monthly filing due on the 31st jumped February entirely, and because the
+ * next due date is computed from the last one it then drifted to the 3rd of
+ * every month thereafter. Loan EMIs had the same hole.
+ *
+ * Deliberately UTC throughout: the callers parse `YYYY-MM-DD` (which JS reads
+ * as UTC midnight) and format with toISOString, so mixing in local getters
+ * would shift the result by a day in any non-UTC zone.
+ */
+export function addMonthsISO(from: string, months: number): string {
+  const d = new Date(from);
+  if (Number.isNaN(d.getTime())) return from;
+  const day = d.getUTCDate();
+  // Move to the 1st BEFORE changing the month, or the overflow happens here.
+  d.setUTCDate(1);
+  d.setUTCMonth(d.getUTCMonth() + months);
+  const lastDayOfTarget = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).getUTCDate();
+  d.setUTCDate(Math.min(day, lastDayOfTarget));
+  return d.toISOString().slice(0, 10);
+}

@@ -1,4 +1,5 @@
 import { getByTenant, create, update, logAudit } from './db';
+import { addMonthsISO } from '../utils/format';
 import type { ComplianceItem, FilingFrequency } from '../types';
 
 export function isFilingOverdue(item: ComplianceItem): boolean {
@@ -13,13 +14,19 @@ export function filingsDueSoon(tenantId: string, days = 14): ComplianceItem[] {
     .sort((a, b) => new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime());
 }
 
+/**
+ * The next occurrence of a recurring filing.
+ *
+ * Months are added with clamping (addMonthsISO), not with setMonth. A GST
+ * return due on the 31st used to roll to 3 March — skipping February — and
+ * because markFiled() computes the next date from the last one, the deadline
+ * then drifted to the 3rd of every following month. Yearly is 12 months for
+ * the same reason: 29 Feb + 1 year has to land on 28 Feb, not 1 March.
+ */
 export function nextDueDate(from: string, frequency: FilingFrequency): string | null {
   if (frequency === 'one_time') return null;
-  const d = new Date(from);
-  if (frequency === 'monthly') d.setMonth(d.getMonth() + 1);
-  else if (frequency === 'quarterly') d.setMonth(d.getMonth() + 3);
-  else d.setFullYear(d.getFullYear() + 1);
-  return d.toISOString().slice(0, 10);
+  const months = frequency === 'monthly' ? 1 : frequency === 'quarterly' ? 3 : 12;
+  return addMonthsISO(from, months);
 }
 
 /**

@@ -22,6 +22,22 @@ export default defineConfig({
       "@": path.resolve(__dirname, "src"),
     },
   },
-  server: { port: devPort },
+  // Proxy /api to the local API so the dev server is SAME-ORIGIN, exactly like
+  // production (where nginx does this). Without it, dev had to point
+  // VITE_API_URL at http://localhost:4000, which makes every call cross-origin
+  // and puts CORS — a thing production never exercises — in the path of local
+  // development. It also breaks in any browser or preview pane that will not
+  // reach a second localhost port.
+  //
+  // API_PORT lets this follow a server started somewhere other than 4000.
+  server: {
+    port: devPort,
+    proxy: {
+      '/api': {
+        target: `http://localhost:${process.env.API_PORT || 4000}`,
+        changeOrigin: true,
+      },
+    },
+  },
   preview: { port: process.env.PORT ? Number(process.env.PORT) : 4173 },
 });

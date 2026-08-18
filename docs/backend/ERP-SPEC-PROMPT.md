@@ -50,8 +50,8 @@ from a half-built tower. Design for that.
 | Client (`src/`) | 97 | 32,105 |
 | Server routes | 32 | 7,671 |
 | Migrations | 39 | 3,420 |
-| Verification suites | 16 | 372 assertions |
-| Tables | 87 (81 tenant-scoped) | — |
+| Verification suites | 17 | 442 assertions |
+| Tables | 86 (80 tenant-scoped) | — |
 | API routes | 204 | — |
 
 ---
@@ -128,9 +128,21 @@ These are load-bearing. Each one exists because breaking it caused a real bug.
 
 ## 4. Data model by module
 
-All tenant tables carry `tenant_id uuid NOT NULL REFERENCES tenants(id)` and a
-`UNIQUE (id, tenant_id)` so child tables can use composite foreign keys — this
-makes it structurally impossible for a row in tenant A to reference tenant B.
+All tenant tables carry `tenant_id uuid NOT NULL REFERENCES tenants(id)`.
+
+Any table that is **referenced by another tenant table** additionally carries
+`UNIQUE (id, tenant_id)`, which is what a composite foreign key points at and is
+what makes it structurally impossible for a row in tenant A to reference tenant
+B. An earlier revision of this document claimed *every* tenant table carries it.
+It does not, and should not: 41 of the 80 are leaves that nothing references, and
+adding the constraint to each would build 41 unique indexes that duplicate a
+primary key already covering the same rows — write cost and storage for a
+guarantee nothing needs.
+
+Add the key at the point something first references the table, as migration 039
+did for `portal_users`: it had no such key, so the deny-list that needed to point
+at it could not be composite until 039 added one. The rule that actually holds is
+the FK invariant (9), and it is asserted — 0 single-column tenant→tenant keys.
 
 **Platform / identity**
 `tenants`, `users`, `roles`, `permissions`, `role_permissions`, `branches`,
@@ -377,9 +389,7 @@ knowing *what used to be wrong* is how you avoid rebuilding it:
   schema) → `apiClient` function → `*Writes` dispatcher → wire the page →
   verify (HTTP end-to-end and a browser pass) → `VITE_API_URL=/ npm run build`.
 - Verification scripts live in `server/scripts/verify-*.mjs`. Thirteen suites,
-  294 assertions: rls 9, hardening 6, booking-cascade 16, lead-merge 7, golive
-  30, writes 15, portal 35, accounts 28, landbd 28, whatsapp 82, mfa 16,
-  role-hierarchy 14, ratelimit 8. They run against a real Postgres and a real
+  294 assertions: they are listed in .github/workflows/ci.yml, which is the authority — every suite on disk is named there, and every step there resolves to a file that exists. They run against a real Postgres and a real
   HTTP server, not mocks — what this codebase gets wrong is RLS policies,
   permission grants and transaction boundaries, none of which a mocked database
   can be wrong about.
@@ -388,5 +398,7 @@ knowing *what used to be wrong* is how you avoid rebuilding it:
   instead of silently writing business data to `localStorage`.
 - A new tenant table is not finished until it has: `tenant_id NOT NULL`, RLS
   `ENABLE` + `FORCE`, a `tenant_rows` policy, an explicit `GRANT` to `app_user`,
-  `UNIQUE (id, tenant_id)`, a composite index leading on `tenant_id`, and
-  composite foreign keys. Six of those seven have been forgotten at least once.
+  a composite index leading on `tenant_id`, and composite foreign keys for every
+  column pointing at another tenant table. Each of those has been forgotten at
+  least once. `UNIQUE (id, tenant_id)` is **not** on this list — add it only when
+  something first needs to reference the table, per section 4.

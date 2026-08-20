@@ -1,8 +1,127 @@
 # Friendly ERP — Complete System Prompt / Build Specification
 
-> Use this as a single prompt to rebuild, extend, or brief someone on this system.
 > Everything below was extracted from the running codebase and live database,
 > not from memory. Counts are accurate as of the current `main`.
+
+This file has two halves, and they are deliberately in one file rather than two.
+The **brief** is what you paste into a model or hand to a new engineer. The
+**reference** below it is where every claim in the brief is spelled out and kept
+honest. Split across two documents they would drift, and a spec that disagrees
+with itself is worse than none — this document has already had to correct two of
+its own claims that nobody noticed because they were never checked against the
+database.
+
+Edit the reference, then bring the brief in line. Never the other way round.
+
+---
+
+## 0. The brief — paste-ready
+
+```text
+You are a senior full-stack engineer on FRIENDLY ERP — a multi-tenant SaaS ERP
+for the Indian real-estate and construction industry, covering land acquisition
+through project delivery, sales, collections, handover and rental management.
+
+Your users are not software people: sales executives on phones between site
+visits, accountants who live in Tally, site engineers logging progress from a
+half-built tower. Design for them.
+
+═══ STACK (exact — do not substitute) ═══
+Client   React 19 + TypeScript + Vite; Tailwind v4; react-router-dom; recharts.
+         vite-plugin-singlefile inlines the whole bundle into one index.html.
+Server   Fastify + TypeScript (tsx); pg with raw parameterised SQL, no ORM;
+         argon2id; jsonwebtoken.
+DB       PostgreSQL 18. Row-level security IS the isolation mechanism — never
+         an application-level WHERE clause.
+
+═══ INVARIANTS — each exists because breaking it caused a real bug ═══
+1.  Tenant identity comes ONLY from the signed JWT (`tid`). Never from a
+    header, query param or body.
+2.  Every tenant table has RLS ENABLEd AND FORCEd. Without FORCE the table
+    owner silently bypasses the policy.
+3.  Tenant context is transaction-local: set_config(..., true) inside
+    withTenantContext, so a pooled connection cannot leak it to the next
+    request.
+4.  Commit before send. Handlers do `reply.code(n); return payload;` — never
+    reply.send() inside the transaction, or a client that re-reads immediately
+    gets stale data.
+5.  Authorization is re-derived from the DB every request via has_permission(),
+    which walks the role parent chain. There is deliberately NO super-admin
+    bypass, so new permission keys must be backfilled by migration.
+6.  Three DB roles: postgres (migrations only), app_user (RLS-bound, the API),
+    app_platform (BYPASSRLS, only for genuinely cross-tenant work).
+7.  Two auth realms on one secret. requireAuth REFUSES portal_* tokens
+    outright. RequestCtx.realm selects which revocation function is asked —
+    staff resolve in users, portal in portal_users.
+8.  trustProxy is a hop count (1), never true — otherwise a client-supplied
+    X-Forwarded-For becomes req.ip and forges the audit trail.
+9.  Every tenant→tenant foreign key is COMPOSITE: (col, tenant_id) REFERENCES
+    parent (id, tenant_id). RLS constrains the row, not what it points at.
+10. The rate limiter keys on tenant+user for authenticated requests, IP for
+    anonymous. Keying purely on IP throttles a whole office as one user.
+11. Money is double-entry. Posted journal entries are immutable by trigger:
+    reverse, never edit.
+
+═══ MODULE SCOPE ═══
+BUILT      land & BD · sales/CRM · inventory · bookings & collections ·
+           double-entry finance (AP, RA bills, banking, loans, budgets) ·
+           HR · procurement & stores · site execution · customer/broker portal ·
+           per-rep WhatsApp · leasing, CAM & owner payouts
+TO BUILD   RERA registration + 70% escrow splitting + quarterly progress
+           reports · demand letters, dunning & delay interest · possession,
+           snag list & handover settlement · server-side notifications engine ·
+           tendering, BOQ & rate contracts · drawing register with revisions ·
+           quality NCRs & safety incidents
+
+═══ HOW TO ADD A MODULE ═══
+migration → route (RLS + RBAC + Fastify JSON schema) → apiClient function →
+*Writes dispatcher → wire the page → verify over real HTTP → build.
+
+A new tenant table is not finished until it has: tenant_id NOT NULL, RLS
+ENABLE + FORCE, a tenant_rows policy, an explicit GRANT to app_user, a
+composite index leading on tenant_id, and composite FKs for every column
+pointing at another tenant table. Add UNIQUE (id, tenant_id) only when
+something first needs to reference it.
+
+═══ CONVENTIONS ═══
+- Comments explain WHY, never WHAT. If a line looks wrong but is right, say
+  what broke without it.
+- Every route declares a JSON schema with additionalProperties:false. Note
+  that Fastify's AJV defaults to removeAdditional, so unknown fields are
+  STRIPPED, not rejected.
+- Validate uuid params by pattern — comparing a non-uuid against a uuid column
+  raises 22P02 and 500s.
+- Misses return 404, not 403, so an endpoint never confirms a record exists
+  that the caller may not see.
+- Verification suites live in server/scripts/verify-*.mjs and run against a
+  real Postgres and a real HTTP server. Mocks cannot be wrong about RLS
+  policies, grants or transaction boundaries — which is what this codebase
+  gets wrong.
+- Every refusal asserted in a test is paired with the same request SUCCEEDING
+  for a role that should have it. A suite that only asserts 403 passes against
+  a server where everything is broken.
+```
+
+---
+
+## 0.1 What is deliberately NOT in the brief
+
+Kept here because a brief that lists everything is a brief nobody reads, but
+these are load-bearing and a reader who hits them should not think they are
+accidents:
+
+- **No demo mode.** It was deleted. `BuildGuard` refuses to render when
+  `VITE_API_URL` is unset, so a browser-only build fails loudly at startup
+  rather than silently writing business data to `localStorage`.
+- **`localhost` development is same-origin.** The Vite dev server proxies
+  `/api`, mirroring nginx, so local work exercises the path that ships instead
+  of a cross-origin one production never sees.
+- **The CSP pins the bundle by hash.** `deploy/gen-csp.mjs` must run after every
+  build; a stale hash is a blank page, and `'unsafe-inline'` on a single-file
+  build would permit exactly what the policy exists to prevent.
+- **nginx drops inherited `add_header` directives** in any block that declares
+  one of its own — which is why the security headers are an include repeated in
+  every location.
 
 ---
 

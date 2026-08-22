@@ -1588,3 +1588,47 @@ export async function apiReassignLeadActivities(fromLeadId: string, toLeadId: st
   });
   return res.moved;
 }
+
+// ── Notifications (migration 040) ────────────────────────────────────────────
+//
+// These replace eight toggles that lived in localStorage and were read by
+// nothing. Every call is scoped server-side to the caller — there is no user id
+// in any signature, deliberately, because an inbox belongs to one person and
+// passing an id would be a second way to address it.
+
+export interface ApiNotification {
+  id: string;
+  kind: string;
+  title: string;
+  body: string;
+  entityType?: string;
+  entityId?: string;
+  readAt: string | null;
+  createdAt: string;
+}
+
+export async function apiGetNotifications(unreadOnly = false):
+  Promise<{ notifications: ApiNotification[]; unreadCount: number }> {
+  return request<{ notifications: ApiNotification[]; unreadCount: number }>(
+    `/api/notifications${unreadOnly ? '?unreadOnly=true' : ''}`);
+}
+
+export async function apiMarkNotificationRead(id: string): Promise<void> {
+  await request<{ notification: ApiNotification }>(`/api/notifications/${id}`, { method: 'PATCH' });
+}
+
+export async function apiMarkAllNotificationsRead(): Promise<number> {
+  const res = await request<{ marked: number }>('/api/notifications/read-all', { method: 'POST' });
+  return res.marked;
+}
+
+export async function apiGetNotificationPrefs(): Promise<Record<string, boolean>> {
+  const res = await request<{ prefs: Record<string, boolean> }>('/api/notification-prefs');
+  return res.prefs;
+}
+
+export async function apiSetNotificationPref(kind: string, enabled: boolean): Promise<void> {
+  await request<{ kind: string; enabled: boolean }>(`/api/notification-prefs/${kind}`, {
+    method: 'PUT', body: JSON.stringify({ enabled }),
+  });
+}

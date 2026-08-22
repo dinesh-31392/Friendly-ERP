@@ -28,7 +28,8 @@
     "verify:leasing": "node scripts/verify-leasing.mjs",
     "verify:readiness": "node scripts/verify-production-readiness.mjs",
     "verify:revocation": "node scripts/verify-revocation.mjs",
-    "verify:public": "node scripts/verify-public-capture.mjs"
+    "verify:public": "node scripts/verify-public-capture.mjs",
+    "verify:notifications": "node scripts/verify-notifications.mjs"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",

@@ -7,6 +7,8 @@ import {
   Monitor,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { isApiEnabled, apiGetNotificationPrefs } from '../services/apiClient';
+import * as notificationWrites from '../services/notificationWrites';
 import IntegrationsPanel from '../components/IntegrationsPanel';
 import WhatsAppStoragePanel from '../components/WhatsAppStoragePanel';
 import WhatsAppAutoReplyPanel from '../components/WhatsAppAutoReplyPanel';
@@ -120,29 +122,47 @@ export default function Settings() {
   const canManageSettings = hasPermission('manage_settings');
   const canManageUsers = hasPermission('manage_users');
   
-  // Notification preferences state
-  const [notifications, setNotifications] = useState(() => {
-    try {
-      const saved = localStorage.getItem(`friendly_crm_notifications_${tenantId}`);
-      if (saved) return JSON.parse(saved);
-    } catch { /* corrupted storage — fall back to defaults */ }
-    return {
-      new_lead_assigned: true,
-      lead_stage_changed: true,
-      task_due_reminder: true,
-      visit_scheduled: true,
-      payment_received: true,
-      service_ticket_update: false,
-      team_member_joined: false,
-      weekly_performance_report: true,
-    };
-  });
+  // Notification preferences.
+  //
+  // These lived in localStorage under a per-TENANT key, which was wrong twice
+  // over: nothing on the server ever read them, so every toggle was decorative;
+  // and keying on the tenant meant everyone sharing a browser profile shared one
+  // set, while the same person on their phone had another. They are per-user
+  // server rows now (migration 040), and the emitter actually consults them.
+  //
+  // Defaults live here rather than as seeded rows: absence means enabled, so a
+  // user who never opens this page still gets notified.
+  const NOTIFICATION_DEFAULTS: Record<string, boolean> = {
+    new_lead_assigned: true,
+    lead_stage_changed: true,
+    task_due_reminder: true,
+    visit_scheduled: true,
+    payment_received: true,
+    service_ticket_update: false,
+    team_member_joined: false,
+    weekly_performance_report: true,
+  };
+  const [notifications, setNotifications] = useState<Record<string, boolean>>(NOTIFICATION_DEFAULTS);
+
+  useEffect(() => {
+    if (!isApiEnabled()) return;
+    apiGetNotificationPrefs()
+      .then(saved => setNotifications({ ...NOTIFICATION_DEFAULTS, ...saved }))
+      .catch(() => { /* defaults stand; a failed read must not blank the toggles */ });
+  }, []);
   
-  const toggleNotification = (key: string) => {
-    const updated = { ...notifications, [key]: !notifications[key] };
-    setNotifications(updated);
-    localStorage.setItem(`friendly_crm_notifications_${tenantId}`, JSON.stringify(updated));
-    toast.success(`Notification ${updated[key] ? 'enabled' : 'disabled'}`);
+  const toggleNotification = async (key: string) => {
+    const next = !notifications[key];
+    setNotifications(prev => ({ ...prev, [key]: next }));   // optimistic
+    try {
+      await notificationWrites.setPref(key, next);
+      toast.success(`Notification ${next ? 'enabled' : 'disabled'}`);
+    } catch {
+      // Put it back. A toggle that says "on" while the server says "off" is
+      // worse than one that visibly refused to move.
+      setNotifications(prev => ({ ...prev, [key]: !next }));
+      toast.error('Could not save that preference');
+    }
   };
 
   const [savingProfile, setSavingProfile] = useState(false);
@@ -978,13 +998,22 @@ export default function Settings() {
             </div>
             
             <div className="pt-4 border-t border-zinc-100 flex items-center justify-between">
-              <p className="text-xs text-zinc-500">Notification preferences are saved per workspace</p>
-              <button 
-                onClick={() => {
-                  const allEnabled = Object.keys(notifications).reduce((acc, key) => ({ ...acc, [key]: true }), {});
-                  setNotifications(allEnabled);
-                  localStorage.setItem(`friendly_crm_notifications_${tenantId}`, JSON.stringify(allEnabled));
-                  toast.success('All notifications enabled');
+              {/* Per person, not per workspace — the old copy said "workspace"
+                  because the storage key was the tenant, which is precisely the
+                  bug: two people sharing a browser shared one set of toggles. */}
+              <p className="text-xs text-zinc-500">These preferences are yours, on every device you sign in from</p>
+              <button
+                onClick={async () => {
+                  const keys = Object.keys(notifications);
+                  const previous = notifications;
+                  setNotifications(keys.reduce((acc, key) => ({ ...acc, [key]: true }), {}));
+                  try {
+                    await Promise.all(keys.map(k => notificationWrites.setPref(k, true)));
+                    toast.success('All notifications enabled');
+                  } catch {
+                    setNotifications(previous);
+                    toast.error('Could not save those preferences');
+                  }
                 }}
                 className="text-xs font-medium text-indigo-600 hover:text-indigo-700"
               >

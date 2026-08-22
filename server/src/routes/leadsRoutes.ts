@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import type pg from 'pg';
 import { withTenantContext } from '../db.js';
 import { requireAuth } from '../auth.js';
+import { emit } from '../notify.js';
 import { enqueueAutoReply } from '../autoReply.js';
 
 interface LeadsQuery {
@@ -392,6 +393,30 @@ export async function leadsRoutes(app: FastifyInstance): Promise<void> {
             `UPDATE leads SET ${sets.join(', ')} WHERE id = $${params.length} RETURNING *`,
             params,
           );
+
+          // Handing a lead to someone is the one edit the OTHER person needs to
+          // know about — before this, a manager reassigned a lead and the rep
+          // found out whenever they next happened to look at the list.
+          //
+          // Emitted on the caller's transaction, so a notification about an
+          // assignment that then failed to commit cannot exist. Skipped when
+          // somebody assigns a lead to themselves, which is most reassignments
+          // and is not news to the person doing it.
+          // `body` is Record<string, unknown> for the dynamic UPDATE above, so
+          // the schema's guarantee that assignedTo is a uuid string is not
+          // visible to the type checker here — hence the explicit narrowing
+          // rather than a cast that would also accept a number or an object.
+          const assignee = typeof body.assignedTo === 'string' ? body.assignedTo : null;
+          if (assignee && assignee !== req.ctx.userId) {
+            await emit(db, {
+              userId: assignee,
+              kind: 'new_lead_assigned',
+              title: `Lead assigned: ${rows[0].name}`,
+              body: `${rows[0].phone || 'no phone'}${rows[0].project ? ' · ' + rows[0].project : ''}`,
+              entityType: 'lead',
+              entityId: String(rows[0].id),
+            });
+          }
           return { lead: toApiLead(rows[0]) };
         });
       } catch (err) {

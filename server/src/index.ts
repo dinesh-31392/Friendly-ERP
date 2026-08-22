@@ -38,6 +38,7 @@ import { tenantRoutes } from './routes/tenantRoutes.js';
 import { invoiceRoutes } from './routes/invoiceRoutes.js';
 import { crmTaskRoutes } from './routes/crmTaskRoutes.js';
 import { portalRoutes } from './routes/portalRoutes.js';
+import { notificationsRoutes } from './routes/notificationsRoutes.js';
 import { leasingRoutes } from './routes/leasingRoutes.js';
 import { ownerPayoutsRoutes } from './routes/ownerPayoutsRoutes.js';
 // Used by the rate limiter to key on identity rather than address.
@@ -180,6 +181,7 @@ await app.register(tenantRoutes);
 await app.register(invoiceRoutes);
 await app.register(crmTaskRoutes);
 await app.register(portalRoutes);
+await app.register(notificationsRoutes);
 await app.register(leasingRoutes);
 await app.register(ownerPayoutsRoutes);
 

@@ -9,7 +9,7 @@ import {
 import { useAuth } from '../context/AuthContext';
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { getByTenant } from '../services/db';
-import { isApiEnabled, apiWhatsappConversations } from '../services/apiClient';
+import { isApiEnabled, apiWhatsappConversations, apiGetNotifications, apiMarkNotificationRead, type ApiNotification } from '../services/apiClient';
 import { trialDaysLeft, isModuleEnabled } from '../services/planService';
 import { lowStockMaterials } from '../services/procurementService';
 import { filingsDueSoon } from '../services/complianceService';
@@ -127,6 +127,21 @@ export default function DashboardLayout() {
   const roleMenuRef = useRef<HTMLDivElement>(null);
   const notifRef = useRef<HTMLDivElement>(null);
 
+  // The server inbox. Polled rather than pushed: there is no socket layer, and
+  // a minute of latency on "a lead was assigned to you" is not worth one.
+  const [inbox, setInbox] = useState<ApiNotification[]>([]);
+  const [inboxUnread, setInboxUnread] = useState(0);
+  useEffect(() => {
+    if (!isApiEnabled()) return;
+    let live = true;
+    const pull = () => apiGetNotifications()
+      .then(r => { if (live) { setInbox(r.notifications); setInboxUnread(r.unreadCount); } })
+      .catch(() => { /* the bell is not worth a toast when it fails */ });
+    pull();
+    const t = setInterval(pull, 60_000);
+    return () => { live = false; clearInterval(t); };
+  }, []);
+
   const tenantId = tenant?.id || '';
   const userId = user?.id || '';
   const isExecutive = user?.role === 'sales_executive';
@@ -198,12 +213,32 @@ export default function DashboardLayout() {
   const openTickets = moduleOn('service') ? tickets.filter(t => t.status === 'open').length : 0;
   const pendingTasks = moduleOn('calendar') ? tasks.filter(t => t.status === 'pending' && t.priority === 'hot').length : 0;
   const newLeads = moduleOn('leads') ? leads.filter(l => l.stage === 'new').length : 0;
-  const totalNotifications = unreadMessages + openTickets + pendingTasks + newLeads
+  const totalNotifications = inboxUnread + unreadMessages + openTickets + pendingTasks + newLeads
     + overdueSiteTasks.length + lowStock.length + pendingPoApprovals.length + dueFilings.length;
 
   // Build notifications list — each entry gated by its module being enabled
   const notifications = useMemo(() => {
-    const items: Array<{ id: string; type: string; title: string; time: string; link: string; icon: React.ElementType; color: string }> = [];
+    const items: Array<{ id: string; type: string; title: string; time: string; link: string; icon: React.ElementType; color: string; serverId?: string }> = [];
+
+    // Server-addressed notifications come FIRST, and they are a different kind
+    // of thing from everything below: the rest of this list is derived — "you
+    // have 3 open tickets" — recomputed from data the layout already holds.
+    // These were sent TO this user about something that happened, they persist
+    // across devices, and they stay until read. A derived count cannot do any
+    // of that, which is why they sit above it rather than mixed in.
+    inbox.filter(n => !n.readAt).slice(0, 5).forEach(n => {
+      items.push({
+        id: `n-${n.id}`,
+        serverId: n.id,
+        type: n.kind,
+        title: n.title,
+        time: new Date(n.createdAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }),
+        link: n.entityType === 'lead' ? '/leads' : '/',
+        icon: Bell,
+        color: 'text-indigo-500',
+      });
+    });
+
     if (moduleOn('leads')) leads.filter(l => l.stage === 'new').slice(0, 3).forEach(l => {
       items.push({ id: `l-${l.id}`, type: 'lead', title: `New lead: ${l.name} (${l.project})`, time: new Date(l.createdAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }), link: '/leads', icon: Users, color: 'text-blue-500' });
     });
@@ -231,7 +266,7 @@ export default function DashboardLayout() {
     });
     return items;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [leads, tasks, tickets, unreadMessages, tenant, overdueSiteTasks, lowStock, pendingPoApprovals, dueFilings]);
+  }, [inbox, leads, tasks, tickets, unreadMessages, tenant, overdueSiteTasks, lowStock, pendingPoApprovals, dueFilings]);
 
   // Global search results
   const searchResults = useMemo(() => {
@@ -681,7 +716,18 @@ export default function DashboardLayout() {
                     notifications.map(n => (
                       <button
                         key={n.id}
-                        onClick={() => { navigate(n.link); setNotifOpen(false); }}
+                        onClick={() => {
+                          // A server notification is dismissed by reading it;
+                          // the derived entries have nothing to mark, and clear
+                          // themselves when the underlying work is done.
+                          if (n.serverId) {
+                            apiMarkNotificationRead(n.serverId).catch(() => {});
+                            setInbox(prev => prev.map(x => x.id === n.serverId ? { ...x, readAt: new Date().toISOString() } : x));
+                            setInboxUnread(c => Math.max(0, c - 1));
+                          }
+                          navigate(n.link);
+                          setNotifOpen(false);
+                        }}
                         className="w-full flex items-start gap-3 px-4 py-3 hover:bg-zinc-50 transition-colors border-b border-zinc-50 last:border-0 text-left"
                       >
                         <div className="h-8 w-8 rounded-lg bg-zinc-100 flex items-center justify-center shrink-0">

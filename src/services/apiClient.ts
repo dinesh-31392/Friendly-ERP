@@ -1632,3 +1632,77 @@ export async function apiSetNotificationPref(kind: string, enabled: boolean): Pr
     method: 'PUT', body: JSON.stringify({ enabled }),
   });
 }
+
+// ── Site visits (migration 043) ──────────────────────────────────────────────
+//
+// The conversion event in this industry, and previously unmeasurable: a visit
+// could be logged as an activity but not scheduled, reassigned, rescheduled or
+// counted. Scoping is server-side — a rep restricted to their own leads sees
+// only visits assigned to them, so there is no filter to get wrong here.
+
+export interface ApiSiteVisit {
+  id: string;
+  leadId: string;
+  leadName?: string;
+  projectId?: string;
+  unitId?: string;
+  assignedTo: string;
+  assigneeName?: string;
+  scheduledAt: string;
+  durationMinutes: number;
+  status: 'scheduled' | 'confirmed' | 'completed' | 'no_show' | 'cancelled';
+  outcome?: 'interested' | 'not_interested' | 'needs_followup' | 'booked';
+  feedback: string;
+  rescheduledFrom?: string;
+  completedAt: string | null;
+  createdAt: string;
+}
+
+export async function apiGetSiteVisits(q: {
+  from?: string; to?: string; status?: string; leadId?: string;
+} = {}): Promise<ApiSiteVisit[]> {
+  const qs = new URLSearchParams(
+    Object.entries(q).filter(([, v]) => v !== undefined) as [string, string][]).toString();
+  const res = await request<{ siteVisits: ApiSiteVisit[] }>(`/api/site-visits${qs ? '?' + qs : ''}`);
+  return res.siteVisits;
+}
+
+export async function apiGetSiteVisitFunnel(from?: string, to?: string):
+  Promise<{ scheduled: number; completed: number; noShow: number; booked: number }> {
+  const qs = new URLSearchParams(
+    Object.entries({ from, to }).filter(([, v]) => v !== undefined) as [string, string][]).toString();
+  const res = await request<{ funnel: { scheduled: number; completed: number; noShow: number; booked: number } }>(
+    `/api/site-visits/funnel${qs ? '?' + qs : ''}`);
+  return res.funnel;
+}
+
+export async function apiScheduleSiteVisit(input: {
+  leadId: string; assignedTo: string; scheduledAt: string;
+  projectId?: string; unitId?: string; durationMinutes?: number;
+}): Promise<ApiSiteVisit> {
+  const res = await request<{ siteVisit: ApiSiteVisit }>('/api/site-visits', {
+    method: 'POST', body: JSON.stringify(input),
+  });
+  return res.siteVisit;
+}
+
+/** Moving a visit creates a NEW one linked to the old — the slip stays visible. */
+export async function apiRescheduleSiteVisit(id: string, scheduledAt: string, assignedTo?: string): Promise<ApiSiteVisit> {
+  const res = await request<{ siteVisit: ApiSiteVisit }>(`/api/site-visits/${id}/reschedule`, {
+    method: 'POST', body: JSON.stringify({ scheduledAt, assignedTo }),
+  });
+  return res.siteVisit;
+}
+
+/** `completed` requires an outcome; anything else must not carry one. */
+export async function apiCloseSiteVisit(
+  id: string,
+  status: 'confirmed' | 'completed' | 'no_show' | 'cancelled',
+  outcome?: ApiSiteVisit['outcome'],
+  feedback?: string,
+): Promise<ApiSiteVisit> {
+  const res = await request<{ siteVisit: ApiSiteVisit }>(`/api/site-visits/${id}`, {
+    method: 'PATCH', body: JSON.stringify({ status, outcome, feedback }),
+  });
+  return res.siteVisit;
+}

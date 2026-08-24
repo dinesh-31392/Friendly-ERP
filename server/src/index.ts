@@ -41,6 +41,7 @@ import { portalRoutes } from './routes/portalRoutes.js';
 import { notificationsRoutes } from './routes/notificationsRoutes.js';
 import { demandRoutes } from './routes/demandRoutes.js';
 import { reraRoutes } from './routes/reraRoutes.js';
+import { siteVisitRoutes } from './routes/siteVisitRoutes.js';
 import { leasingRoutes } from './routes/leasingRoutes.js';
 import { ownerPayoutsRoutes } from './routes/ownerPayoutsRoutes.js';
 // Used by the rate limiter to key on identity rather than address.
@@ -186,6 +187,7 @@ await app.register(portalRoutes);
 await app.register(notificationsRoutes);
 await app.register(demandRoutes);
 await app.register(reraRoutes);
+await app.register(siteVisitRoutes);
 await app.register(leasingRoutes);
 await app.register(ownerPayoutsRoutes);
 

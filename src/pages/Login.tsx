@@ -9,9 +9,63 @@ import toast from 'react-hot-toast';
 
 type LoginTab = 'platform' | 'builder' | 'portal';
 
+/**
+ * The sign-in role picker.
+ *
+ * This chooses a DESTINATION, not an identity. The server derives the real role
+ * from the database on every request, so a selection here cannot grant anything
+ * — and must not withhold anything either: someone who picks "Sales Manager"
+ * but is actually an accountant still signs in, because their password was
+ * right and the server is what decides. Gating on this would refuse correct
+ * credentials while adding no security at all, since anyone can pick any entry.
+ *
+ * What it genuinely decides is which of the three auth paths to use and which
+ * fields to show. That was previously exposed as Platform / Builder / Portal —
+ * accurate, but named after how the system is built rather than after what the
+ * person signing in calls themselves.
+ */
+interface RoleOption {
+  id: string;
+  label: string;
+  realm: LoginTab;
+  hint: string;
+}
+
+const ROLE_GROUPS: { group: string; options: RoleOption[] }[] = [
+  {
+    group: 'Platform team',
+    options: [
+      { id: 'super_admin', label: 'Super Admin', realm: 'platform', hint: 'Full control of every workspace on the platform.' },
+      { id: 'tech_team', label: 'Branch Team', realm: 'platform', hint: 'Onboard and support builders in your branch.' },
+    ],
+  },
+  {
+    group: 'Your workspace',
+    options: [
+      { id: 'builder_admin', label: 'Builder Admin', realm: 'builder', hint: 'Own the whole workspace — sales, finance, sites and people.' },
+      { id: 'sales_manager', label: 'Sales Manager', realm: 'builder', hint: 'Run the pipeline, approve discounts, close bookings.' },
+      { id: 'sales_executive', label: 'Sales Executive', realm: 'builder', hint: 'Work your leads, book site visits, raise quotations.' },
+      { id: 'accountant', label: 'Accountant', realm: 'builder', hint: 'Post to the ledger, raise demands, reconcile collections.' },
+      { id: 'site_engineer', label: 'Site Engineer', realm: 'builder', hint: 'Log progress, raise RFIs, issue stock, sign off RA bills.' },
+      { id: 'auditor', label: 'Auditor', realm: 'builder', hint: 'Read every module. Change nothing.' },
+    ],
+  },
+  {
+    group: 'Customers & partners',
+    options: [
+      { id: 'customer', label: 'Customer', realm: 'portal', hint: 'Track your booking, payments and documents.' },
+      { id: 'partner', label: 'Channel Partner', realm: 'portal', hint: 'Track your referrals and commission statements.' },
+    ],
+  },
+];
+
+const ALL_ROLE_OPTIONS = ROLE_GROUPS.flatMap(g => g.options);
+
 export default function Login() {
   const { login, verifyLoginCode, register, resetPassword } = useAuth();
   const [tab, setTab] = useState<LoginTab>('builder');
+  // Defaults to Sales Executive: the role that signs in most often, by a wide margin.
+  const [roleId, setRoleId] = useState('sales_executive');
   const [isRegistering, setIsRegistering] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -120,6 +174,18 @@ export default function Login() {
   const switchTab = (t: LoginTab) => {
     setTab(t); setIsRegistering(false); setLoginError(''); setShowPassword(false);
     setAccountPicked(false); setUseAnother(false);
+  };
+
+  const selectedRole = ALL_ROLE_OPTIONS.find(r => r.id === roleId) ?? ALL_ROLE_OPTIONS[2];
+
+  const pickRole = (id: string) => {
+    const next = ALL_ROLE_OPTIONS.find(r => r.id === id);
+    if (!next) return;
+    setRoleId(id);
+    // Only reset the form when the REALM changes. Switching between two roles
+    // that sign in the same way — Sales Manager to Accountant, say — should not
+    // wipe an email somebody has already typed.
+    if (next.realm !== tab) switchTab(next.realm);
   };
 
   const toggleRegister = () => {
@@ -307,23 +373,48 @@ export default function Login() {
               </div>
             ) : (
             <>
-            {/* Login-type tabs */}
-            <div className="flex items-center gap-1 bg-zinc-100 rounded-xl p-1 mb-6">
-              {([
-                { id: 'platform' as const, label: 'Platform', icon: Globe },
-                { id: 'builder' as const, label: 'Builder', icon: Building2 },
-                { id: 'portal' as const, label: 'Portal', icon: Home },
-              ]).map(t => (
-                <button
-                  key={t.id}
-                  type="button"
-                  onClick={() => switchTab(t.id)}
-                  className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs font-semibold transition-all ${tab === t.id ? 'bg-white text-indigo-700 shadow-sm' : 'text-zinc-500 hover:text-zinc-700'}`}
-                >
-                  <t.icon className="h-3.5 w-3.5" /> {t.label}
-                </button>
-              ))}
-            </div>
+            {/* Who is signing in. Chooses the destination, never the identity —
+                see ROLE_GROUPS. Sits above every other field because it decides
+                which of them appear. */}
+            {!isRegistering && (
+              <div className="mb-6">
+                <label htmlFor="role-select" className="block text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-1.5">
+                  I'm signing in as
+                </label>
+                <div className="relative">
+                  <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 flex h-6 w-6 items-center justify-center rounded-md bg-indigo-50">
+                    {selectedRole.realm === 'platform'
+                      ? <Globe className="h-3.5 w-3.5 text-indigo-600" />
+                      : selectedRole.realm === 'portal'
+                        ? <Home className="h-3.5 w-3.5 text-indigo-600" />
+                        : <Building2 className="h-3.5 w-3.5 text-indigo-600" />}
+                  </span>
+                  <select
+                    id="role-select"
+                    value={roleId}
+                    onChange={e => pickRole(e.target.value)}
+                    className="w-full appearance-none pl-12 pr-10 py-3 bg-white border border-zinc-200 rounded-xl text-sm font-semibold text-zinc-800 shadow-sm cursor-pointer focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-400 hover:border-zinc-300 transition-all"
+                  >
+                    {ROLE_GROUPS.map(g => (
+                      <optgroup key={g.group} label={g.group}>
+                        {g.options.map(o => (
+                          <option key={o.id} value={o.id}>{o.label}</option>
+                        ))}
+                      </optgroup>
+                    ))}
+                  </select>
+                  <svg
+                    aria-hidden="true"
+                    className="pointer-events-none absolute right-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-zinc-400"
+                    viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8"
+                    strokeLinecap="round" strokeLinejoin="round"
+                  >
+                    <path d="M6 8l4 4 4-4" />
+                  </svg>
+                </div>
+                <p className="text-[11px] text-zinc-400 mt-1.5 leading-relaxed">{selectedRole.hint}</p>
+              </div>
+            )}
 
             {tab === 'portal' ? (
               /* Customer / Channel Partner — separate auth system */
@@ -350,8 +441,8 @@ export default function Login() {
                 {isRegistering
                   ? 'Set up your builder workspace in minutes — approved by our team before going live.'
                   : tab === 'platform'
-                    ? 'For Super Admin & Branch Team.'
-                    : 'For Builder Admin, Sales Manager & Sales Executive.'}
+                    ? 'Platform team — no workspace code needed.'
+                    : 'Use your workspace code if your company gave you one.'}
               </p>
             </div>
 

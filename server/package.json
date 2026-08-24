@@ -30,7 +30,8 @@
     "verify:revocation": "node scripts/verify-revocation.mjs",
     "verify:public": "node scripts/verify-public-capture.mjs",
     "verify:notifications": "node scripts/verify-notifications.mjs",
-    "verify:demands": "node scripts/verify-demand-letters.mjs"
+    "verify:demands": "node scripts/verify-demand-letters.mjs",
+    "verify:rera": "node scripts/verify-rera-escrow.mjs"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",

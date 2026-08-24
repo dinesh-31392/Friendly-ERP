@@ -258,13 +258,31 @@ export default function Dashboard() {
   const bookingsChange = pctChange(bookedCurr.length, bookedPrev.length);
   const revenueChange = pctChange(bookedCurr.reduce((s, l) => s + l.budget, 0), bookedPrev.reduce((s, l) => s + l.budget, 0));
 
+  // Every tile above the ERP block is derived from LEADS, and the leads fetch
+  // 403s for a role without view_leads — silently, because one forbidden
+  // endpoint must not blank the whole page. The result was a dashboard that
+  // told an accountant their revenue was zero.
+  //
+  // A zero is a claim. "No revenue" and "you cannot see revenue" are different
+  // statements and the tile could only make the first one, so a role that
+  // cannot read the source does not get the tile at all — the ERP tiles below,
+  // which have their own sources and their own permissions, still render.
+  const canSeeLeadDerived = hasPermission('view_leads');
+  const canSeeUnits = hasPermission('view_inventory');
+
   const kpiData: { label: string; value: string | number; change: number | null; icon: string }[] = [
-    { label: isExecutive ? 'My Leads' : 'Total Leads', value: totalLeads, change: leadsChange, icon: 'users' },
-    { label: 'Conversion Rate', value: `${conversionRate}%`, change: null, icon: 'trending-up' },
-    { label: isExecutive ? 'My Revenue' : 'Revenue', value: formatCurrency(totalRevenue, currency), change: revenueChange, icon: 'indian-rupee' },
-    { label: 'Available Units', value: availableUnits, change: null, icon: 'building' },
-    { label: 'Bookings', value: bookedLeads, change: bookingsChange, icon: 'check-circle' },
-    { label: 'Avg Deal', value: formatCurrency(avgDealSize, currency), change: null, icon: 'bar-chart' },
+    ...(canSeeLeadDerived ? [
+      { label: isExecutive ? 'My Leads' : 'Total Leads', value: totalLeads, change: leadsChange, icon: 'users' },
+      { label: 'Conversion Rate', value: `${conversionRate}%`, change: null, icon: 'trending-up' },
+      { label: isExecutive ? 'My Revenue' : 'Revenue', value: formatCurrency(totalRevenue, currency), change: revenueChange, icon: 'indian-rupee' },
+    ] : []),
+    ...(canSeeUnits ? [
+      { label: 'Available Units', value: availableUnits, change: null, icon: 'building' },
+    ] : []),
+    ...(canSeeLeadDerived ? [
+      { label: 'Bookings', value: bookedLeads, change: bookingsChange, icon: 'check-circle' },
+      { label: 'Avg Deal', value: formatCurrency(avgDealSize, currency), change: null, icon: 'bar-chart' },
+    ] : []),
     // Role-tailored ERP KPIs (spec §5): projects for execution roles, cash
     // position for finance roles — appended so sales KPIs keep their spots
     ...(showExecution ? [
@@ -524,7 +542,11 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* Charts & Pipeline Row */}
+      {/* Charts & Pipeline Row — both read from leads, so both are hidden from a
+          role that cannot. Rendered anyway they drew an empty funnel and a flat
+          intake chart, which reads as "this builder has no leads" rather than
+          "this is not yours to see". */}
+      {canSeeLeadDerived && (
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2 bg-white rounded-2xl border border-zinc-200/60 p-5">
           <div className="flex items-center justify-between mb-4">
@@ -577,6 +599,7 @@ export default function Dashboard() {
           </div>
         </div>
       </div>
+      )}
 
       {/* Bottom Row */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -610,6 +633,9 @@ export default function Dashboard() {
           </div>
         </div>
 
+        {/* Also lead-derived: "No hot leads" is a claim about the business,
+            and a role that cannot read leads is in no position to make it. */}
+        {canSeeLeadDerived && (
         <div className="bg-white rounded-2xl border border-zinc-200/60 p-5">
           <div className="flex items-center justify-between mb-4">
             <h3 className="font-semibold text-zinc-900">Hot Leads</h3>
@@ -631,6 +657,7 @@ export default function Dashboard() {
             {hotLeads.length === 0 && <p className="text-sm text-zinc-400 text-center py-4">No hot leads</p>}
           </div>
         </div>
+        )}
 
         <div className="bg-white rounded-2xl border border-zinc-200/60 p-5">
           <div className="flex items-center justify-between mb-4">

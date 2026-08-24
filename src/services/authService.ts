@@ -507,6 +507,16 @@ export function hasPermission(user: User, action: string): boolean {
       'view_land', 'approve_land_qualify',
       'view_documents', 'view_calendar', 'view_messages', 'send_messages',
     ],
+    // Must stay in step with ROLE_PERMS in server/scripts/seed.ts and
+    // server/src/routes/tenantRoutes.ts, and with migration 045. This map
+    // decides which menu items render; the database decides what the server
+    // actually allows, and the two disagreeing is how tech_team ended up with
+    // a menu full of pages it would be refused.
+    hr_manager: [
+      'view_dashboard', 'view_hr', 'manage_hr', 'manage_attendance',
+      'view_documents', 'view_projects', 'view_reports',
+      'view_calendar', 'view_messages', 'send_messages',
+    ],
   };
   const perms = permissions[user.role];
   if (!perms) return false;

@@ -20,7 +20,7 @@ export type Role =
   | 'super_admin' | 'tech_team'
   | 'builder_admin' | 'sales_manager' | 'sales_executive' | 'site_engineer'
   | 'telecaller' | 'accountant' | 'auditor'
-  | 'land_manager' | 'bd_manager';
+  | 'land_manager' | 'bd_manager' | 'hr_manager';
 
 export type ApprovalStatus = 'pending' | 'approved' | 'rejected';
 

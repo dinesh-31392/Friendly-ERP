@@ -80,6 +80,12 @@ const ROLE_PERMS: Record<string, string[]> = {
     'view_calendar','view_messages','send_messages'],
   bd_manager: ['view_dashboard','view_projects','view_reports','view_bd','manage_bd','view_land',
     'approve_land_qualify','view_documents','view_calendar','view_messages','send_messages'],
+  // Runs the HR module. Deliberately no finance key: payroll is COMPUTED here
+  // and posted by the accountant, and keeping those two apart is the reason to
+  // have a separate role at all rather than handing HR to a builder_admin.
+  hr_manager: ['view_dashboard','view_hr','manage_hr','manage_attendance',
+    'view_documents','view_projects','view_reports','view_calendar',
+    'view_messages','send_messages'],
 };
 
 /**

@@ -30,7 +30,7 @@ async function leadAccess(db: import('pg').PoolClient): Promise<Access> {
             has_permission('assign_leads')     AS can_assign`);
   return {
     canWrite: p.full_access || p.own_access,
-    ownOnly: !p.full_access && !p.can_assign,
+    ownOnly: p.own_access && !p.full_access && !p.can_assign,
   };
 }
 

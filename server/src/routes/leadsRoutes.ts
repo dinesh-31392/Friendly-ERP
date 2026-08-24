@@ -113,7 +113,7 @@ async function leadAccess(db: pg.PoolClient): Promise<LeadAccess> {
   return {
     canWrite: p.full_access || p.own_access,
     canAssign: p.full_access || p.can_assign,
-    ownOnly: !p.full_access && !p.can_assign,
+    ownOnly: p.own_access && !p.full_access && !p.can_assign,
   };
 }
 
@@ -177,8 +177,15 @@ export async function leadsRoutes(app: FastifyInstance): Promise<void> {
         if (!allowed) return reply.code(403).send({ error: 'Missing permission: view_leads' });
 
         const { rows: [{ own_only }] } = await db.query(
-          `SELECT NOT has_permission('manage_leads')
-             AND NOT has_permission('assign_leads') AS own_only`,
+          // Restriction to one's OWN leads follows from HOLDING manage_own_leads,
+          // not from lacking the broader ones. Inferring it from absence treated
+          // every read-only role as a junior rep: an auditor holds view_leads and
+          // no write permission by design, so they were filtered to leads
+          // assigned to them — of which an auditor has none. The role could not
+          // audit anything.
+          `SELECT has_permission('manage_own_leads')
+              AND NOT has_permission('manage_leads')
+              AND NOT has_permission('assign_leads') AS own_only`,
         );
 
         const params: unknown[] = [];
@@ -240,8 +247,15 @@ export async function leadsRoutes(app: FastifyInstance): Promise<void> {
         if (!allowed) return reply.code(403).send({ error: 'Missing permission: view_leads' });
 
         const { rows: [{ own_only }] } = await db.query(
-          `SELECT NOT has_permission('manage_leads')
-             AND NOT has_permission('assign_leads') AS own_only`,
+          // Restriction to one's OWN leads follows from HOLDING manage_own_leads,
+          // not from lacking the broader ones. Inferring it from absence treated
+          // every read-only role as a junior rep: an auditor holds view_leads and
+          // no write permission by design, so they were filtered to leads
+          // assigned to them — of which an auditor has none. The role could not
+          // audit anything.
+          `SELECT has_permission('manage_own_leads')
+              AND NOT has_permission('manage_leads')
+              AND NOT has_permission('assign_leads') AS own_only`,
         );
 
         const { rows } = await db.query('SELECT * FROM leads WHERE id = $1', [req.params.id]);

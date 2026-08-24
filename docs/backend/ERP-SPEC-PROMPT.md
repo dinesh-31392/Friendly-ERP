@@ -66,12 +66,19 @@ DB       PostgreSQL 18. Row-level security IS the isolation mechanism — never
 BUILT      land & BD · sales/CRM · inventory · bookings & collections ·
            double-entry finance (AP, RA bills, banking, loans, budgets) ·
            HR · procurement & stores · site execution · customer/broker portal ·
-           per-rep WhatsApp · leasing, CAM & owner payouts
-TO BUILD   RERA registration + 70% escrow splitting + quarterly progress
-           reports · demand letters, dunning & delay interest · possession,
-           snag list & handover settlement · server-side notifications engine ·
-           tendering, BOQ & rate contracts · drawing register with revisions ·
-           quality NCRs & safety incidents
+           per-rep WhatsApp · leasing, CAM & owner payouts ·
+           server-side notifications · demand letters with delay interest ·
+           RERA registration & the 70% designated-account position
+TO BUILD   RERA quarterly progress reports · possession, snag list &
+           handover settlement · tendering, BOQ & rate contracts ·
+           drawing register with revisions · quality NCRs & safety incidents
+
+           Two boundaries the built half keeps on purpose. RERA MEASURES the
+           escrow obligation and reports the shortfall; it does not sweep cash
+           or post journals, because the treatment is the promoter's auditor's
+           call. Demand letters are RAISED by a person, not by a nightly job —
+           a letter that starts interest running should have somebody
+           accountable for sending it.
 
 ═══ HOW TO ADD A MODULE ═══
 migration → route (RLS + RBAC + Fastify JSON schema) → apiClient function →
@@ -168,9 +175,9 @@ from a half-built tower. Design for that.
 |---|---|---|
 | Client (`src/`) | 97 | 32,105 |
 | Server routes | 32 | 7,671 |
-| Migrations | 39 | 3,420 |
-| Verification suites | 17 | 442 assertions |
-| Tables | 86 (80 tenant-scoped) | — |
+| Migrations | 42 | 3,830 |
+| Verification suites | 20 | 513 assertions |
+| Tables | 91 (85 tenant-scoped) | — |
 | API routes | 204 | — |
 
 ---
@@ -185,7 +192,7 @@ These are load-bearing. Each one exists because breaking it caused a real bug.
 
 2. **Every tenant table has RLS `ENABLE`d *and* `FORCE`d.** Without `FORCE`, the
    table owner silently bypasses the policy. Every policy is
-   `USING (tenant_id = app_current_tenant())`. Currently 80/80 tables comply.
+   `USING (tenant_id = app_current_tenant())`. Currently 85/85 tables comply.
 
 3. **Tenant context is transaction-local.** `withTenantContext` opens a
    transaction and calls `set_config('app.current_tenant_id', $1, true)` — the
@@ -469,6 +476,12 @@ knowing *what used to be wrong* is how you avoid rebuilding it:
 - `app_user` no longer holds write privileges on `_migrations`.
 - The nginx security headers actually reach the app, and the CSP pins the
   inline bundle by sha256 instead of allowing every inline script.
+- Notifications are addressed server rows, not localStorage toggles read by
+  nothing. emit() writes on the CALLER's transaction, so a notification about
+  a write that rolled back cannot exist.
+- Money owed and money ring-fenced are both computed in numeric and frozen
+  onto the row that records them — a demand letter's interest and an escrow
+  split must stay reproducible after the rate changes.
 - Sessions are revocable in BOTH realms — staff by 037, portal by 039. Every
   token carries a jti; a deny-list kills one, a per-user watermark kills all.
 

@@ -922,7 +922,10 @@ export default function Leads() {
         {viewMode === 'list' && (
           <div className="bg-white rounded-2xl border border-zinc-200/60 overflow-hidden">
             <div className="overflow-x-auto">
-              <table className="w-full">
+              {/* min-w so the extra Email column makes the table SCROLL rather
+                  than squeeze — without it every cell wrapped onto two lines
+                  and a seven-row table read as fourteen. */}
+              <table className="w-full min-w-[1080px]">
                 <thead>
                   <tr className="bg-zinc-50/50 border-b border-zinc-100">
                     <th className="px-4 py-3 w-10">
@@ -935,7 +938,12 @@ export default function Leads() {
                       />
                     </th>
                     <th className="text-left px-5 py-3 text-xs font-semibold text-zinc-500 uppercase tracking-wider">Name</th>
-                    <th className="text-left px-5 py-3 text-xs font-semibold text-zinc-500 uppercase tracking-wider">Contact</th>
+                    <th className="text-left px-5 py-3 text-xs font-semibold text-zinc-500 uppercase tracking-wider">Phone</th>
+                    {/* Email was a second line inside a column called "Contact",
+                        so a lead with no address showed nothing and looked the
+                        same as a table that had no email in it at all. Its own
+                        column says which of the two it is. */}
+                    <th className="text-left px-5 py-3 text-xs font-semibold text-zinc-500 uppercase tracking-wider">Email</th>
                     <th className="text-left px-5 py-3 text-xs font-semibold text-zinc-500 uppercase tracking-wider">Project</th>
                     <th className="text-right px-5 py-3 text-xs font-semibold text-zinc-500 uppercase tracking-wider">Budget</th>
                     <th className="text-center px-5 py-3 text-xs font-semibold text-zinc-500 uppercase tracking-wider">Stage</th>
@@ -960,14 +968,26 @@ export default function Leads() {
                         />
                       </td>
                       <td className="px-5 py-3.5">
-                        <p className="text-sm font-semibold text-zinc-900">{lead.name}</p>
-                        <p className="text-[11px] text-zinc-500 mt-0.5">Source: {lead.source}</p>
+                        <p className="text-sm font-semibold text-zinc-900 whitespace-nowrap">{lead.name}</p>
+                        <p className="text-[11px] text-zinc-500 mt-0.5 whitespace-nowrap">Source: {lead.source}</p>
                       </td>
                       <td className="px-5 py-3.5" onClick={e => e.stopPropagation()}>
-                        <a href={telHref(lead.phone)} className="text-sm text-zinc-700 hover:text-indigo-600 hover:underline block">{lead.phone}</a>
-                        {lead.email && <a href={mailtoHref(lead.email)} className="text-xs text-zinc-500 mt-0.5 hover:text-indigo-600 hover:underline block">{lead.email}</a>}
+                        <a href={telHref(lead.phone)} className="text-sm text-zinc-700 hover:text-indigo-600 hover:underline block whitespace-nowrap">{lead.phone}</a>
                       </td>
-                      <td className="px-5 py-3.5 text-sm text-zinc-700">{lead.project}</td>
+                      <td className="px-5 py-3.5" onClick={e => e.stopPropagation()}>
+                        {lead.email ? (
+                          <a
+                            href={mailtoHref(lead.email)}
+                            title={lead.email}
+                            className="text-sm text-zinc-700 hover:text-indigo-600 hover:underline block max-w-[15rem] truncate"
+                          >{lead.email}</a>
+                        ) : (
+                          // Says the address is missing rather than leaving a
+                          // blank cell that reads as a broken column.
+                          <span className="text-xs text-zinc-300">—</span>
+                        )}
+                      </td>
+                      <td className="px-5 py-3.5 text-sm text-zinc-700 whitespace-nowrap">{lead.project}</td>
                       <td className="px-5 py-3.5 text-sm font-semibold text-zinc-900 text-right">
                         {formatCurrency(lead.budget, currency)}
                       </td>
@@ -986,7 +1006,7 @@ export default function Leads() {
                           {lead.priority}
                         </span>
                       </td>
-                      <td className="px-5 py-3.5 text-sm text-zinc-700">
+                      <td className="px-5 py-3.5 text-sm text-zinc-700 whitespace-nowrap">
                         {getUserName(lead.assignedTo)}
                       </td>
                       <td className="px-5 py-3.5 whitespace-nowrap">
@@ -997,7 +1017,7 @@ export default function Leads() {
                   ))}
                   {filteredLeads.length === 0 && (
                     <tr>
-                      <td colSpan={8} className="text-center py-12 text-zinc-400">
+                      <td colSpan={9} className="text-center py-12 text-zinc-400">
                         <Users className="h-10 w-10 text-zinc-300 mx-auto mb-2" />
                         <p className="text-sm">No leads match the filters</p>
                       </td>
@@ -1032,9 +1052,15 @@ export default function Leads() {
                         {lead.name.split(' ').map(n => n[0]).join('')}
                       </span>
                     </div>
-                    <div>
+                    <div className="min-w-0">
                       <p className="text-sm font-bold text-zinc-900 group-hover:text-indigo-700 transition-colors">{lead.name}</p>
                       <p className="text-xs text-zinc-500 mt-0.5">{lead.phone}</p>
+                      {/* The card is a whole button, so this cannot be a mailto
+                          link without nesting an anchor inside it. Shown as
+                          text; the detail panel has the clickable one. */}
+                      {lead.email && (
+                        <p className="text-[11px] text-zinc-400 mt-0.5 truncate" title={lead.email}>{lead.email}</p>
+                      )}
                     </div>
                   </div>
                   <span className={`mr-7 text-[10px] font-semibold px-2 py-0.5 rounded-full capitalize ${priorityColors[lead.priority]}`}>

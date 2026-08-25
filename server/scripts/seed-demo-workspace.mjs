@@ -123,21 +123,28 @@ const { rows: [broker] } = await c.query(
   `INSERT INTO brokers (tenant_id, name, agency_name, phone, email, commission_structure, status)
    VALUES ($1,'Meera Iyer','Iyer Realty','9811111111','meera@iyer.test','{"type":"percentage","value":2}','active') RETURNING id`, [t.id]);
 
+// Every lead carries an email. Without one the Leads table's Email column, the
+// detail panel's mail action and the "give this buyer portal access" flow all
+// have nothing to show or send to — and a blank column reads as a broken
+// feature rather than as missing data.
+//
+// One lead is deliberately left without an address: a real pipeline has walk-ins
+// who only ever gave a phone number, and the UI has to look right for them too.
 const LEADS = [
-  ['Sanjay Gupta','9820000001','new',        'Website',   null,       6000000],
-  ['Neha Kulkarni','9820000002','contacted',  'WhatsApp',  null,       7500000],
-  ['Arun Pillai','9820000003','qualified',   'Referral',  broker.id,  8200000],
-  ['Divya Nair','9820000004','site_visit',   'Walk-in',   null,       6800000],
-  ['Karan Shah','9820000005','negotiation',  'Website',   broker.id,  9100000],
-  ['Farah Khan','9820000006','new',          'Portal',    null,       5500000],
-  ['Vivek Joshi','9820000007','lost',        'Website',   null,       4800000, 'Bought elsewhere'],
+  ['Sanjay Gupta',  '9820000001', 'new',         'Website',  null,      6000000, 'sanjay.gupta@example.com'],
+  ['Neha Kulkarni', '9820000002', 'contacted',   'WhatsApp', null,      7500000, 'neha.kulkarni@example.com'],
+  ['Arun Pillai',   '9820000003', 'qualified',   'Referral', broker.id, 8200000, 'arun.pillai@example.com'],
+  ['Divya Nair',    '9820000004', 'site_visit',  'Walk-in',  null,      6800000, ''],
+  ['Karan Shah',    '9820000005', 'negotiation', 'Website',  broker.id, 9100000, 'karan.shah@example.com'],
+  ['Farah Khan',    '9820000006', 'new',         'Portal',   null,      5500000, 'farah.khan@example.com'],
+  ['Vivek Joshi',   '9820000007', 'lost',        'Website',  null,      4800000, 'vivek.joshi@example.com', 'Bought elsewhere'],
 ];
 const leadIds = [];
-for (const [name, phone, stage, source, brokerId, budget, lostReason] of LEADS) {
+for (const [name, phone, stage, source, brokerId, budget, email, lostReason] of LEADS) {
   const { rows: [l] } = await c.query(
-    `INSERT INTO leads (tenant_id, name, phone, stage, source, project, budget, assigned_to, broker_id, lost_reason)
-     VALUES ($1,$2,$3,$4,$5,'Acme Skyline',$6,$7,$8,$9) RETURNING id`,
-    [t.id, name, phone, stage, source, budget, userId.sales, brokerId, lostReason ?? null]);
+    `INSERT INTO leads (tenant_id, name, phone, email, stage, source, project, budget, assigned_to, broker_id, lost_reason)
+     VALUES ($1,$2,$3,$4,$5,$6,'Acme Skyline',$7,$8,$9,$10) RETURNING id`,
+    [t.id, name, phone, email, stage, source, budget, userId.sales, brokerId, lostReason ?? null]);
   leadIds.push(l.id);
   await c.query(
     `INSERT INTO lead_activities (tenant_id, lead_id, user_id, type, notes)

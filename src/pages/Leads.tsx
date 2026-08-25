@@ -1005,8 +1005,29 @@ export default function Leads() {
                         Lead cell, so the fact survives even when the column
                         cannot. */}
                     <th className="text-left px-3 py-3 w-[104px] text-[11px] font-semibold text-zinc-500 uppercase tracking-wider hidden sm:table-cell">Received</th>
-                    <th className="text-left px-3 py-3 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">Lead</th>
-                    <th className="text-left px-3 py-3 w-[190px] text-[11px] font-semibold text-zinc-500 uppercase tracking-wider hidden md:table-cell">Contact</th>
+                    {/* Lead is sized to what it holds; Contact takes the rest.
+
+                        Lead was the only auto column, so it absorbed every
+                        spare pixel on its own — 404px to display about 180px of
+                        name — and the surplus sat as dead space before Contact,
+                        which was meanwhile capped at 190px and truncating every
+                        email. Splitting the slack evenly between the two only
+                        halved the gap, because the two columns do not hold
+                        equal amounts: a name is bounded, an email address is
+                        the longest string in the row.
+
+                        So Lead gets a width that fits a full name, its score
+                        and its second line, and Contact is the one column left
+                        flexible — the space now lands where the long content
+                        actually is. */}
+                    {/* Fixed only from md up, which is exactly where Contact
+                        exists to compete with it. Below md, Contact is hidden
+                        and Lead should go back to absorbing the width — pinning
+                        it at 224px there pushed the table past the card on a
+                        375px screen, clipping Stage with no way to scroll to
+                        it. */}
+                    <th className="text-left px-3 py-3 md:w-[224px] text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">Lead</th>
+                    <th className="text-left px-3 py-3 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider hidden md:table-cell">Contact</th>
                     <th className="text-left px-3 py-3 w-[128px] text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">Stage</th>
                     <th className={`text-right px-3 py-3 w-[104px] text-[11px] font-semibold text-zinc-500 uppercase tracking-wider ${colValue}`}>Value</th>
                     {/* Every column carries the same px-3. This one was px-2
@@ -1121,7 +1142,11 @@ export default function Leads() {
 
                       {/* Actions — reach the lead without opening it first. */}
                       <td className={`px-3 py-3 align-top ${colActions}`} onClick={e => e.stopPropagation()}>
-                        <div className="flex items-center justify-end gap-0.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
+                        {/* Always visible, not hover-only. A hidden control is
+                            one nobody knows exists — and on a touch screen
+                            there is no hover at all, so these were unreachable
+                            on every tablet the sales team actually uses. */}
+                        <div className="flex items-center justify-end gap-0.5">
                           <a href={telHref(lead.phone)} title={`Call ${maskPhone(lead.phone)}`} aria-label={`Call ${lead.name}`}
                              className="p-1.5 rounded-lg text-zinc-400 hover:text-indigo-600 hover:bg-indigo-50">
                             <Phone className="h-3.5 w-3.5" />

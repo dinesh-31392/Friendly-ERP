@@ -12,7 +12,7 @@ import type { Lead, LeadStage, Note, Activity, Priority, User as UserType } from
 import { leadScoreBand, explainLeadScore, LOST_REASONS } from '../types';
 import { getLeadStages, getLeadSources, getConfigurations, type StageDef } from '../services/metaService';
 import { formatCurrency, currencySymbol, localeFor, receivedOn, sinceArrival, todayISO } from '../utils/format';
-import { telHref, mailtoHref, whatsappHref } from '../utils/contact';
+import { telHref, mailtoHref, whatsappHref, maskPhone } from '../utils/contact';
 import { whatsappSend } from '../services/whatsappService';
 import { toCsv } from '../utils/csv';
 import { inviteCustomer, portalPath } from '../services/portalService';
@@ -312,6 +312,23 @@ export default function Leads() {
     });
     return m;
   }, [searchMatched]);
+
+  /**
+   * Column visibility for the list.
+   *
+   * Tailwind breakpoints measure the VIEWPORT, but the detail drawer takes
+   * 440px out of the list's width without changing it. On a 1440px screen the
+   * table therefore still rendered all eight columns inside 743px, and
+   * table-fixed scaled them down until the Lead column had thirteen pixels —
+   * the same single-letter name that mobile had, arriving a different way.
+   *
+   * So the three lowest-priority columns also stand down while a lead is open.
+   * What remains is what the list is FOR when you are working one lead beside
+   * it: when it arrived, who it is, how to reach them, where they are.
+   */
+  const colValue = selectedLead ? 'hidden' : 'hidden sm:table-cell';
+  const colOwner = selectedLead ? 'hidden' : 'hidden lg:table-cell';
+  const colActions = selectedLead ? 'hidden' : 'hidden xl:table-cell';
   const stageTotal = searchMatched.length;
 
   const filteredLeads = filterStage === 'all'
@@ -900,7 +917,7 @@ export default function Leads() {
                               </div>
                               <div>
                                 <p className="text-sm font-semibold text-zinc-900 group-hover/card:text-indigo-700 transition-colors">{lead.name}</p>
-                                <p className="text-[11px] text-zinc-500">{lead.phone}</p>
+                                <p className="text-[11px] text-zinc-500 tabular-nums">{maskPhone(lead.phone)}</p>
                               </div>
                             </div>
                             <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full capitalize ${priorityColors[lead.priority]}`}>{lead.priority}</span>
@@ -991,12 +1008,13 @@ export default function Leads() {
                     <th className="text-left px-3 py-3 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">Lead</th>
                     <th className="text-left px-3 py-3 w-[190px] text-[11px] font-semibold text-zinc-500 uppercase tracking-wider hidden md:table-cell">Contact</th>
                     <th className="text-left px-3 py-3 w-[128px] text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">Stage</th>
-                    <th className="text-right px-3 py-3 w-[104px] text-[11px] font-semibold text-zinc-500 uppercase tracking-wider hidden sm:table-cell">Value</th>
-                    {/* px-2 and no tracking: "OWNER" is 46px of text and the
-                        column is 68px, so the usual px-3 + tracking-wider
-                        clipped its own header. */}
-                    <th className="text-left px-2 py-3 w-[68px] text-[11px] font-semibold text-zinc-500 uppercase hidden lg:table-cell" title="Assigned to">Owner</th>
-                    <th className="text-right px-3 py-3 w-[92px] text-[11px] font-semibold text-zinc-500 uppercase tracking-wider hidden xl:table-cell">Actions</th>
+                    <th className={`text-right px-3 py-3 w-[104px] text-[11px] font-semibold text-zinc-500 uppercase tracking-wider ${colValue}`}>Value</th>
+                    {/* Every column carries the same px-3. This one was px-2
+                        because "OWNER" would not fit otherwise — but a single
+                        narrower gutter is visible as a kink down the whole
+                        table, so the column got the width instead. */}
+                    <th className={`text-left px-3 py-3 w-[76px] text-[11px] font-semibold text-zinc-500 uppercase tracking-wider ${colOwner}`} title="Assigned to">Owner</th>
+                    <th className={`text-right px-3 py-3 w-[92px] text-[11px] font-semibold text-zinc-500 uppercase tracking-wider ${colActions}`}>Actions</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1056,7 +1074,10 @@ export default function Leads() {
                       {/* Contact — both channels, both tappable, neither
                           opening the drawer. */}
                       <td className="px-3 py-3 align-top hidden md:table-cell" onClick={e => e.stopPropagation()}>
-                        <a href={telHref(lead.phone)} className="text-[13px] text-zinc-700 hover:text-indigo-600 hover:underline block truncate">{lead.phone}</a>
+                        {/* Masked here, full in the drawer. The href keeps the
+                            real number so click-to-call still works. */}
+                        <a href={telHref(lead.phone)} title="Open the lead to see the full number"
+                           className="text-[13px] text-zinc-700 hover:text-indigo-600 hover:underline block truncate tabular-nums">{maskPhone(lead.phone)}</a>
                         {lead.email ? (
                           <a href={mailtoHref(lead.email)} title={lead.email} className="text-[11px] text-zinc-400 hover:text-indigo-600 hover:underline block truncate mt-0.5">{lead.email}</a>
                         ) : (
@@ -1082,7 +1103,7 @@ export default function Leads() {
 
                       {/* Value — budget, with the note count under it so a lead
                           with history is visible without opening it. */}
-                      <td className="px-3 py-3 align-top text-right hidden sm:table-cell">
+                      <td className={`px-3 py-3 align-top text-right ${colValue}`}>
                         <p className="text-[13px] font-semibold text-zinc-900">{formatCurrency(lead.budget, currency)}</p>
                         {noteCount > 0 && (
                           <p className="text-[11px] text-zinc-400 leading-tight mt-0.5">{noteCount} note{noteCount === 1 ? '' : 's'}</p>
@@ -1091,7 +1112,7 @@ export default function Leads() {
 
                       {/* Owner — initials. The full name is one hover away and
                           costs a fifth of the width. */}
-                      <td className="px-2 py-3 align-top hidden lg:table-cell">
+                      <td className={`px-3 py-3 align-top ${colOwner}`}>
                         <span
                           className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-indigo-50 text-[10px] font-bold text-indigo-700"
                           title={owner}
@@ -1099,9 +1120,9 @@ export default function Leads() {
                       </td>
 
                       {/* Actions — reach the lead without opening it first. */}
-                      <td className="px-3 py-3 align-top hidden xl:table-cell" onClick={e => e.stopPropagation()}>
+                      <td className={`px-3 py-3 align-top ${colActions}`} onClick={e => e.stopPropagation()}>
                         <div className="flex items-center justify-end gap-0.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
-                          <a href={telHref(lead.phone)} title={`Call ${lead.phone}`} aria-label={`Call ${lead.name}`}
+                          <a href={telHref(lead.phone)} title={`Call ${maskPhone(lead.phone)}`} aria-label={`Call ${lead.name}`}
                              className="p-1.5 rounded-lg text-zinc-400 hover:text-indigo-600 hover:bg-indigo-50">
                             <Phone className="h-3.5 w-3.5" />
                           </a>
@@ -1160,7 +1181,7 @@ export default function Leads() {
                     </div>
                     <div className="min-w-0">
                       <p className="text-sm font-bold text-zinc-900 group-hover:text-indigo-700 transition-colors">{lead.name}</p>
-                      <p className="text-xs text-zinc-500 mt-0.5">{lead.phone}</p>
+                      <p className="text-xs text-zinc-500 mt-0.5 tabular-nums">{maskPhone(lead.phone)}</p>
                       {/* The card is a whole button, so this cannot be a mailto
                           link without nesting an anchor inside it. Shown as
                           text; the detail panel has the clickable one. */}
@@ -1387,9 +1408,12 @@ export default function Leads() {
                     ? <a href={mailtoHref(selectedLead.email)} className="hover:text-indigo-600 hover:underline">{selectedLead.email}</a>
                     : 'N/A'}
                 </div>
+                {/* The one place the number is shown in full. Every list view
+                    masks the last four digits (see maskPhone); opening a lead
+                    is the deliberate act that reveals it. */}
                 <div className="flex items-center gap-2 text-sm text-zinc-700">
                   <Phone className="h-4 w-4 text-zinc-400" />
-                  <a href={telHref(selectedLead.phone)} className="hover:text-indigo-600 hover:underline">{selectedLead.phone}</a>
+                  <a href={telHref(selectedLead.phone)} className="hover:text-indigo-600 hover:underline tabular-nums">{selectedLead.phone}</a>
                 </div>
                 <div className="flex items-center gap-2 text-sm text-zinc-700"><Building2 className="h-4 w-4 text-zinc-400" /> {selectedLead.project}</div>
                 <div className="flex items-center gap-2 text-sm text-zinc-700"><Tag className="h-4 w-4 text-zinc-400" /> {selectedLead.source}</div>

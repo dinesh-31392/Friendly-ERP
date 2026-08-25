@@ -937,6 +937,10 @@ export default function Leads() {
                         title="Select all visible leads"
                       />
                     </th>
+                    {/* Received leads the row. It is the column people scan
+                        first — how old is this enquiry — and it was last, off
+                        the right edge of a table that already scrolls. */}
+                    <th className="text-left px-5 py-3 text-xs font-semibold text-zinc-500 uppercase tracking-wider whitespace-nowrap">Received</th>
                     <th className="text-left px-5 py-3 text-xs font-semibold text-zinc-500 uppercase tracking-wider">Name</th>
                     <th className="text-left px-5 py-3 text-xs font-semibold text-zinc-500 uppercase tracking-wider">Phone</th>
                     {/* Email was a second line inside a column called "Contact",
@@ -949,7 +953,6 @@ export default function Leads() {
                     <th className="text-center px-5 py-3 text-xs font-semibold text-zinc-500 uppercase tracking-wider">Stage</th>
                     <th className="text-center px-5 py-3 text-xs font-semibold text-zinc-500 uppercase tracking-wider">Priority</th>
                     <th className="text-left px-5 py-3 text-xs font-semibold text-zinc-500 uppercase tracking-wider">Assigned To</th>
-                    <th className="text-left px-5 py-3 text-xs font-semibold text-zinc-500 uppercase tracking-wider whitespace-nowrap">Received</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -966,6 +969,10 @@ export default function Leads() {
                           onChange={() => toggleSelect(lead.id)}
                           className="h-4 w-4 rounded border-zinc-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
                         />
+                      </td>
+                      <td className="px-5 py-3.5 whitespace-nowrap">
+                        <p className="text-sm text-zinc-700">{receivedOn(lead.enquiredAt ?? lead.createdAt, appLocale)}</p>
+                        <p className="text-[11px] text-zinc-400">{sinceArrival(lead.enquiredAt ?? lead.createdAt)}</p>
                       </td>
                       <td className="px-5 py-3.5">
                         <p className="text-sm font-semibold text-zinc-900 whitespace-nowrap">{lead.name}</p>
@@ -1008,10 +1015,6 @@ export default function Leads() {
                       </td>
                       <td className="px-5 py-3.5 text-sm text-zinc-700 whitespace-nowrap">
                         {getUserName(lead.assignedTo)}
-                      </td>
-                      <td className="px-5 py-3.5 whitespace-nowrap">
-                        <p className="text-sm text-zinc-700">{receivedOn(lead.enquiredAt ?? lead.createdAt, appLocale)}</p>
-                        <p className="text-[11px] text-zinc-400">{sinceArrival(lead.enquiredAt ?? lead.createdAt)}</p>
                       </td>
                     </tr>
                   ))}

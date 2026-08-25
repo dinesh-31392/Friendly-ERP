@@ -139,12 +139,39 @@ const LEADS = [
   ['Farah Khan',    '9820000006', 'new',         'Portal',   null,      5500000, 'farah.khan@example.com'],
   ['Vivek Joshi',   '9820000007', 'lost',        'Website',  null,      4800000, 'vivek.joshi@example.com', 'Bought elsewhere'],
 ];
+/**
+ * How long ago each enquiry arrived.
+ *
+ * Inserted all at once, every lead showed the same minute — which left the
+ * Received column and the date-range filter (Today / This week / This month)
+ * with nothing to tell apart. A demo cannot show a feature when every row
+ * answers it identically.
+ *
+ * Spread so the pipeline reads as one: a lead that has reached negotiation has
+ * had weeks to get there, while today's arrivals are still 'new'. Keyed by name
+ * rather than appended to LEADS, whose last field is already optional.
+ */
+const ENQUIRED_DAYS_AGO = {
+  'Vivek Joshi':   21,   // lost — the oldest, and it went nowhere
+  'Arun Pillai':   17,   // qualified, later booked
+  'Karan Shah':    14,   // negotiation, later booked
+  'Divya Nair':     9,   // site visit done
+  'Neha Kulkarni':  5,   // contacted
+  'Sanjay Gupta':   2,   // still new — worth chasing
+  'Farah Khan':     0,   // came in today
+};
+
 const leadIds = [];
 for (const [name, phone, stage, source, brokerId, budget, email, lostReason] of LEADS) {
+  const daysAgo = String(ENQUIRED_DAYS_AGO[name] ?? 0);
   const { rows: [l] } = await c.query(
-    `INSERT INTO leads (tenant_id, name, phone, email, stage, source, project, budget, assigned_to, broker_id, lost_reason)
-     VALUES ($1,$2,$3,$4,$5,$6,'Acme Skyline',$7,$8,$9,$10) RETURNING id`,
-    [t.id, name, phone, email, stage, source, budget, userId.sales, brokerId, lostReason ?? null]);
+    `INSERT INTO leads (tenant_id, name, phone, email, stage, source, project, budget, assigned_to, broker_id, lost_reason,
+                        created_at, enquired_at, last_contact_at)
+     VALUES ($1,$2,$3,$4,$5,$6,'Acme Skyline',$7,$8,$9,$10,
+             now() - ($11 || ' days')::interval,
+             now() - ($11 || ' days')::interval,
+             now() - ($11 || ' days')::interval) RETURNING id`,
+    [t.id, name, phone, email, stage, source, budget, userId.sales, brokerId, lostReason ?? null, daysAgo]);
   leadIds.push(l.id);
   await c.query(
     `INSERT INTO lead_activities (tenant_id, lead_id, user_id, type, notes)

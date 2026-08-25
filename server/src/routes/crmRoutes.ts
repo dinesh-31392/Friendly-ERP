@@ -88,19 +88,47 @@ export async function crmRoutes(app: FastifyInstance): Promise<void> {
                   'private') AS visibility`);
       const waOwner = priv.visibility === 'team' ? null : (req.ctx.userId ?? null);
 
+      /**
+       * The timeline is scoped to the leads the caller may READ.
+       *
+       * The same own-only rule as GET /api/leads, and for the same reason: the
+       * lead list already hid other reps' leads from a telecaller, while this
+       * route handed over the activity ON those leads — call notes, stage
+       * changes, "Intro call with Sanjay". A telecaller with zero visible leads
+       * was reading nine activities belonging to all of them.
+       *
+       * Derived from HOLDING manage_own_leads, never from lacking the broader
+       * keys — the inference that once left auditors unable to audit.
+       */
+      const { rows: [{ own_only }] } = await db.query(
+        `SELECT has_permission('manage_own_leads')
+            AND NOT has_permission('manage_leads')
+            AND NOT has_permission('assign_leads') AS own_only`);
+      const mine = own_only ? (req.ctx.userId ?? null) : null;
+      // Scoped by the LEAD's assignee, not the activity's author: a colleague's
+      // note on my lead is mine to read, and my note on a lead that was
+      // reassigned away from me is not.
+      const OWN_LEAD = `($4::uuid IS NULL OR EXISTS (
+                          SELECT 1 FROM leads l WHERE l.id = lead_activities.lead_id
+                             AND l.assigned_to = $4::uuid))`;
+
       const { rows } = req.query.leadId
         ? await db.query(
             `SELECT * FROM lead_activities
               WHERE lead_id = $1
                 AND ($2::text IS NULL OR type = $2)
                 AND (type <> 'whatsapp' OR $3::uuid IS NULL OR user_id = $3)
+                AND ${OWN_LEAD}
               ORDER BY created_at DESC`,
-            [req.query.leadId, req.query.type ?? null, waOwner])
+            [req.query.leadId, req.query.type ?? null, waOwner, mine])
         : await db.query(
             `SELECT * FROM lead_activities
               WHERE (type <> 'whatsapp' OR $1::uuid IS NULL OR user_id = $1)
+                AND ($2::uuid IS NULL OR EXISTS (
+                      SELECT 1 FROM leads l WHERE l.id = lead_activities.lead_id
+                         AND l.assigned_to = $2::uuid))
               ORDER BY created_at DESC LIMIT 500`,
-            [waOwner]);
+            [waOwner, mine]);
       return { activities: rows.map(actToApi) };
     }),
   );

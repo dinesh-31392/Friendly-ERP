@@ -165,6 +165,7 @@ const PORTAL = [
 
 console.log('\n=== STAFF SIGN-IN, ONE ROLE AT A TIME ===');
 const seen = new Map();
+const tokens = new Map();
 
 for (const r of [...ROLES, ...PLATFORM]) {
   console.log(`\n--- ${r.role} (${r.email}) ---`);
@@ -185,6 +186,7 @@ for (const r of [...ROLES, ...PLATFORM]) {
   }
   ok('signs in', res.status === 200 && !!body.token, `${res.status} ${body.error ?? ''}`);
   if (!body.token) continue;
+  tokens.set(r.role, body.token);
 
   // The role comes from the database, never from anything the client sent.
   ok(`the server calls them ${r.role}`, body.user?.role === r.role, String(body.user?.role));
@@ -204,6 +206,64 @@ for (const r of [...ROLES, ...PLATFORM]) {
     // 403 is the answer worth having: the route exists and refused. A 404
     // would also keep the data safe but tells the caller the wrong thing.
     ok(`is refused ${p}`, g.status === 403, String(g.status));
+  }
+}
+
+console.log('\n=== THE TIMELINE IS SCOPED TO THE LEADS YOU MAY READ ===');
+//
+// /api/leads scoped a telecaller to their own leads; /api/lead-activities did
+// not, so a telecaller with ZERO visible leads was reading nine activities —
+// call notes and stage changes for the whole pipeline they had been kept out
+// of. Hiding a record while publishing its history is not hiding it.
+//
+// Asserted as a relationship rather than a count: every activity returned must
+// belong to a lead the same caller can fetch.
+for (const role of ['telecaller', 'sales_executive', 'sales_manager', 'auditor']) {
+  const tok = tokens.get(role);
+  if (!tok) { ok(`${role} signed in`, false, 'no token'); continue; }
+  const leads = ((await (await get('/api/leads', tok)).json().catch(() => ({}))).leads ?? []);
+  const acts = ((await (await get('/api/lead-activities', tok)).json().catch(() => ({}))).activities ?? []);
+  const visible = new Set(leads.map(l => l.id));
+  const leaked = acts.filter(a => !visible.has(a.leadId));
+  ok(`${role} sees no activity for a lead they cannot open`, leaked.length === 0,
+     `${leaked.length} of ${acts.length}`);
+}
+// The rule must not overshoot: a role that sees every lead must still see the
+// whole timeline, or "scoped" has quietly become "broken".
+{
+  const tok = tokens.get('sales_manager');
+  const acts = tok ? ((await (await get('/api/lead-activities', tok)).json().catch(() => ({}))).activities ?? []) : [];
+  ok('a manager still sees the full timeline', acts.length > 0, `${acts.length}`);
+}
+
+console.log('\n=== A DATE IS A CALENDAR DAY, NOT AN INSTANT ===');
+//
+// node-pg parses DATE into a JS Date at LOCAL midnight, which serialises to
+// JSON in UTC — so on an IST server every date left the API a day early
+// ("2026-08-25" went out as "2026-08-24T18:30:00.000Z"). Clients take the first
+// ten characters, so attendance marked today read as yesterday, and the same
+// silent shift applied to demand-letter due dates, lease periods and loan EMIs:
+// 44 DATE columns across 30 tables.
+//
+// db.ts now returns them unparsed. This asserts the SHAPE, because that is the
+// part every consumer depends on and the part that broke.
+{
+  const YMD = /^\d{4}-\d{2}-\d{2}$/;
+  const probes = [
+    ['hr_manager',  '/api/attendance',     b => (b.attendance ?? []).map(x => x.date)],
+    ['hr_manager',  '/api/leave-requests', b => (b.leaveRequests ?? []).flatMap(x => [x.from, x.to])],
+    ['hr_manager',  '/api/employees',      b => (b.employees ?? []).map(x => x.joinDate)],
+    ['accountant',  '/api/invoices',       b => (b.invoices ?? []).map(x => x.dueDate)],
+  ];
+  for (const [role, path, pick] of probes) {
+    const tok = tokens.get(role);
+    if (!tok) { ok(`${path} — ${role} signed in`, false, 'no token'); continue; }
+    const res = await get(path, tok);
+    const dates = (pick(await res.json().catch(() => ({}))) ?? []).filter(Boolean);
+    // An empty set proves nothing, so say so rather than passing on silence.
+    ok(`${path} returns dates to check`, dates.length > 0, `${dates.length} found`);
+    const bad = dates.filter(d => !YMD.test(String(d)));
+    ok(`${path} dates are plain calendar days`, bad.length === 0, bad.slice(0, 3).join(', '));
   }
 }
 

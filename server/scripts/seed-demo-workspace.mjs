@@ -176,12 +176,74 @@ for (const [title, cat, days] of [['Call Neha about floor plan','follow_up',1],[
      VALUES ($1,$2,$3, now() + ($4 || ' days')::interval, 'hot','pending',$5,$2)`,
     [t.id, userId.sales, title, String(days), cat]);
 }
+const employeeIds = [];
 for (const [name, desig, dept, sal] of [['Imran Qureshi','Site Engineer','Execution',65000],['Sunita Bhosale','Accountant','Finance',55000],['Ramesh Yadav','Supervisor','Execution',38000]]) {
-  await c.query(
+  const { rows: [e] } = await c.query(
     `INSERT INTO employees (tenant_id, name, phone, designation, department, type, project_id, monthly_salary, join_date, active)
-     VALUES ($1,$2,'9830000000',$3,$4,'staff',$5,$6, CURRENT_DATE - 200, true)`,
+     VALUES ($1,$2,'9830000000',$3,$4,'staff',$5,$6, CURRENT_DATE - 200, true) RETURNING id`,
     [t.id, name, desig, dept, proj.id, sal]);
+  employeeIds.push(e.id);
 }
+
+// Attendance, a leave request and last month's payroll — the three things an
+// HR manager's dashboard reports. Without them their tiles all read zero and
+// the workspace cannot demonstrate the module it ships.
+for (const id of employeeIds.slice(0, 2)) {
+  await c.query(
+    `INSERT INTO attendance (tenant_id, employee_id, date, check_in, project_id, method)
+     VALUES ($1,$2,CURRENT_DATE,'09:15',$3,'manual')`, [t.id, id, proj.id]);
+}
+await c.query(
+  `INSERT INTO leave_requests (tenant_id, employee_id, type, from_date, to_date, days, reason, status)
+   VALUES ($1,$2,'casual', CURRENT_DATE + 3, CURRENT_DATE + 4, 2, 'Family function', 'pending')`,
+  [t.id, employeeIds[2]]);
+await c.query(
+  `INSERT INTO payroll_runs (tenant_id, month, status, items, processed_at)
+   VALUES ($1, to_char(CURRENT_DATE - interval '1 month', 'YYYY-MM'), 'processed', '[]'::jsonb, now())`,
+  [t.id]);
+console.log('→ land parcels, BD opportunities');
+// The acquisition pipeline. A land manager and a BD manager have no leads, no
+// inventory and no ledger — these two tables are their entire working set, so
+// a demo workspace without them cannot show either role anything at all.
+//
+// Spread across the statuses their dashboards count, and across the two
+// approval queues the dashboard raises as alerts:
+//
+//   scored but not yet qualified  → the BD manager's "awaiting qualification"
+//   qualified                     → the admin's "ready to convert"
+//   converted                     → finished; must NOT count as active pipeline
+//
+// The score matters: landToQualify only picks up parcels that have been scored
+// (latestScore > 0), are unencumbered and carry no litigation. A parcel at
+// score 0 is still being worked up and is nobody's decision yet.
+const LAND = [
+  ['broker',     'Shantaram Pawar', '9840000001', 'Wagholi',  'Pune', 4.2,  38000000, 'feasibility_working', 71],
+  ['direct',     'Kamala Deshmukh', '9840000002', 'Hinjewadi','Pune', 2.75, 61000000, 'property_details',     0],
+  ['auction',    'MIDC Plot 44',    '9840000003', 'Chakan',   'Pune', 8.0,  92000000, 'qualified',           78],
+  ['government', 'Pune Metro Land', '9840000004', 'Kharadi',  'Pune', 1.5,  45000000, 'converted_to_project', 82],
+];
+for (const [src, owner, contact, loc, city, acres, price, status, score] of LAND) {
+  await c.query(
+    `INSERT INTO land_leads (tenant_id, reference_source, owner_name, owner_contact, location, city,
+                             area_acres, asking_price, status, ownership_type, litigation_status,
+                             is_encumbered, latest_score, created_by)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'freehold','none',false,$10,$11)`,
+    [t.id, src, owner, contact, loc, city, acres, price, status, score, userId.admin]);
+}
+
+const BD = [
+  ['jv',       'Referral', 'Sunrise Developers', '9850000001', 'Pune', 'terms_negotiation',  120000000],
+  ['jv',       'Direct',   'Meridian Estates',   '9850000002', 'Pune', 'initial_discussion',  85000000],
+  ['outright', 'Broker',   'Green Acres LLP',    '9850000003', 'Pune', 'identified',          40000000],
+];
+for (const [type, src, name, contact, city, stage, value] of BD) {
+  await c.query(
+    `INSERT INTO bd_leads (tenant_id, opportunity_type, source, counterparty_name, counterparty_contact,
+                           city, stage, estimated_deal_value, owned_by, created_by)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9)`,
+    [t.id, type, src, name, contact, city, stage, value, userId.bd]);
+}
+
 for (const [name, cat, unit] of [['OPC 53 Cement','Cement','bag'],['TMT Bar 12mm','Steel','kg'],['River Sand','Aggregate','cft']]) {
   await c.query(`INSERT INTO materials (tenant_id, name, category, unit, reorder_level) VALUES ($1,$2,$3,$4,100)`, [t.id, name, cat, unit]);
 }
@@ -229,6 +291,9 @@ console.log(`
     partner@acme.test    referrals and commission statements for one agency
 
   Data: 48 units (2 booked), 7 leads across the pipeline, 2 bookings
-  with commissions and invoices, 3 tasks, 3 employees, 3 materials.
+  with commissions and invoices, 3 tasks, 3 materials.
+  People: 3 employees, 2 present today, 1 leave request pending, last
+  month's payroll processed.
+  Acquisition: 4 land parcels (1 converted), 3 BD opportunities.
 ──────────────────────────────────────────────────────────────`);
 await c.end();

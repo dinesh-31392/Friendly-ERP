@@ -190,8 +190,12 @@ for (const [i, leadIdx] of [[0, 2], [1, 4]]) {
   const lead = leadIds[leadIdx];
   const value = 8200000 + i * 900000;
   const { rows: [bk] } = await c.query(
-    `INSERT INTO bookings (tenant_id, lead_id, unit_id, created_by, booking_amount, total_consideration, payment_plan, stage, status)
-     VALUES ($1,$2,$3,$4,300000,$5,'30-70','agreement','active') RETURNING id`,
+    // delay_interest_pct defaults to 0, which makes every demand letter read
+    // "incl. ₹0 interest" — arithmetically right and useless as a demo of a
+    // dunning module. 12% p.a. is a normal delayed-payment rate on an Indian
+    // builder agreement.
+    `INSERT INTO bookings (tenant_id, lead_id, unit_id, created_by, booking_amount, total_consideration, payment_plan, stage, status, delay_interest_pct)
+     VALUES ($1,$2,$3,$4,300000,$5,'30-70','agreement','active',12) RETURNING id`,
     [t.id, lead, unit, userId.sales, value]);
   await c.query(`UPDATE units SET status='booked' WHERE id=$1`, [unit]);
   await c.query(`UPDATE leads SET stage='booked' WHERE id=$1`, [lead]);
@@ -205,7 +209,59 @@ for (const [i, leadIdx] of [[0, 2], [1, 4]]) {
     `INSERT INTO invoices (tenant_id, lead_id, booking_id, lead_name, project, type, amount, due_date, status)
      VALUES ($1,$2,$3,$4,'Acme Skyline','Booking Token',300000, CURRENT_DATE + 7, $5)`,
     [t.id, lead, bk.id, LEADS[leadIdx][0], i === 0 ? 'Paid' : 'Pending']);
+
+  // The payment plan behind the booking: 30-70, three milestones.
+  //
+  // The FIRST is deliberately overdue and only part-paid, because that is what
+  // the Demands tab is FOR — milestone_outstanding() reads payments rather
+  // than the status column, so a partly-paid overdue milestone is exactly the
+  // case a collections desk chases and the one worth having in a demo.
+  const MILESTONES = [
+    ['On Booking',   1, 30, Math.round(value * 0.30), -21],
+    ['On Agreement', 2, 40, Math.round(value * 0.40),  14],
+    ['On Handover',  3, 30, value - Math.round(value * 0.30) - Math.round(value * 0.40), 120],
+  ];
+  for (const [name, seq, pct, amount, dueInDays] of MILESTONES) {
+    const { rows: [ms] } = await c.query(
+      `INSERT INTO payment_schedules (tenant_id, booking_id, milestone_name, sequence, percentage, amount, due_date, status)
+       VALUES ($1,$2,$3,$4,$5,$6, CURRENT_DATE + $7::int, 'pending') RETURNING id`,
+      [t.id, bk.id, name, seq, pct, amount, dueInDays]);
+    // Part payment against the overdue first milestone on the first booking
+    // only — so one booking is chaseable and one is clean.
+    if (dueInDays < 0 && i === 0) {
+      await c.query(
+        `INSERT INTO payments (tenant_id, payment_schedule_id, amount, payment_date, mode)
+         VALUES ($1,$2,$3, CURRENT_DATE - 18, 'bank_transfer')`,
+        [t.id, ms.id, Math.round(amount * 0.4)]);
+    }
+  }
 }
+
+console.log('→ RERA registration and escrow');
+// The designated account and the seventy per cent obligation it carries.
+// Without a registration the RERA tab can only show its empty state, and the
+// obligation this module exists to measure is invisible.
+const { rows: [designated] } = await c.query(
+  `INSERT INTO bank_accounts (tenant_id, account_name, bank_name, account_number, opening_balance)
+   VALUES ($1,'Acme Skyline — RERA Designated','HDFC Bank','50200012345678', 2500000) RETURNING id`, [t.id]);
+await c.query(`UPDATE projects SET rera_number = 'P52100047890' WHERE id = $1`, [proj.id]);
+await c.query(
+  `INSERT INTO rera_registrations (tenant_id, project_id, registered_on, valid_until, escrow_pct, designated_bank_account_id)
+   VALUES ($1,$2, CURRENT_DATE - 400, CURRENT_DATE + 700, 70, $3)
+   ON CONFLICT (project_id) DO NOTHING`, [t.id, proj.id, designated.id]);
+// Allocate what has been received. Idempotent by construction — one allocation
+// per payment, enforced by a unique index.
+await c.query(`
+  INSERT INTO escrow_allocations
+    (tenant_id, payment_id, project_id, receipt_amount, escrow_amount, free_amount, escrow_pct)
+  SELECT $1, pay.id, u.project_id, pay.amount, s.escrow, s.free, r.escrow_pct
+    FROM payments pay
+    JOIN payment_schedules ps ON ps.id = pay.payment_schedule_id
+    JOIN bookings bk          ON bk.id = ps.booking_id
+    JOIN units u              ON u.id = bk.unit_id
+    JOIN rera_registrations r ON r.project_id = u.project_id AND r.status = 'active'
+    CROSS JOIN LATERAL escrow_split(pay.amount, r.escrow_pct) s
+  ON CONFLICT (payment_id) DO NOTHING`, [t.id]);
 
 console.log('→ calendar, HR, materials');
 for (const [title, cat, days] of [['Call Neha about floor plan','follow_up',1],['Site visit — Divya','visit',2],['Collect token from Karan','payment',3]]) {
@@ -239,6 +295,32 @@ await c.query(
   `INSERT INTO payroll_runs (tenant_id, month, status, items, processed_at)
    VALUES ($1, to_char(CURRENT_DATE - interval '1 month', 'YYYY-MM'), 'processed', '[]'::jsonb, now())`,
   [t.id]);
+console.log('→ site visits');
+// The middle of the funnel, across every state the page distinguishes: two
+// still to happen, one held and converted, one held and not, one nobody turned
+// up to. Without a completed visit the conversion figure has no denominator
+// and the page can only ever show 0%.
+//
+// leadIds order matches LEADS: 0 Sanjay, 1 Neha, 2 Arun, 3 Divya, 4 Karan,
+// 5 Farah, 6 Vivek.
+const VISITS = [
+  // [lead, daysFromNow, status, outcome, feedback]
+  [leadIds[1], 2,   'scheduled', null,             ''],
+  [leadIds[5], 4,   'confirmed', null,             ''],
+  [leadIds[2], -15, 'completed', 'booked',         'Loved the east-facing 2BHK — closed the same week.'],
+  [leadIds[3], -7,  'completed', 'needs_followup', 'Wants to bring family before deciding.'],
+  [leadIds[0], -3,  'no_show',   null,             ''],
+];
+for (const [leadId, days, status, outcome, feedback] of VISITS) {
+  await c.query(
+    `INSERT INTO site_visits (tenant_id, lead_id, project_id, assigned_to, scheduled_at,
+                              duration_minutes, status, outcome, feedback, created_by,
+                              completed_at)
+     VALUES ($1,$2,$3,$4, now() + ($5 || ' days')::interval, 60, $6, $7, $8, $4,
+             CASE WHEN $6 IN ('completed','no_show') THEN now() + ($5 || ' days')::interval END)`,
+    [t.id, leadId, proj.id, userId.sales, String(days), status, outcome, feedback]);
+}
+
 console.log('→ land parcels, BD opportunities');
 // The acquisition pipeline. A land manager and a BD manager have no leads, no
 // inventory and no ledger — these two tables are their entire working set, so

@@ -5,6 +5,7 @@ import { isModuleEnabled } from './services/planService';
 import DashboardLayout from './layouts/DashboardLayout';
 import Dashboard from './pages/Dashboard';
 import Leads from './pages/Leads';
+import SiteVisits from './pages/SiteVisits';
 import Inventory from './pages/Inventory';
 import Projects from './pages/Projects';
 import Execution from './pages/Execution';
@@ -110,6 +111,9 @@ function AppRoutes() {
       >
         <Route path="/" element={<PermissionGuard permission="view_dashboard"><Dashboard /></PermissionGuard>} />
         <Route path="/leads" element={<PermissionGuard permission="view_leads" module="leads"><Leads /></PermissionGuard>} />
+        {/* Gated on view_leads, the same key the routes use — a visit is an
+            event in a lead's life, not a module of its own. */}
+        <Route path="/site-visits" element={<PermissionGuard permission="view_leads" module="leads"><SiteVisits /></PermissionGuard>} />
         <Route path="/inventory" element={<PermissionGuard permission="view_inventory" module="inventory"><Inventory /></PermissionGuard>} />
         <Route path="/projects" element={<PermissionGuard permission="view_projects" module="projects"><Projects /></PermissionGuard>} />
         <Route path="/execution" element={<PermissionGuard permission="view_execution" module="execution"><Execution /></PermissionGuard>} />

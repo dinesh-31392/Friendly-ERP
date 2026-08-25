@@ -4,7 +4,7 @@ import {
   Settings, Calendar, ChevronDown, Bell, Search, Megaphone,
   MessageSquare, FileText, CreditCard, Wrench, Shield, LogOut,
   X, AlertCircle, CheckCircle2, Clock, Menu, BookOpenCheck, Handshake, Globe,
-  HardHat, Truck, Package, UserCheck, Scale, Map, KeyRound,
+  HardHat, Truck, Package, UserCheck, Scale, Map, KeyRound, MapPin,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useState, useEffect, useMemo, useRef } from 'react';
@@ -40,6 +40,10 @@ const NAV_GROUPS: NavGroupDef[] = [
   {
     id: 'sales', label: 'Sales & CRM', icon: Users, children: [
       { to: '/leads', icon: Users, label: 'Leads', permission: 'view_leads' },
+      // Same key as Leads: the routes gate on view_leads because a visit is an
+      // event in a lead's life. A key of its own would have left the module
+      // unreachable until a migration granted it to somebody.
+      { to: '/site-visits', icon: MapPin, label: 'Site Visits', permission: 'view_leads' },
       { to: '/bookings', icon: BookOpenCheck, label: 'Bookings', permission: 'view_bookings' },
       // The rental portfolio sits with sales: the desk that fills a unit papers it.
       { to: '/leasing', icon: KeyRound, label: 'Leasing', permission: 'view_leasing' },

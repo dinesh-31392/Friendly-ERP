@@ -1719,3 +1719,136 @@ export async function apiCloseSiteVisit(
   });
   return res.siteVisit;
 }
+
+// ── Demand letters (migration 041) ───────────────────────────────────────────
+//
+// Dunning: the letter that turns an overdue milestone into a demand carrying
+// delay interest. Amounts are FROZEN by the server when the letter is issued —
+// the client never recomputes them, because a letter that quotes a different
+// figure to the one the customer received is worse than no letter.
+
+export interface ApiDemandLetter {
+  id: string;
+  bookingId: string;
+  paymentScheduleId: string;
+  letterNo: string;
+  issuedOn: string;
+  dueOn: string;
+  principalAmount: number;
+  interestAmount: number;
+  totalAmount: number;
+  interestPct: number;
+  daysOverdue: number;
+  status: 'issued' | 'paid' | 'cancelled';
+  reminderCount: number;
+  lastReminderAt?: string | null;
+  milestoneName?: string;
+  customerName?: string;
+}
+
+/** A milestone that COULD be demanded, with what the demand would be worth
+ *  today — so the decision is made with the number visible. */
+export interface ApiDemandDue {
+  paymentScheduleId: string;
+  bookingId: string;
+  milestoneName: string;
+  dueDate: string;
+  customerName?: string;
+  daysOverdue: number;
+  outstanding: number;
+  interest: number;
+  interestPct: number;
+  total: number;
+}
+
+export async function apiGetDemandLetters(status?: string): Promise<ApiDemandLetter[]> {
+  const q = status ? `?status=${encodeURIComponent(status)}` : '';
+  const res = await request<{ demandLetters: ApiDemandLetter[] }>(`/api/demand-letters${q}`);
+  return res.demandLetters;
+}
+
+export async function apiGetDemandsDue(): Promise<ApiDemandDue[]> {
+  const res = await request<{ due: ApiDemandDue[] }>('/api/demand-letters/due');
+  return res.due;
+}
+
+export async function apiIssueDemandLetter(paymentScheduleId: string, dueInDays?: number): Promise<ApiDemandLetter> {
+  const res = await request<{ demandLetter: ApiDemandLetter }>('/api/demand-letters', {
+    method: 'POST', body: JSON.stringify({ paymentScheduleId, ...(dueInDays ? { dueInDays } : {}) }),
+  });
+  return res.demandLetter;
+}
+
+export async function apiSettleDemandLetter(id: string, status: 'paid' | 'cancelled'): Promise<ApiDemandLetter> {
+  const res = await request<{ demandLetter: ApiDemandLetter }>(`/api/demand-letters/${id}`, {
+    method: 'PATCH', body: JSON.stringify({ status }),
+  });
+  return res.demandLetter;
+}
+
+export async function apiRemindDemandLetter(id: string): Promise<ApiDemandLetter> {
+  const res = await request<{ demandLetter: ApiDemandLetter }>(`/api/demand-letters/${id}/remind`, { method: 'POST' });
+  return res.demandLetter;
+}
+
+// ── RERA & escrow (migration 042) ────────────────────────────────────────────
+//
+// The seventy per cent designated-account obligation, made countable. This
+// MEASURES; it does not move money and posts no journals — `inAccount` is only
+// as good as the bank transactions that have been entered, which is why a
+// project whose designated account was never reconciled shows its whole
+// obligation as a shortfall.
+
+export interface ApiReraRegistration {
+  id: string;
+  projectId: string;
+  projectName: string;
+  registrationNo?: string;
+  registeredOn?: string | null;
+  validUntil?: string | null;
+  escrowPct: number;
+  designatedBankAccountId?: string;
+  designatedAccountName?: string;
+  designatedBankName?: string;
+  status: string;
+}
+
+export interface ApiReraPosition {
+  projectId: string;
+  projectName: string;
+  registrationNo?: string;
+  escrowPct: number;
+  collected: number;
+  required: number;
+  inAccount: number;
+  shortfall: number;
+  hasDesignatedAccount: boolean;
+}
+
+export async function apiGetReraRegistrations(): Promise<ApiReraRegistration[]> {
+  const res = await request<{ registrations: ApiReraRegistration[] }>('/api/rera/registrations');
+  return res.registrations;
+}
+
+export async function apiGetReraPosition(): Promise<ApiReraPosition[]> {
+  const res = await request<{ position: ApiReraPosition[] }>('/api/rera/position');
+  return res.position;
+}
+
+export async function apiRegisterProjectRera(input: {
+  projectId: string; registeredOn?: string; validUntil?: string;
+  escrowPct?: number; designatedBankAccountId?: string;
+}): Promise<{ id: string; projectId: string; escrowPct: number }> {
+  const res = await request<{ registration: { id: string; projectId: string; escrowPct: number } }>(
+    '/api/rera/registrations', { method: 'POST', body: JSON.stringify(input) });
+  return res.registration;
+}
+
+/** Idempotent by construction — one allocation per payment, enforced by a
+ *  unique index. Pressing it twice must not double the obligation. */
+export async function apiAllocateEscrow(projectId?: string): Promise<number> {
+  const res = await request<{ allocated: number }>('/api/rera/allocate', {
+    method: 'POST', body: JSON.stringify(projectId ? { projectId } : {}),
+  });
+  return res.allocated;
+}

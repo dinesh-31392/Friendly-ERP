@@ -273,7 +273,7 @@ export async function portalRoutes(app: FastifyInstance): Promise<void> {
           role: 'customer',
           profile: { name: me.name, email: me.email },
           lead: lead[0] ?? null,
-          bookings: bookings.map(b => ({ id: b.id, unitId: b.unit_id, bookingAmount: num(b.booking_amount), totalConsideration: num(b.total_consideration), status: b.status, stage: b.stage })),
+          bookings: bookings.map(b => ({ id: b.id, unitId: b.unit_id, bookingAmount: num(b.booking_amount), totalConsideration: num(b.total_consideration), status: b.status, stage: b.stage, paymentPlan: b.payment_plan })),
           schedule: schedules.map(s => ({ id: s.id, bookingId: s.booking_id, milestoneName: s.milestone_name, sequence: s.sequence, amount: num(s.amount), dueDate: s.due_date, status: s.status === 'invoiced' ? 'demanded' : s.status })),
           receipts: receipts.map(p => ({ id: p.id, scheduleId: p.payment_schedule_id, amount: num(p.amount), date: p.payment_date, mode: p.mode })),
           units: units.map(u => ({ id: u.id, towerId: u.tower_id, projectId: u.project_id, unitCode: u.unit_code, configuration: u.configuration, floor: u.floor, areaSqft: num(u.area_sqft), status: u.status })),
@@ -285,18 +285,68 @@ export async function portalRoutes(app: FastifyInstance): Promise<void> {
 
       // Partner: their broker record + commission ledger + the leads they
       // referred. Attribution is by broker_id, never by source NAME.
-      const { rows: broker } = await db.query('SELECT id, name, phone, email FROM brokers WHERE id = $1', [me.broker_id]);
-      const { rows: commissions } = await db.query('SELECT * FROM commission_ledger WHERE broker_id = $1 ORDER BY created_at DESC', [me.broker_id]);
+      const { rows: broker } = await db.query(
+        `SELECT b.id, b.name, b.phone, b.email, b.agency_name, b.commission_structure,
+                (SELECT count(*) FROM leads l WHERE l.broker_id = b.id)             AS leads_referred,
+                (SELECT count(*) FROM commission_ledger cl WHERE cl.broker_id = b.id) AS bookings_closed
+           FROM brokers b WHERE b.id = $1`, [me.broker_id]);
+
+      // A commission line is only meaningful next to what earned it. Returning
+      // the amount alone left the statement reading "· · Booking value · %",
+      // and the page crashed outright trying to format the missing value.
+      //
+      // LEFT JOINs throughout: a commission whose booking or unit was later
+      // removed still owes the partner money, and must still appear.
+      const { rows: commissions } = await db.query(
+        `SELECT cl.id, cl.booking_id, cl.amount_earned, cl.amount_paid, cl.status, cl.created_at,
+                l.name AS lead_name,
+                COALESCE(p.name, l.project) AS project,
+                bk.total_consideration
+           FROM commission_ledger cl
+           LEFT JOIN bookings bk ON bk.id = cl.booking_id
+           LEFT JOIN leads l     ON l.id  = bk.lead_id
+           LEFT JOIN units u     ON u.id  = bk.unit_id
+           LEFT JOIN projects p  ON p.id  = u.project_id
+          WHERE cl.broker_id = $1
+          ORDER BY cl.created_at DESC`, [me.broker_id]);
       const { rows: referred } = await db.query(
         'SELECT id, name, phone, project, stage, budget, created_at FROM leads WHERE broker_id = $1 ORDER BY created_at DESC', [me.broker_id]);
       // A channel partner sells these, so the catalogue is legitimately theirs
       // to see — marketing fields only, no financials.
       const { rows: projects } = await db.query('SELECT id, name, location FROM projects ORDER BY name');
+
+      const b = broker[0];
+      // commission_structure is {type, value}; only a percentage deal has a
+      // rate to quote. A flat or slab arrangement has none, and inventing one
+      // would misstate what the partner is owed.
+      const structure = (b?.commission_structure ?? {}) as { type?: string; value?: number };
+      const headlineRate = structure.type === 'percentage' ? num(structure.value) : null;
+
       return {
         role: 'partner',
         profile: { name: me.name, email: me.email },
-        broker: broker[0] ?? null,
-        commissions: commissions.map(c => ({ id: c.id, bookingId: c.booking_id, amountEarned: num(c.amount_earned), amountPaid: num(c.amount_paid), status: c.status })),
+        broker: b ? {
+          id: b.id, name: b.name, phone: b.phone, email: b.email,
+          agencyName: b.agency_name,
+          commissionRate: headlineRate,
+          leadsReferred: Number(b.leads_referred),
+          bookingsClosed: Number(b.bookings_closed),
+        } : null,
+        commissions: commissions.map(c => {
+          const value = num(c.total_consideration);
+          const earned = num(c.amount_earned);
+          return {
+            id: c.id, bookingId: c.booking_id,
+            amountEarned: earned, amountPaid: num(c.amount_paid), status: c.status,
+            leadName: c.lead_name ?? null,
+            project: c.project ?? null,
+            bookingValue: value,
+            // The rate this line was actually settled at, derived from the two
+            // amounts rather than read off the broker record — a historic line
+            // keeps the rate it was earned under even if the deal changes.
+            rate: value > 0 ? Math.round((earned / value) * 10000) / 100 : null,
+          };
+        }),
         referredLeads: referred.map(l => ({ id: l.id, name: l.name, phone: l.phone, project: l.project, stage: l.stage, budget: num(l.budget), createdAt: l.created_at })),
         projects: projects.map(p => ({ id: p.id, name: p.name, location: p.location })),
       };

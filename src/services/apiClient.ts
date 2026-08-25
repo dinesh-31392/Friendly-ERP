@@ -1319,7 +1319,7 @@ export interface ApiPortalOverview {
   profile: { name: string; email: string };
   // customer
   lead?: { id: string; name: string; project: string; stage: string } | null;
-  bookings?: { id: string; unitId?: string | null; bookingAmount: number; totalConsideration: number; status: string; stage?: string }[];
+  bookings?: { id: string; unitId?: string | null; bookingAmount: number; totalConsideration: number; status: string; stage?: string; paymentPlan?: string | null }[];
   schedule?: { id: string; bookingId: string; milestoneName: string; sequence: number; amount: number; dueDate: string; status: string }[];
   receipts?: { id: string; scheduleId: string; amount: number; date: string; mode: string }[];
   units?: { id: string; towerId?: string | null; projectId?: string | null; unitCode: string; configuration: string; floor: number; areaSqft: number; status: string }[];
@@ -1327,8 +1327,21 @@ export interface ApiPortalOverview {
   tickets?: { id: string; title: string; category: string; priority: string; status: string; project: string; createdAt: string }[];
   documents?: { id: string; name: string; type: string; project: string; docDate: string; size: string; status: string; url?: string | null }[];
   // partner
-  broker?: { id: string; name: string; phone: string; email: string } | null;
-  commissions?: { id: string; bookingId?: string | null; amountEarned: number; amountPaid: number; status: string }[];
+  broker?: {
+    id: string; name: string; phone: string; email: string;
+    agencyName?: string | null;
+    // null when the deal is not a percentage one — there is no single rate to
+    // quote for a flat or slab arrangement.
+    commissionRate?: number | null;
+    leadsReferred?: number; bookingsClosed?: number;
+  } | null;
+  commissions?: {
+    id: string; bookingId?: string | null; amountEarned: number; amountPaid: number; status: string;
+    // What earned the line. Null when the booking behind it no longer exists —
+    // the money is still owed, so the row is still returned.
+    leadName?: string | null; project?: string | null;
+    bookingValue?: number; rate?: number | null;
+  }[];
   referredLeads?: { id: string; name: string; phone: string; project: string; stage: string; budget: number; createdAt: string }[];
   projects?: { id: string; name: string; location: string }[];
 }

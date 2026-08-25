@@ -27,12 +27,23 @@ const { rows: [t] } = await c.query(
    RETURNING id`, [SLUG]);
 
 // Roles with their real grants, same map the provisioning endpoint uses.
+//
+// ALL ELEVEN workspace roles, deliberately. This used to define five, which
+// meant a demo workspace could not demonstrate the other six and — worse —
+// there was no account to sign in with when checking that each role reaches
+// what it should. The sign-in picker offers eleven; a seeder that produces five
+// cannot be used to verify any of them.
 const ROLE_PERMS = {
   builder_admin: null,   // everything
-  sales_manager: ['view_dashboard','view_leads','manage_leads','assign_leads','add_notes','manage_team','view_reports','view_inventory','view_projects','view_sales_performance','view_finance','view_messages','send_messages','view_documents','view_service','manage_service','view_calendar','schedule_visits','use_ai_studio','create_bookings','approve_reminders','view_campaigns','manage_campaigns','view_bookings','manage_bookings','view_brokers','view_execution','create_quotations','approve_discounts','view_invoices'],
+  sales_manager: ['view_dashboard','view_leads','manage_leads','assign_leads','add_notes','manage_team','view_reports','view_inventory','view_projects','view_sales_performance','view_finance','view_messages','send_messages','view_documents','view_service','manage_service','view_calendar','schedule_visits','use_ai_studio','create_bookings','approve_reminders','view_campaigns','manage_campaigns','view_bookings','manage_bookings','view_brokers','view_execution','create_quotations','approve_discounts','view_invoices','view_leasing','manage_leasing'],
   sales_executive: ['view_dashboard','view_leads','manage_own_leads','add_notes','view_inventory','view_projects','view_messages','send_messages','view_documents','view_calendar','schedule_visits','use_ai_studio','create_bookings','view_bookings','create_quotations'],
-  accountant: ['view_dashboard','view_projects','view_reports','view_accounts','manage_accounts','view_finance','manage_finance','view_procurement','view_bookings','view_documents','view_invoices','manage_invoices'],
+  telecaller: ['view_dashboard','view_leads','manage_own_leads','add_notes','view_projects','view_calendar','schedule_visits','view_messages','send_messages'],
+  accountant: ['view_dashboard','view_projects','view_reports','view_accounts','manage_accounts','view_finance','manage_finance','view_procurement','view_bookings','view_documents','view_invoices','manage_invoices','view_leasing','view_owner_payouts','manage_owner_payouts'],
   site_engineer: ['view_dashboard','view_projects','view_execution','manage_execution','view_procurement','manage_procurement','view_hr','manage_attendance','view_documents','view_calendar','view_messages','send_messages','signoff_ra_bills'],
+  hr_manager: ['view_dashboard','view_hr','manage_hr','manage_attendance','view_documents','view_projects','view_reports','view_calendar','view_messages','send_messages'],
+  land_manager: ['view_dashboard','view_projects','view_documents','view_land','manage_land','view_bd','view_calendar','view_messages','send_messages'],
+  bd_manager: ['view_dashboard','view_projects','view_reports','view_bd','manage_bd','view_land','approve_land_qualify','view_documents','view_calendar','view_messages','send_messages'],
+  auditor: ['view_dashboard','view_leads','view_projects','view_inventory','view_bookings','view_sales_performance','view_campaigns','view_calendar','view_reports','view_messages','view_documents','view_finance','view_service','view_brokers','view_execution','view_procurement','view_hr','view_accounts','view_audit_log','view_invoices','view_leasing','view_owner_payouts'],
 };
 const { rows: allPerms } = await c.query(`SELECT key FROM permissions`);
 const catalog = allPerms.map(r => r.key);
@@ -65,12 +76,19 @@ await c.query(
   ]})]);
 
 console.log('→ people');
+// One account per role. Signing in as each of them is the only way to check
+// that a role reaches what it should and nothing more, so every role gets one.
 const users = [
   ['admin',    'builder_admin',   'Anita Desai'],
   ['manager',  'sales_manager',   'Rohit Menon'],
   ['sales',    'sales_executive', 'Priya Sharma'],
+  ['tele',     'telecaller',      'Sneha Kamat'],
   ['accounts', 'accountant',      'Vikram Rao'],
   ['site',     'site_engineer',   'Imran Qureshi'],
+  ['hr',       'hr_manager',      'Deepa Nair'],
+  ['land',     'land_manager',    'Suresh Patil'],
+  ['bd',       'bd_manager',      'Kavita Reddy'],
+  ['auditor',  'auditor',         'Nitin Shah'],
 ];
 const userId = {};
 for (const [slug, role, name] of users) {
@@ -168,15 +186,25 @@ for (const [name, cat, unit] of [['OPC 53 Cement','Cement','bag'],['TMT Bar 12mm
   await c.query(`INSERT INTO materials (tenant_id, name, category, unit, reorder_level) VALUES ($1,$2,$3,$4,100)`, [t.id, name, cat, unit]);
 }
 
-console.log('→ customer portal login');
+console.log('→ portal logins (customer + channel partner)');
 const { rows: [pu] } = await c.query(
   `SELECT column_name FROM information_schema.columns WHERE table_name='portal_users' AND column_name='lead_id'`);
 if (pu) {
+  // The CHECK constraint is exclusive: a customer carries a lead_id and no
+  // broker_id, a partner the reverse. There is no such thing as a portal user
+  // attached to both, and the seeder must not pretend otherwise.
   await c.query(
     `INSERT INTO portal_users (tenant_id, lead_id, email, password_hash, name, role, active)
      VALUES ($1,$2,'buyer@acme.test',$3,'Arun Pillai','customer',true)
      ON CONFLICT DO NOTHING`,
     [t.id, leadIds[2], hash]);
+  // The partner side had no account at all, so the Channel Partner half of the
+  // portal could never be opened on a demo workspace.
+  await c.query(
+    `INSERT INTO portal_users (tenant_id, broker_id, email, password_hash, name, role, active)
+     VALUES ($1,$2,'partner@acme.test',$3,'Meera Iyer','partner',true)
+     ON CONFLICT DO NOTHING`,
+    [t.id, broker.id, hash]);
 }
 
 console.log(`
@@ -184,15 +212,21 @@ console.log(`
   Workspace "Acme Builders"   workspace code: ${SLUG}
   Password for every account below: ${PW}
 
-  BUILDER LOGIN  (the "Builder" tab, workspace code "${SLUG}")
+  BUILDER LOGIN  (pick the role in the sign-in picker, workspace code "${SLUG}")
     admin@acme.test      Builder Admin    — sees everything
-    manager@acme.test    Sales Manager    — team + pipeline
+    manager@acme.test    Sales Manager    — team + pipeline + approvals
     sales@acme.test      Sales Executive  — only their own leads
+    tele@acme.test       Telecaller       — calls their list, books visits
     accounts@acme.test   Accountant       — finance, no CRM
     site@acme.test       Site Engineer    — execution + stores
+    hr@acme.test         HR Manager       — people, attendance, payroll
+    land@acme.test       Land Manager     — acquisition and title
+    bd@acme.test         BD Manager       — business development
+    auditor@acme.test    Auditor          — reads everything, writes nothing
 
-  PORTAL LOGIN   (the "Customer / Partner" tab)
+  PORTAL LOGIN   (the "Customer" / "Channel Partner" entries)
     buyer@acme.test      the booking, schedule and tickets for one buyer
+    partner@acme.test    referrals and commission statements for one agency
 
   Data: 48 units (2 booked), 7 leads across the pipeline, 2 bookings
   with commissions and invoices, 3 tasks, 3 employees, 3 materials.

@@ -98,11 +98,31 @@ function mapWriteError(err: unknown): { error: string } | null {
 
 export async function financeRoutes(app: FastifyInstance): Promise<void> {
   // ── Chart of accounts ──────────────────────────────────────────────────────
+  //
+  // GATED ON view_accounts / manage_accounts, NOT view_finance.
+  //
+  // These are two different permissions describing two different things, and
+  // the product already treats them that way: the SPA puts Billing & Payments
+  // behind view_finance and Accounts & Ledger behind view_accounts, and
+  // complianceRoutes has always gated on view_accounts. These four handlers
+  // were the exception, checking the broader key.
+  //
+  // The gap was reachable. A sales_manager legitimately holds view_finance —
+  // they chase receivables — and does not hold view_accounts. Until this
+  // change, the UI correctly hid Accounts & Ledger from them while the API
+  // handed over the whole chart of accounts and every posted journal entry to
+  // anyone who asked for it directly. An RBAC boundary enforced only in the
+  // client is not a boundary.
+  //
+  // Nothing loses access that should have it: accountant, auditor,
+  // builder_admin and super_admin all hold view_accounts already, and
+  // sales_manager is the only role in ROLE_PERMS with view_finance but not
+  // view_accounts — which is exactly the case this closes.
 
   app.get('/api/accounts', { preHandler: requireAuth }, async (req, reply) =>
     withTenantContext(req.ctx, async (db) => {
-      const { rows: [{ allowed }] } = await db.query(`SELECT has_permission('view_finance') AS allowed`);
-      if (!allowed) return reply.code(403).send({ error: 'Missing permission: view_finance' });
+      const { rows: [{ allowed }] } = await db.query(`SELECT has_permission('view_accounts') AS allowed`);
+      if (!allowed) return reply.code(403).send({ error: 'Missing permission: view_accounts' });
       const { rows } = await db.query('SELECT * FROM chart_of_accounts ORDER BY code');
       return { accounts: rows.map(toApiAccount) };
     }),
@@ -128,8 +148,8 @@ export async function financeRoutes(app: FastifyInstance): Promise<void> {
     async (req, reply) => {
       try {
         return await withTenantContext(req.ctx, async (db) => {
-          const { rows: [{ allowed }] } = await db.query(`SELECT has_permission('manage_finance') AS allowed`);
-          if (!allowed) return reply.code(403).send({ error: 'Missing permission: manage_finance' });
+          const { rows: [{ allowed }] } = await db.query(`SELECT has_permission('manage_accounts') AS allowed`);
+          if (!allowed) return reply.code(403).send({ error: 'Missing permission: manage_accounts' });
           const { rows } = await db.query(
             `INSERT INTO chart_of_accounts (tenant_id, code, name, account_type, is_system, is_active)
              VALUES (app_current_tenant(), $1, $2, $3, $4, $5) RETURNING *`,
@@ -156,8 +176,8 @@ export async function financeRoutes(app: FastifyInstance): Promise<void> {
     },
     async (req, reply) =>
       withTenantContext(req.ctx, async (db) => {
-        const { rows: [{ allowed }] } = await db.query(`SELECT has_permission('manage_finance') AS allowed`);
-        if (!allowed) return reply.code(403).send({ error: 'Missing permission: manage_finance' });
+        const { rows: [{ allowed }] } = await db.query(`SELECT has_permission('manage_accounts') AS allowed`);
+        if (!allowed) return reply.code(403).send({ error: 'Missing permission: manage_accounts' });
         const sets: string[] = [];
         const params: unknown[] = [];
         if (req.body.name !== undefined) { params.push(req.body.name); sets.push(`name = $${params.length}`); }
@@ -173,8 +193,10 @@ export async function financeRoutes(app: FastifyInstance): Promise<void> {
 
   app.get('/api/journal-entries', { preHandler: requireAuth }, async (req, reply) =>
     withTenantContext(req.ctx, async (db) => {
-      const { rows: [{ allowed }] } = await db.query(`SELECT has_permission('view_finance') AS allowed`);
-      if (!allowed) return reply.code(403).send({ error: 'Missing permission: view_finance' });
+      // The books themselves — every posting the business has made. If any
+      // endpoint in this file deserves the narrower key it is this one.
+      const { rows: [{ allowed }] } = await db.query(`SELECT has_permission('view_accounts') AS allowed`);
+      if (!allowed) return reply.code(403).send({ error: 'Missing permission: view_accounts' });
       const { rows } = await db.query(`${JE_SELECT} ORDER BY je.entry_date DESC, je.created_at DESC`);
       return { entries: rows.map(toApiJournalEntry) };
     }),
@@ -223,8 +245,8 @@ export async function financeRoutes(app: FastifyInstance): Promise<void> {
 
       try {
         return await withTenantContext(req.ctx, async (db) => {
-          const { rows: [{ allowed }] } = await db.query(`SELECT has_permission('manage_finance') AS allowed`);
-          if (!allowed) return reply.code(403).send({ error: 'Missing permission: manage_finance' });
+          const { rows: [{ allowed }] } = await db.query(`SELECT has_permission('manage_accounts') AS allowed`);
+          if (!allowed) return reply.code(403).send({ error: 'Missing permission: manage_accounts' });
 
           // The line→account FK is DEFERRABLE INITIALLY DEFERRED, so a bad
           // account_id would only surface at COMMIT — AFTER this handler has

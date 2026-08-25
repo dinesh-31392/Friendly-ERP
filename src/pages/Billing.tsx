@@ -45,12 +45,21 @@ export default function Billing() {
   // API mode: hydrate the server ledger into the read-cache on mount, then
   // refresh so the ledger-derived figures (statutory liability, postings) reflect
   // server-authoritative data on a direct reload. No-op in demo mode.
+  //
+  // Only for roles that may read the ledger. Billing is behind view_finance and
+  // the ledger is behind view_accounts — a sales_manager holds the first and not
+  // the second, so asking for the chart of accounts on their behalf is a
+  // guaranteed 403. It used to be swallowed by the .catch(), which also skipped
+  // the refresh() in the .then() — the page opened, quietly missing a beat.
+  // Not requesting it at all is both correct and one round-trip cheaper.
+  const canReadLedger = hasPermission('view_accounts');
   useEffect(() => {
     if (!isApiEnabled() || !tenantId) return;
+    if (!canReadLedger) { refresh(); return; }
     let cancelled = false;
     hydrateLedger(tenantId).then(() => { if (!cancelled) refresh(); }).catch(() => {});
     return () => { cancelled = true; };
-  }, [tenantId]);
+  }, [tenantId, canReadLedger]);
 
   const [tab, setTab] = useState<Tab>('receivables');
   const [search, setSearch] = useState('');
@@ -69,13 +78,13 @@ export default function Billing() {
   useEffect(() => {
     if (!isApiEnabled()) { setApiData(null); return; }
     let cancelled = false;
-    billingWrites.fetchBillingData(tenantId)
+    billingWrites.fetchBillingData(tenantId, { compliance: canReadLedger })
       .then(d => { if (!cancelled) setApiData(d); })
       .catch(() => {
         if (!cancelled) { setApiData(null); toast.error('API unreachable — showing local data', { id: 'api-fallback' }); }
       });
     return () => { cancelled = true; };
-  }, [tenantId, refreshKey]);
+  }, [tenantId, refreshKey, canReadLedger]);
 
   // Server-side; the route already returns newest-first.
   const [invoices, setInvoices] = useState<Invoice[]>([]);
@@ -469,11 +478,16 @@ export default function Billing() {
   const inputCls = 'w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20';
   const labelCls = 'block text-xs font-semibold text-zinc-500 uppercase mb-1';
 
+  // Compliance is served by complianceRoutes, which gates on view_accounts —
+  // the same key as the ledger, not the view_finance key that opens this page.
+  // Without it the tab can only ever render "No filings tracked yet", which
+  // reads as "your company has none" rather than "this is not yours to see",
+  // and its Add button would 403. Offering it at all is the misleading part.
   const TAB_DEFS: { id: Tab; label: string; icon: React.ElementType }[] = [
     { id: 'receivables', label: 'Receivables', icon: Receipt },
     { id: 'payables', label: 'Payables', icon: Landmark },
     { id: 'budgets', label: 'Budget vs Actual', icon: PiggyBank },
-    { id: 'compliance', label: 'Compliance', icon: ShieldCheck },
+    ...(canReadLedger ? [{ id: 'compliance' as Tab, label: 'Compliance', icon: ShieldCheck }] : []),
   ];
   const filingsDue = filings.filter(f => f.status === 'pending' && new Date(f.dueDate).getTime() <= Date.now() + 14 * 86400000).length;
 

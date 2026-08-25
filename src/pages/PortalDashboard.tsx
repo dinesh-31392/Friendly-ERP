@@ -36,10 +36,22 @@ function mapOverview(o: ApiPortalOverview): PortalView {
   const projects = (o.projects ?? []).map(p => ({ id: p.id, name: p.name, location: p.location } as Project));
   if (o.role === 'partner') {
     return {
-      broker: o.broker ? ({ id: o.broker.id, name: o.broker.name, phone: o.broker.phone, email: o.broker.email } as Broker) : undefined,
+      broker: o.broker ? ({
+        id: o.broker.id, name: o.broker.name, phone: o.broker.phone, email: o.broker.email,
+        // Carried through so the summary tiles show numbers rather than the
+        // word "undefined". These were absent from both the server payload and
+        // this mapper, which is why the partner portal read as blank.
+        commissionRate: o.broker.commissionRate ?? undefined,
+        leadsReferred: o.broker.leadsReferred ?? 0,
+        bookingsClosed: o.broker.bookingsClosed ?? 0,
+      } as unknown as Broker) : undefined,
       commissions: (o.commissions ?? []).map(c => ({
         id: c.id, bookingId: c.bookingId ?? '', amount: c.amountEarned,
         amountPaid: c.amountPaid, status: c.status,
+        // bookingValue was the crash: the statement formats it as currency and
+        // the mapper never set it, so formatCurrency was handed undefined.
+        leadName: c.leadName ?? '', project: c.project ?? '',
+        bookingValue: c.bookingValue ?? 0, rate: c.rate ?? undefined,
       } as unknown as Commission)),
       referredLeads: (o.referredLeads ?? []).map(l => ({
         id: l.id, name: l.name, phone: l.phone, project: l.project,
@@ -53,10 +65,18 @@ function mapOverview(o: ApiPortalOverview): PortalView {
     bookings: (o.bookings ?? []).map(b => ({
       id: b.id, unitId: b.unitId ?? '', bookingAmount: b.bookingAmount,
       totalConsideration: b.totalConsideration, status: b.status,
+      paymentPlan: b.paymentPlan ?? '',
     } as unknown as Booking)),
+    // Field names are the SPA's Unit type — `number`, `area`, `floorNumber` —
+    // not the server's unitCode/areaSqft/floor. They were mapped under the
+    // server's names and cast through `as unknown as Unit`, so the booking card
+    // has been rendering "Unit " with nothing after it and " sqft" with no
+    // figure for as long as API mode has existed. The cast is what let it
+    // compile; nothing but reading the page would have caught it.
     units: (o.units ?? []).map(u => ({
-      id: u.id, towerId: u.towerId ?? '', projectId: u.projectId ?? '', unitNumber: u.unitCode,
-      configuration: u.configuration, floor: u.floor, areaSqft: u.areaSqft, status: u.status,
+      id: u.id, towerId: u.towerId ?? '', projectId: u.projectId ?? '',
+      number: u.unitCode, configuration: u.configuration,
+      floorNumber: u.floor, area: u.areaSqft, status: u.status,
     } as unknown as Unit)),
     towers: (o.towers ?? []).map(t => ({ id: t.id, name: t.name, projectId: t.projectId ?? '' } as Tower)),
     invoices: [],

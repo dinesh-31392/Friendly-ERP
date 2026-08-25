@@ -64,10 +64,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // the synchronous finance statements (trial balance / P&L / fund flow, on
   // Accounts, Billing, Dashboard, Reports) fold over server-authoritative data.
   // Runs on login and on refresh-restored sessions. No-op in demo mode.
+  //
+  // Only for roles that hold view_accounts. This fired for EVERY sign-in, so a
+  // telecaller, a site engineer or an HR manager each opened their session with
+  // a request the server was always going to refuse — swallowed by the catch,
+  // visible only as a 403 in the console of a working app. Asking first is both
+  // honest and two round-trips cheaper on every one of those logins.
   useEffect(() => {
     if (!isApiEnabled() || !tenant?.id) return;
+    if (!user || !authService.hasPermission(user, 'view_accounts')) return;
     hydrateLedger(tenant.id).catch(() => { /* pages fall back to whatever's cached */ });
-  }, [tenant?.id]);
+  }, [tenant?.id, user]);
 
   const verifyLoginCode = useCallback(async (challengeId: string, code: string) => {
     try {

@@ -32,7 +32,8 @@
     "verify:notifications": "node scripts/verify-notifications.mjs",
     "verify:demands": "node scripts/verify-demand-letters.mjs",
     "verify:rera": "node scripts/verify-rera-escrow.mjs",
-    "verify:visits": "node scripts/verify-site-visits.mjs"
+    "verify:visits": "node scripts/verify-site-visits.mjs",
+    "verify:logins": "node scripts/verify-role-logins.mjs"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",

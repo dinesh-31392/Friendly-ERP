@@ -47,6 +47,11 @@ if (!catalog.length) {
 
 const ROLES = {
   super_admin: catalog,
+  // Branch-scoped platform staff. Three keys only — its power comes from the
+  // platform routes, not from tenant permissions (migration 044). Needed here
+  // so verify-role-logins can sign in as the second platform role and check
+  // that support access is NOT customer-data access.
+  tech_team: ['view_dashboard', 'view_platform', 'manage_branch'],
   builder_admin: catalog.filter(k => !['approve_reminders', 'manage_team'].includes(k)),
   sales_executive: ['view_dashboard','view_leads','manage_own_leads','add_notes','view_inventory',
     'view_projects','view_messages','send_messages','view_documents','view_calendar',
@@ -111,6 +116,7 @@ async function user(t, email, role, name) {
 
 const platform = await tenant('platform', 'Platform');
 await user(platform, 'admin@erptest.local',  'super_admin',     'Test Platform Admin');
+await user(platform, 'tech@erptest.local',   'tech_team',       'Test Branch Team');
 await user(platform, 'exec1@erptest.local',  'sales_executive', 'Test Executive One');
 await user(platform, 'exec2@erptest.local',  'sales_executive', 'Test Executive Two');
 await user(platform, 'acct@erptest.local',   'accountant',      'Test Accountant');

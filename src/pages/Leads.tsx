@@ -987,6 +987,25 @@ export default function Leads() {
               email that do not open the drawer.
             */}
             <div>
+              {/*
+                EQUAL COLUMNS, BY LETTING THE TABLE DO IT.
+
+                No column declares a width. Under `table-fixed` every auto
+                column takes an equal share of what is left after the checkbox,
+                so the seven data columns are always the same width as each
+                other and the gutters between headers are identical.
+
+                Declaring widths is what produced the uneven rhythm this
+                replaces: Lead had been the only auto column and swallowed all
+                the slack (404px for 180px of name), and hand-tuning the rest
+                traded one lopsided column for a row of slightly-off ones.
+
+                It also re-divides on its own. When Value, Owner and Actions
+                stand down at narrow widths or beside the open drawer, the
+                remaining columns simply widen into an equal share — no
+                breakpoint-specific widths to keep in step, and nothing that can
+                overflow the card the way a pinned 224px did at 375px.
+              */}
               <table className="w-full table-fixed">
                 <thead>
                   <tr className="bg-zinc-50/50 border-b border-zinc-100">
@@ -1004,38 +1023,13 @@ export default function Leads() {
                         letter. Received hides here and its AGE moves into the
                         Lead cell, so the fact survives even when the column
                         cannot. */}
-                    <th className="text-left px-3 py-3 w-[104px] text-[11px] font-semibold text-zinc-500 uppercase tracking-wider hidden sm:table-cell">Received</th>
-                    {/* Lead is sized to what it holds; Contact takes the rest.
-
-                        Lead was the only auto column, so it absorbed every
-                        spare pixel on its own — 404px to display about 180px of
-                        name — and the surplus sat as dead space before Contact,
-                        which was meanwhile capped at 190px and truncating every
-                        email. Splitting the slack evenly between the two only
-                        halved the gap, because the two columns do not hold
-                        equal amounts: a name is bounded, an email address is
-                        the longest string in the row.
-
-                        So Lead gets a width that fits a full name, its score
-                        and its second line, and Contact is the one column left
-                        flexible — the space now lands where the long content
-                        actually is. */}
-                    {/* Fixed only from md up, which is exactly where Contact
-                        exists to compete with it. Below md, Contact is hidden
-                        and Lead should go back to absorbing the width — pinning
-                        it at 224px there pushed the table past the card on a
-                        375px screen, clipping Stage with no way to scroll to
-                        it. */}
-                    <th className="text-left px-3 py-3 md:w-[224px] text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">Lead</th>
+                    <th className="text-left px-3 py-3 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider hidden sm:table-cell">Received</th>
+                    <th className="text-left px-3 py-3 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">Lead</th>
                     <th className="text-left px-3 py-3 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider hidden md:table-cell">Contact</th>
-                    <th className="text-left px-3 py-3 w-[128px] text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">Stage</th>
-                    <th className={`text-right px-3 py-3 w-[104px] text-[11px] font-semibold text-zinc-500 uppercase tracking-wider ${colValue}`}>Value</th>
-                    {/* Every column carries the same px-3. This one was px-2
-                        because "OWNER" would not fit otherwise — but a single
-                        narrower gutter is visible as a kink down the whole
-                        table, so the column got the width instead. */}
-                    <th className={`text-left px-3 py-3 w-[76px] text-[11px] font-semibold text-zinc-500 uppercase tracking-wider ${colOwner}`} title="Assigned to">Owner</th>
-                    <th className={`text-right px-3 py-3 w-[92px] text-[11px] font-semibold text-zinc-500 uppercase tracking-wider ${colActions}`}>Actions</th>
+                    <th className="text-left px-3 py-3 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">Stage</th>
+                    <th className={`text-right px-3 py-3 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider ${colValue}`}>Value</th>
+                    <th className={`text-left px-3 py-3 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider ${colOwner}`} title="Assigned to">Owner</th>
+                    <th className={`text-right px-3 py-3 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider ${colActions}`}>Actions</th>
                   </tr>
                 </thead>
                 <tbody>

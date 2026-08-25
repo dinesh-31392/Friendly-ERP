@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
-  Search, Plus, Filter, Phone, MessageCircle, Mail, MapPin,
+  Search, Plus, Phone, MessageCircle, Mail, MapPin,
   Clock, X, Building2, Tag,
   Download, Upload, Trash2, Users, GitMerge, AlertTriangle, Gauge, Calendar, Sparkles, BookOpenCheck,
   List, LayoutGrid, Kanban, UserCheck
@@ -21,6 +21,7 @@ import { logLeadActivity, addLeadNote } from '../services/leadActivityWrites';
 import { createLead, patchLead, deleteLead as removeLead, patchLeads, deleteLeads } from '../services/leadWrites';
 import { useTenantUsers } from '../hooks/useTenantUsers';
 import DateRangeFilter from '../components/DateRangeFilter';
+import StageFilter from '../components/StageFilter';
 import LeadWhatsAppChat from '../components/LeadWhatsAppChat';
 import { type DateRange, ALL_RANGE, resolveRange, inRange, rangeSlug, rangeLabel } from '../utils/dateRange';
 import { qualificationBadge } from '../services/chatbotService';
@@ -268,12 +269,27 @@ export default function Leads() {
   // Resolve the active date window once per change; leads are filtered by their
   // received date (createdAt).
   const resolvedRange = useMemo(() => resolveRange(dateRange), [dateRange]);
-  const filteredLeads = leads.filter(l => {
-    if (filterStage !== 'all' && l.stage !== filterStage) return false;
+
+  // Everything except the stage filter. The counts in the stage dropdown are
+  // taken from here on purpose: a count that also applied the stage filter
+  // would read 0 for every stage except the selected one, which tells you
+  // nothing about where to go next.
+  const searchMatched = useMemo(() => leads.filter(l => {
     if (search && !l.name.toLowerCase().includes(search.toLowerCase()) && !l.phone.includes(search)) return false;
     if (!inRange(l.enquiredAt ?? l.createdAt, resolvedRange)) return false;
     return true;
-  });
+  }), [leads, search, resolvedRange]);
+
+  const stageCounts = useMemo(() => {
+    const m: Record<string, number> = {};
+    searchMatched.forEach(l => { m[l.stage] = (m[l.stage] ?? 0) + 1; });
+    return m;
+  }, [searchMatched]);
+  const stageTotal = searchMatched.length;
+
+  const filteredLeads = filterStage === 'all'
+    ? searchMatched
+    : searchMatched.filter(l => l.stage === filterStage);
 
   const groupedLeads = leadStages.reduce((acc, stage) => {
     acc[stage.id] = filteredLeads.filter(l => l.stage === stage.id);
@@ -667,27 +683,21 @@ export default function Leads() {
             />
           </div>
           
-          {/* Stage Filters - Scrollable on mobile */}
-          <div className="flex items-center gap-2 bg-white border border-zinc-200 rounded-xl p-1 overflow-x-auto lg:overflow-visible scrollbar-hide">
-            <button
-              onClick={() => setFilterStage('all')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all whitespace-nowrap ${filterStage === 'all' ? 'bg-indigo-600 text-white shadow-sm' : 'text-zinc-500 hover:text-zinc-700'}`}
-            >All</button>
-            {leadStages.map(s => (
-              <button
-                key={s.id}
-                onClick={() => setFilterStage(s.id)}
-                className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all whitespace-nowrap ${filterStage === s.id ? 'bg-indigo-600 text-white shadow-sm' : 'text-zinc-500 hover:text-zinc-700'}`}
-              >{s.label}</button>
-            ))}
-          </div>
-          
           {/* Action Buttons - Stack on mobile, row on desktop */}
           <div className="flex items-center gap-2 flex-wrap lg:flex-nowrap">
             <DateRangeFilter value={dateRange} onChange={setDateRange} align="right" />
-            <button className="flex items-center gap-2 px-3 py-2.5 bg-white border border-zinc-200 rounded-xl text-sm font-medium text-zinc-600 hover:bg-zinc-50 transition-colors">
-              <Filter className="h-4 w-4" /> Filters
-            </button>
+            {/* The stage list lives here now, not in a row of tabs. Counts come
+                from the leads already loaded — before the stage filter is
+                applied, so each number is the size of the stage rather than the
+                size of what is currently on screen. */}
+            <StageFilter
+              stages={leadStages}
+              value={filterStage}
+              onChange={s => setFilterStage(s as LeadStage | 'all')}
+              counts={stageCounts}
+              total={stageTotal}
+              align="right"
+            />
             <button
               onClick={() => {
                 const rows = [['Name', 'Phone', 'Email', 'Project', 'Stage', 'Budget', 'Source', 'Assigned To', 'Received At']];

@@ -3,6 +3,7 @@ import type { User, Tenant } from '../types';
 import * as authService from '../services/authService';
 import { isApiEnabled, apiLogin, apiVerifyLoginCode, isMfaChallenge, clearApiToken, apiLogout, getStoredApiSession } from '../services/apiClient';
 import { hydrateLedger } from '../services/accountsService';
+import { syncPipelineFromServer } from '../services/metaService';
 import { initializeDatabase } from '../services/db';
 import { ensureBranchMigration } from '../services/branchService';
 import { isTrialExpired } from '../services/planService';
@@ -75,6 +76,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (!user || !authService.hasPermission(user, 'view_accounts')) return;
     hydrateLedger(tenant.id).catch(() => { /* pages fall back to whatever's cached */ });
   }, [tenant?.id, user]);
+
+  // The tenant's own lead pipeline. Every screen that draws a stage — the
+  // kanban columns, the stage filter, the dashboard's pipeline summary — read
+  // a hardcoded default until this ran, so a workspace using any pipeline but
+  // that default had leads sitting in stages the UI did not render.
+  //
+  // Here rather than on the Leads page because Dashboard and Reports read the
+  // same stages, and because /api/meta has no permission gate: it is UI
+  // metadata every role needs.
+  useEffect(() => {
+    if (!isApiEnabled() || !tenant?.id) return;
+    syncPipelineFromServer(tenant.id).catch(() => { /* keep the cached pipeline */ });
+  }, [tenant?.id]);
 
   const verifyLoginCode = useCallback(async (challengeId: string, code: string) => {
     try {

@@ -1450,12 +1450,34 @@ export interface ScoreFactor { label: string; points: number; detail: string }
  */
 export function explainLeadScore(lead: {
   stage: LeadStage; priority: Priority; budget: number; lastContact: string; source: string;
-}): { score: number; factors: ScoreFactor[]; nextBestAction: string } {
+}, pipeline?: { id: string }[]): { score: number; factors: ScoreFactor[]; nextBestAction: string } {
   const factors: ScoreFactor[] = [];
   const stageScores: Record<string, number> = {
     new: 5, contacted: 12, qualified: 20, visit_scheduled: 28, negotiation: 36, booked: 40, lost: 0,
   };
-  const stagePts = stageScores[lead.stage] ?? 18;
+  /**
+   * A stage this map has never heard of is scored by its POSITION in the
+   * tenant's own pipeline, not by a flat guess.
+   *
+   * The map is keyed on the DEFAULT pipeline, and stages are tenant data — the
+   * product's own provisioning code creates a pipeline using `site_visit`,
+   * which is not `visit_scheduled`. Every such lead fell through to the old
+   * flat fallback of 18 and therefore scored BELOW a merely `qualified` lead at
+   * 20: a lead that had already been to site ranked worse than one that had
+   * not. The score decides who a salesperson calls next, so the funnel was
+   * inverted at exactly the step that matters most.
+   *
+   * Position is scaled across the non-terminal stages, so the default pipeline
+   * reproduces its own tuned numbers and a custom one lands sensibly between
+   * them. `booked` and `lost` are core keys and never reach here.
+   */
+  const positional = (): number => {
+    const ids = (pipeline ?? []).map(s => s.id).filter(id => id !== 'booked' && id !== 'lost');
+    const i = ids.indexOf(lead.stage);
+    if (i < 0 || ids.length < 2) return 18;          // genuinely unknown — old behaviour
+    return Math.round(5 + (i / (ids.length - 1)) * 31);   // 5 … 36, matching the named map
+  };
+  const stagePts = stageScores[lead.stage] ?? positional();
   factors.push({ label: 'Pipeline stage', points: stagePts, detail: `At "${lead.stage.replace('_', ' ')}" — ${stagePts >= 28 ? 'deep in the funnel' : stagePts >= 12 ? 'progressing' : 'early stage'}` });
 
   const priorityScores: Record<Priority, number> = { hot: 25, warm: 15, cold: 5 };
@@ -1487,7 +1509,12 @@ export function explainLeadScore(lead: {
   if (lead.stage !== 'booked' && lead.stage !== 'lost') {
     if (daysSince > 7) nextBestAction = 'Reach out now — engagement has gone cold and recency is your biggest score drag.';
     else if (stagePts < 20) nextBestAction = 'Qualify budget & timeline to move this out of the early funnel.';
-    else if (lead.stage === 'visit_scheduled') nextBestAction = 'Confirm the site visit and prep a personalized unit shortlist.';
+    // Matched on the stage KEY containing "visit" rather than one exact
+    // spelling: the default pipeline calls it visit_scheduled and the
+    // provisioned one calls it site_visit, so the exact check never fired for a
+    // real workspace and told reps to "book a site visit" for leads that had
+    // already been to site.
+    else if (/visit/.test(lead.stage)) nextBestAction = 'Confirm the site visit and prep a personalized unit shortlist.';
     else if (lead.stage === 'negotiation') nextBestAction = 'Send the payment plan and push for a booking token.';
     else nextBestAction = 'Book a site visit while interest is warm.';
   }

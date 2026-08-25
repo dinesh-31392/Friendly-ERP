@@ -53,7 +53,11 @@ for (const [name, keys] of Object.entries(ROLE_PERMS)) {
   const { rows: [r] } = await c.query(
     `INSERT INTO roles (tenant_id, name, is_system) VALUES ($1,$2,true) RETURNING id`, [t.id, name]);
   roleId[name] = r.id;
-  const grant = keys ?? catalog.filter(k => !['approve_reminders','manage_team'].includes(k));
+  // Mirrors BUILDER_ADMIN_EXCLUDES in seed.ts / tenantRoutes.ts. The platform
+  // keys are the important two: a workspace owner must not hold the rights
+  // that gate the platform console.
+  const grant = keys ?? catalog.filter(k =>
+    !['view_platform', 'manage_branch', 'approve_reminders', 'manage_team'].includes(k));
   for (const k of grant) {
     if (!catalog.includes(k)) continue;
     await c.query(`INSERT INTO role_permissions (role_id, permission_key) VALUES ($1,$2) ON CONFLICT DO NOTHING`, [r.id, k]);

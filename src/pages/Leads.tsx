@@ -10,7 +10,7 @@ import { useAuth } from '../context/AuthContext';
 import { getByTenant, logAudit } from '../services/db';
 import type { Lead, LeadStage, Note, Activity, Priority, User as UserType } from '../types';
 import { leadScoreBand, explainLeadScore, LOST_REASONS } from '../types';
-import { getLeadStages, getLeadSources, getConfigurations, type StageDef } from '../services/metaService';
+import { getLeadStages, getLeadSources, getConfigurations, getVisitStageId, type StageDef } from '../services/metaService';
 import { formatCurrency, currencySymbol, localeFor, receivedOn, sinceArrival, todayISO } from '../utils/format';
 import { telHref, mailtoHref, whatsappHref, maskPhone } from '../utils/contact';
 import { whatsappSend } from '../services/whatsappService';
@@ -307,11 +307,11 @@ export default function Leads() {
   const rowMeta = useMemo(() => {
     const m = new Map<string, { score: number; band: { label: string; color: string } }>();
     searchMatched.forEach(l => {
-      const { score } = explainLeadScore(l);
+      const { score } = explainLeadScore(l, leadStages);
       m.set(l.id, { score, band: leadScoreBand(score) });
     });
     return m;
-  }, [searchMatched]);
+  }, [searchMatched, leadStages]);
 
   /**
    * Column visibility for the list.
@@ -1331,7 +1331,7 @@ export default function Leads() {
 
             {/* Lead Score — explainable ("Lead Prophecy") */}
             {(() => {
-              const { score, factors, nextBestAction } = explainLeadScore(selectedLead);
+              const { score, factors, nextBestAction } = explainLeadScore(selectedLead, leadStages);
               const band = leadScoreBand(score);
               return (
                 <div className="bg-zinc-50 rounded-xl p-3">
@@ -1733,7 +1733,14 @@ export default function Leads() {
                   dueDate: when.toISOString(),
                   priority: 'hot', status: 'pending', category: 'visit',
                 }).catch(() => toast.error('Could not add the visit to the calendar'));
-                handleStageChange(selectedLead.id, 'visit_scheduled');
+                // The tenant's OWN visit stage, not a hardcoded key: a
+                // workspace provisioned with 'site_visit' would have had this
+                // write rejected by validate_lead_stage. No visit stage at all
+                // means the lead simply stays where it is.
+                {
+                  const visitStage = getVisitStageId(tenantId);
+                  if (visitStage) handleStageChange(selectedLead.id, visitStage as typeof selectedLead.stage);
+                }
                 const label = when.toLocaleString('en-IN', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
                 void logLeadActivity({ leadId: selectedLead.id, type: 'visit', description: `Site visit scheduled for ${label}` });
                 audit('schedule_visit', selectedLead.id, `Scheduled site visit for ${selectedLead.name} on ${label}`);

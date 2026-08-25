@@ -166,6 +166,7 @@ const PORTAL = [
 console.log('\n=== STAFF SIGN-IN, ONE ROLE AT A TIME ===');
 const seen = new Map();
 const tokens = new Map();
+const held = new Map();
 
 for (const r of [...ROLES, ...PLATFORM]) {
   console.log(`\n--- ${r.role} (${r.email}) ---`);
@@ -196,6 +197,23 @@ for (const r of [...ROLES, ...PLATFORM]) {
   const perms = meBody.permissions ?? [];
   ok('holds at least one permission', perms.length > 0, `${perms.length}`);
   seen.set(r.role, perms.length);
+  held.set(r.role, new Set(perms));
+
+  // No workspace role holds the keys to the PLATFORM console.
+  //
+  // builder_admin is provisioned with "the whole catalog minus a couple of
+  // workflow keys", and the catalog contains view_platform and manage_branch —
+  // so every builder_admin in every workspace held both (migration 047).
+  //
+  // It never escalated, because the SPA keeps its own permission map that omits
+  // them and no route gates on either. Both are accidents: move the SPA onto
+  // the server's permission list, which is the right direction, and this alone
+  // opens the platform console to every workspace owner. Asserted on the
+  // SERVER's answer, which is the one that would start being used.
+  if (!r.platform) {
+    const platformKeys = ['view_platform', 'manage_branch'].filter(k => perms.includes(k));
+    ok('holds no platform-console keys', platformKeys.length === 0, platformKeys.join(', '));
+  }
 
   for (const p of r.allow) {
     const g = await get(p, body.token);
@@ -206,6 +224,54 @@ for (const r of [...ROLES, ...PLATFORM]) {
     // 403 is the answer worth having: the route exists and refused. A 404
     // would also keep the data safe but tells the caller the wrong thing.
     ok(`is refused ${p}`, g.status === 403, String(g.status));
+  }
+}
+
+console.log('\n=== A ROLE CANNOT WRITE OUTSIDE ITS OWN MODULE ===');
+//
+// Everything above this point tests READS. A role that is correctly refused
+// GET /api/employees and still allowed to POST one is the more dangerous half,
+// and nothing here covered it.
+//
+// Only the REFUSALS are asserted. They are the security-relevant half, and —
+// unlike the allow cases — they leave no rows behind, so the suite can run
+// repeatedly against a workspace without filling it with fixtures. That the
+// allowed writes work is what every other suite already exercises.
+{
+  const WRITE = {
+    '/api/leads':      { name: 'RoleProbe', phone: '9999000000', source: 'Website', project: 'Acme Skyline', budget: 1000000 },
+    '/api/projects':   { name: 'RoleProbe', location: 'Pune', status: 'pre_launch' },
+    '/api/employees':  { name: 'RoleProbe', designation: 'X', department: 'Y', type: 'staff' },
+    '/api/vendors':    { name: 'RoleProbe', category: 'Cement' },
+    '/api/accounts':   { code: '9999', name: 'RoleProbe', type: 'asset' },
+    '/api/materials':  { name: 'RoleProbe', category: 'Cement', unit: 'bag' },
+    '/api/land-leads': { ownerName: 'RoleProbe', surveyNumber: 'SN-probe', city: 'Pune', areaAcres: 1 },
+    '/api/bd-leads':   { counterpartyName: 'RoleProbe', city: 'Pune', opportunityType: 'jv', source: 'Direct' },
+  };
+  // Each role paired with the endpoints it must NOT be able to create in.
+  const DENIED = {
+    sales_manager:   ['/api/employees', '/api/accounts', '/api/materials', '/api/land-leads', '/api/bd-leads', '/api/projects'],
+    sales_executive: ['/api/employees', '/api/accounts', '/api/vendors', '/api/materials', '/api/projects'],
+    telecaller:      ['/api/employees', '/api/accounts', '/api/vendors', '/api/materials', '/api/projects'],
+    accountant:      ['/api/leads', '/api/employees', '/api/materials', '/api/land-leads', '/api/projects'],
+    site_engineer:   ['/api/leads', '/api/employees', '/api/accounts', '/api/land-leads', '/api/projects'],
+    // Computes payroll; must not touch the ledger or the pipeline.
+    hr_manager:      ['/api/leads', '/api/accounts', '/api/vendors', '/api/materials', '/api/bd-leads'],
+    land_manager:    ['/api/leads', '/api/employees', '/api/accounts', '/api/bd-leads', '/api/projects'],
+    bd_manager:      ['/api/leads', '/api/employees', '/api/accounts', '/api/land-leads', '/api/projects'],
+    // The whole point of the role: reads everything, writes nothing.
+    auditor:         Object.keys(WRITE),
+  };
+  for (const [role, paths] of Object.entries(DENIED)) {
+    const tok = tokens.get(role);
+    if (!tok) { ok(`${role} signed in`, false, 'no token'); continue; }
+    for (const p of paths) {
+      const res = await fetch(BASE + p, { method: 'POST', headers: H(tok), body: JSON.stringify(WRITE[p]) });
+      // 403 specifically: a 400 would also create nothing, but it would mean
+      // the payload was rejected before the permission gate was ever reached —
+      // which proves the schema works, not the gate.
+      ok(`${role} cannot create in ${p}`, res.status === 403, String(res.status));
+    }
   }
 }
 

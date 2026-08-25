@@ -143,6 +143,30 @@ export function getLeadStages(tenantId: string): StageDef[] {
   return getTenantMeta(tenantId).stages;
 }
 
+/**
+ * The tenant's site-visit stage id, whatever they call it.
+ *
+ * Two provisioning paths ship two different keys — seed.ts writes
+ * `visit_scheduled`, the tenant-provisioning endpoint writes `site_visit` —
+ * and a builder may rename or add stages on top of either. Code that hardcoded
+ * one spelling silently did nothing for every workspace using the other: the
+ * Calendar's site-visit list came back empty, and the "schedule a visit" button
+ * moved the lead to a stage the database rejects (validate_lead_stage checks
+ * against the tenant's own pipeline, so the write failed the CHECK).
+ *
+ * Matched on the key CONTAINING "visit", then on the label, so a renamed
+ * "Site Revisit" or "Visit Booked" still resolves. Returns undefined when the
+ * pipeline genuinely has no visit stage — callers must handle that rather than
+ * write a key the database will refuse.
+ */
+export function getVisitStageId(tenantId: string): string | undefined {
+  const stages = getLeadStages(tenantId);
+  return (
+    stages.find(s => /visit/i.test(s.id)) ??
+    stages.find(s => /visit/i.test(s.label))
+  )?.id;
+}
+
 export function getLeadSources(tenantId: string): string[] {
   return getTenantMeta(tenantId).leadSources;
 }

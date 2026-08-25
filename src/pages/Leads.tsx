@@ -12,7 +12,7 @@ import type { Lead, LeadStage, Note, Activity, Priority, User as UserType } from
 import { leadScoreBand, explainLeadScore, LOST_REASONS } from '../types';
 import { getLeadStages, getLeadSources, getConfigurations, type StageDef } from '../services/metaService';
 import { formatCurrency, currencySymbol, localeFor, receivedOn, sinceArrival, todayISO } from '../utils/format';
-import { telHref, mailtoHref } from '../utils/contact';
+import { telHref, mailtoHref, whatsappHref } from '../utils/contact';
 import { whatsappSend } from '../services/whatsappService';
 import { toCsv } from '../utils/csv';
 import { inviteCustomer, portalPath } from '../services/portalService';
@@ -117,6 +117,16 @@ const defaultStageBorders: Record<string, string> = {
 const priorityColors: Record<string, string> = {
   hot: 'bg-red-100 text-red-700', warm: 'bg-amber-100 text-amber-700', cold: 'bg-zinc-100 text-zinc-500',
 };
+
+/** Priority as a 6px dot. A whole column spent on one of three words is the
+ *  kind of thing that forces a table to scroll sideways. */
+const priorityDot: Record<string, string> = {
+  hot: 'bg-red-500', warm: 'bg-amber-400', cold: 'bg-zinc-300',
+};
+
+/** "Priya Sharma" → "PS". Two letters carry the owner without a name column. */
+const initials = (name: string) =>
+  name.split(' ').filter(Boolean).map(n => n[0]).slice(0, 2).join('').toUpperCase() || '?';
 
 // Literal class map (Tailwind only generates classes it can see in source) —
 // pairs every palette color from the stage editor with its border variant
@@ -283,6 +293,23 @@ export default function Leads() {
   const stageCounts = useMemo(() => {
     const m: Record<string, number> = {};
     searchMatched.forEach(l => { m[l.stage] = (m[l.stage] ?? 0) + 1; });
+    return m;
+  }, [searchMatched]);
+
+  /**
+   * Per-row derived values for the list view, computed once per lead set.
+   *
+   * explainLeadScore builds a factors array on every call, and the list renders
+   * every filtered lead — so calling it inline meant rebuilding that array for
+   * the whole table on each keystroke in the search box. There is no pagination
+   * here, so "the whole table" is however many leads the workspace has.
+   */
+  const rowMeta = useMemo(() => {
+    const m = new Map<string, { score: number; band: { label: string; color: string } }>();
+    searchMatched.forEach(l => {
+      const { score } = explainLeadScore(l);
+      m.set(l.id, { score, band: leadScoreBand(score) });
+    });
     return m;
   }, [searchMatched]);
   const stageTotal = searchMatched.length;
@@ -921,14 +948,32 @@ export default function Leads() {
         {/* List View */}
         {viewMode === 'list' && (
           <div className="bg-white rounded-2xl border border-zinc-200/60 overflow-hidden">
-            <div className="overflow-x-auto">
-              {/* min-w so the extra Email column makes the table SCROLL rather
-                  than squeeze — without it every cell wrapped onto two lines
-                  and a seven-row table read as fourteen. */}
-              <table className="w-full min-w-[1080px]">
+            {/*
+              NO HORIZONTAL SCROLL, BY CONSTRUCTION.
+
+              The previous table gave each fact its own column — nine of them —
+              and needed a 1080px minimum, so on anything short of a wide
+              desktop you dragged sideways to read a lead. Two changes fix that
+              without losing anything:
+
+                1. Facts that belong together share a cell. Source, project and
+                   configuration sit under the name; the score and priority ride
+                   ON the name rather than beside it. Fewer columns, more facts.
+                2. What is left DEGRADES BY WIDTH instead of overflowing. Each
+                   column has the breakpoint below which it is the least useful
+                   thing on screen, and it hides there — never at the cost of
+                   Received, Lead or Stage, which stay at every size.
+
+              The row also gained things it never showed: the explainable lead
+              score, how long since anyone touched the lead, note count, the
+              configuration, a duplicate marker, and one-tap call / WhatsApp /
+              email that do not open the drawer.
+            */}
+            <div>
+              <table className="w-full table-fixed">
                 <thead>
                   <tr className="bg-zinc-50/50 border-b border-zinc-100">
-                    <th className="px-4 py-3 w-10">
+                    <th className="px-3 py-3 w-9">
                       <input
                         type="checkbox"
                         checked={allVisibleSelected}
@@ -937,32 +982,36 @@ export default function Leads() {
                         title="Select all visible leads"
                       />
                     </th>
-                    {/* Received leads the row. It is the column people scan
-                        first — how old is this enquiry — and it was last, off
-                        the right edge of a table that already scrolls. */}
-                    <th className="text-left px-5 py-3 text-xs font-semibold text-zinc-500 uppercase tracking-wider whitespace-nowrap">Received</th>
-                    <th className="text-left px-5 py-3 text-xs font-semibold text-zinc-500 uppercase tracking-wider">Name</th>
-                    <th className="text-left px-5 py-3 text-xs font-semibold text-zinc-500 uppercase tracking-wider">Phone</th>
-                    {/* Email was a second line inside a column called "Contact",
-                        so a lead with no address showed nothing and looked the
-                        same as a table that had no email in it at all. Its own
-                        column says which of the two it is. */}
-                    <th className="text-left px-5 py-3 text-xs font-semibold text-zinc-500 uppercase tracking-wider">Email</th>
-                    <th className="text-left px-5 py-3 text-xs font-semibold text-zinc-500 uppercase tracking-wider">Project</th>
-                    <th className="text-right px-5 py-3 text-xs font-semibold text-zinc-500 uppercase tracking-wider">Budget</th>
-                    <th className="text-center px-5 py-3 text-xs font-semibold text-zinc-500 uppercase tracking-wider">Stage</th>
-                    <th className="text-center px-5 py-3 text-xs font-semibold text-zinc-500 uppercase tracking-wider">Priority</th>
-                    <th className="text-left px-5 py-3 text-xs font-semibold text-zinc-500 uppercase tracking-wider">Assigned To</th>
+                    {/* Below sm there is not enough width for both a date and a
+                        readable name — the name lost, truncating to a single
+                        letter. Received hides here and its AGE moves into the
+                        Lead cell, so the fact survives even when the column
+                        cannot. */}
+                    <th className="text-left px-3 py-3 w-[104px] text-[11px] font-semibold text-zinc-500 uppercase tracking-wider hidden sm:table-cell">Received</th>
+                    <th className="text-left px-3 py-3 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">Lead</th>
+                    <th className="text-left px-3 py-3 w-[190px] text-[11px] font-semibold text-zinc-500 uppercase tracking-wider hidden md:table-cell">Contact</th>
+                    <th className="text-left px-3 py-3 w-[128px] text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">Stage</th>
+                    <th className="text-right px-3 py-3 w-[104px] text-[11px] font-semibold text-zinc-500 uppercase tracking-wider hidden sm:table-cell">Value</th>
+                    {/* px-2 and no tracking: "OWNER" is 46px of text and the
+                        column is 68px, so the usual px-3 + tracking-wider
+                        clipped its own header. */}
+                    <th className="text-left px-2 py-3 w-[68px] text-[11px] font-semibold text-zinc-500 uppercase hidden lg:table-cell" title="Assigned to">Owner</th>
+                    <th className="text-right px-3 py-3 w-[92px] text-[11px] font-semibold text-zinc-500 uppercase tracking-wider hidden xl:table-cell">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredLeads.map(lead => (
+                  {filteredLeads.map(lead => {
+                    const stage = leadStages.find(s => s.id === lead.stage);
+                    const { score, band } = rowMeta.get(lead.id) ?? { score: 0, band: leadScoreBand(0) };
+                    const noteCount = (notesMap.get(lead.id) || []).length;
+                    const owner = getUserName(lead.assignedTo);
+                    return (
                     <tr
                       key={lead.id}
                       onClick={() => setSelectedLead(lead)}
-                      className={`border-b border-zinc-50 hover:bg-zinc-50/50 transition-colors cursor-pointer ${selectedIds.has(lead.id) ? 'bg-indigo-50/40' : ''}`}
+                      className={`group border-b border-zinc-50 hover:bg-zinc-50/50 transition-colors cursor-pointer ${selectedIds.has(lead.id) ? 'bg-indigo-50/40' : ''}`}
                     >
-                      <td className="px-4 py-3.5" onClick={e => e.stopPropagation()}>
+                      <td className="px-3 py-3" onClick={e => e.stopPropagation()}>
                         <input
                           type="checkbox"
                           checked={selectedIds.has(lead.id)}
@@ -970,57 +1019,111 @@ export default function Leads() {
                           className="h-4 w-4 rounded border-zinc-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
                         />
                       </td>
-                      <td className="px-5 py-3.5 whitespace-nowrap">
-                        <p className="text-sm text-zinc-700">{receivedOn(lead.enquiredAt ?? lead.createdAt, appLocale)}</p>
-                        <p className="text-[11px] text-zinc-400">{sinceArrival(lead.enquiredAt ?? lead.createdAt)}</p>
+
+                      {/* Received — date on top, age underneath. */}
+                      <td className="px-3 py-3 align-top hidden sm:table-cell">
+                        <p className="text-[13px] text-zinc-700 leading-tight">{receivedOn(lead.enquiredAt ?? lead.createdAt, appLocale).split(',')[0]}</p>
+                        <p className="text-[11px] text-zinc-400 leading-tight mt-0.5">{sinceArrival(lead.enquiredAt ?? lead.createdAt)}</p>
                       </td>
-                      <td className="px-5 py-3.5">
-                        <p className="text-sm font-semibold text-zinc-900 whitespace-nowrap">{lead.name}</p>
-                        <p className="text-[11px] text-zinc-500 mt-0.5 whitespace-nowrap">Source: {lead.source}</p>
+
+                      {/* Lead — name with its priority and score, then where it
+                          came from and what it wants. Four facts, one column. */}
+                      <td className="px-3 py-3 align-top min-w-0">
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span
+                            className={`h-1.5 w-1.5 rounded-full shrink-0 ${priorityDot[lead.priority] ?? 'bg-zinc-300'}`}
+                            title={`${lead.priority} priority`}
+                          />
+                          <span className="text-[13px] font-semibold text-zinc-900 truncate" title={lead.name}>{lead.name}</span>
+                          <span
+                            className={`shrink-0 text-[10px] font-bold px-1.5 py-0.5 rounded ${band.color}`}
+                            title={`Lead score ${score}/100 — ${band.label}. Open the lead for the breakdown.`}
+                          >{score}</span>
+                          {lead.duplicateOf && (
+                            <span className="shrink-0" title="Created despite matching an existing lead">
+                              <GitMerge className="h-3 w-3 text-amber-500" />
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-[11px] text-zinc-400 leading-tight mt-0.5 truncate">
+                          {/* The age rejoins the row here on mobile, where the
+                              Received column is gone. */}
+                          <span className="sm:hidden">{sinceArrival(lead.enquiredAt ?? lead.createdAt)} · </span>
+                          {[lead.source, lead.project, lead.configuration].filter(Boolean).join(' · ')}
+                        </p>
                       </td>
-                      <td className="px-5 py-3.5" onClick={e => e.stopPropagation()}>
-                        <a href={telHref(lead.phone)} className="text-sm text-zinc-700 hover:text-indigo-600 hover:underline block whitespace-nowrap">{lead.phone}</a>
-                      </td>
-                      <td className="px-5 py-3.5" onClick={e => e.stopPropagation()}>
+
+                      {/* Contact — both channels, both tappable, neither
+                          opening the drawer. */}
+                      <td className="px-3 py-3 align-top hidden md:table-cell" onClick={e => e.stopPropagation()}>
+                        <a href={telHref(lead.phone)} className="text-[13px] text-zinc-700 hover:text-indigo-600 hover:underline block truncate">{lead.phone}</a>
                         {lead.email ? (
-                          <a
-                            href={mailtoHref(lead.email)}
-                            title={lead.email}
-                            className="text-sm text-zinc-700 hover:text-indigo-600 hover:underline block max-w-[15rem] truncate"
-                          >{lead.email}</a>
+                          <a href={mailtoHref(lead.email)} title={lead.email} className="text-[11px] text-zinc-400 hover:text-indigo-600 hover:underline block truncate mt-0.5">{lead.email}</a>
                         ) : (
-                          // Says the address is missing rather than leaving a
-                          // blank cell that reads as a broken column.
-                          <span className="text-xs text-zinc-300">—</span>
+                          <span className="text-[11px] text-zinc-300 block mt-0.5">no email</span>
                         )}
                       </td>
-                      <td className="px-5 py-3.5 text-sm text-zinc-700 whitespace-nowrap">{lead.project}</td>
-                      <td className="px-5 py-3.5 text-sm font-semibold text-zinc-900 text-right">
-                        {formatCurrency(lead.budget, currency)}
-                      </td>
-                      <td className="px-5 py-3.5 text-center">
-                        <span className={`inline-block text-[11px] font-semibold px-2.5 py-1 rounded-full ${stageBorder(lead.stage)} bg-opacity-10 text-opacity-100 ${
-                          lead.stage === 'new' ? 'bg-blue-500 text-blue-700 border border-blue-200' :
-                          lead.stage === 'booked' ? 'bg-emerald-500 text-emerald-700 border border-emerald-200' :
-                          lead.stage === 'lost' ? 'bg-red-500 text-red-700 border border-red-200' :
-                          'bg-zinc-500 text-zinc-700 border border-zinc-200'
-                        }`}>
-                          {leadStages.find(s => s.id === lead.stage)?.label || lead.stage}
+
+                      {/* Stage — and how long since anybody touched it, which is
+                          the number that decides whether to call today. */}
+                      <td className="px-3 py-3 align-top">
+                        <span className={`inline-block text-[11px] font-semibold px-2 py-0.5 rounded-full max-w-full truncate ${
+                          lead.stage === 'new' ? 'bg-blue-50 text-blue-700 border border-blue-200' :
+                          lead.stage === 'booked' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' :
+                          lead.stage === 'lost' ? 'bg-red-50 text-red-700 border border-red-200' :
+                          'bg-zinc-100 text-zinc-600 border border-zinc-200'
+                        }`} title={lead.stage === 'lost' && lead.lostReason ? `Lost: ${lead.lostReason}` : undefined}>
+                          {stage?.label || lead.stage}
                         </span>
+                        <p className="text-[11px] text-zinc-400 leading-tight mt-1 truncate">
+                          {lead.lastContact ? `touched ${sinceArrival(lead.lastContact)}` : 'never contacted'}
+                        </p>
                       </td>
-                      <td className="px-5 py-3.5 text-center">
-                        <span className={`inline-block text-[10px] font-semibold px-2 py-0.5 rounded-full capitalize ${priorityColors[lead.priority]}`}>
-                          {lead.priority}
-                        </span>
+
+                      {/* Value — budget, with the note count under it so a lead
+                          with history is visible without opening it. */}
+                      <td className="px-3 py-3 align-top text-right hidden sm:table-cell">
+                        <p className="text-[13px] font-semibold text-zinc-900">{formatCurrency(lead.budget, currency)}</p>
+                        {noteCount > 0 && (
+                          <p className="text-[11px] text-zinc-400 leading-tight mt-0.5">{noteCount} note{noteCount === 1 ? '' : 's'}</p>
+                        )}
                       </td>
-                      <td className="px-5 py-3.5 text-sm text-zinc-700 whitespace-nowrap">
-                        {getUserName(lead.assignedTo)}
+
+                      {/* Owner — initials. The full name is one hover away and
+                          costs a fifth of the width. */}
+                      <td className="px-2 py-3 align-top hidden lg:table-cell">
+                        <span
+                          className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-indigo-50 text-[10px] font-bold text-indigo-700"
+                          title={owner}
+                        >{initials(owner)}</span>
+                      </td>
+
+                      {/* Actions — reach the lead without opening it first. */}
+                      <td className="px-3 py-3 align-top hidden xl:table-cell" onClick={e => e.stopPropagation()}>
+                        <div className="flex items-center justify-end gap-0.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
+                          <a href={telHref(lead.phone)} title={`Call ${lead.phone}`} aria-label={`Call ${lead.name}`}
+                             className="p-1.5 rounded-lg text-zinc-400 hover:text-indigo-600 hover:bg-indigo-50">
+                            <Phone className="h-3.5 w-3.5" />
+                          </a>
+                          <a href={whatsappHref(lead.phone)} target="_blank" rel="noopener noreferrer"
+                             title="WhatsApp" aria-label={`WhatsApp ${lead.name}`}
+                             className="p-1.5 rounded-lg text-zinc-400 hover:text-emerald-600 hover:bg-emerald-50">
+                            <MessageCircle className="h-3.5 w-3.5" />
+                          </a>
+                          {lead.email && (
+                            <a href={mailtoHref(lead.email)} title={`Email ${lead.email}`} aria-label={`Email ${lead.name}`}
+                               className="p-1.5 rounded-lg text-zinc-400 hover:text-indigo-600 hover:bg-indigo-50">
+                              <Mail className="h-3.5 w-3.5" />
+                            </a>
+                          )}
+                        </div>
                       </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                   {filteredLeads.length === 0 && (
                     <tr>
-                      <td colSpan={9} className="text-center py-12 text-zinc-400">
+                      <td colSpan={8} className="text-center py-12 text-zinc-400">
                         <Users className="h-10 w-10 text-zinc-300 mx-auto mb-2" />
                         <p className="text-sm">No leads match the filters</p>
                       </td>

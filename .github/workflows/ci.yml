@@ -1,0 +1,242 @@
+# Build, migrate, and run every verification suite against a real PostgreSQL.
+#
+# Not mocks. The things this codebase gets wrong are row-level security
+# policies, permission grants and transaction boundaries — none of which a
+# mocked database can be wrong about. The suites talk to a real Postgres and a
+# real HTTP server, which is the only configuration where a broken RLS policy
+# actually shows up.
+#
+# This exists because a change to MFA silently broke five unrelated suites, and
+# nothing noticed until they were run by hand.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  # A newer push makes an in-flight run irrelevant. Cancel rather than queue.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Typecheck and build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npm ci --prefix server
+
+      - name: Typecheck the SPA
+        run: npx tsc --noEmit
+
+      - name: Typecheck the API
+        run: npx tsc --noEmit --project server/tsconfig.json
+
+      # The SPA's unit tests. Everything below this job runs against the API;
+      # until these existed, client-side LOGIC had no coverage at all — which is
+      # how a lead score that ranked a site visit below a qualification, and a
+      # currency formatter that threw on a missing figure and took a whole page
+      # down, both reached production.
+      - name: Test the SPA
+        run: npm test
+
+      # VITE_API_URL is what makes the build server-authoritative. Without it
+      # the bundle is the browser-only build, which BuildGuard now refuses to
+      # run — but catching it here is better than catching it on a VPS.
+      - name: Build the SPA in API mode
+        run: VITE_API_URL=/ npm run build
+
+      - name: Fail if the build came out in browser-only mode
+        run: |
+          if grep -q 'This build has no backend' dist/index.html && \
+             ! grep -q 'friendly_crm_api_url' dist/index.html; then
+            echo "::error::dist was built without VITE_API_URL"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          retention-days: 7
+
+  verify:
+    name: Verification suites
+    runs-on: ubuntu-latest
+    # ~12 minutes of wall clock: the auth routes are rate limited to 5/min and
+    # the suites pace themselves around it rather than measuring the limiter.
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: erp_test
+        ports: ['5433:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_ADMIN_URL: postgres://postgres:postgres@localhost:5433/erp_test
+      DATABASE_URL: postgres://app_user:app_user_pw@localhost:5433/erp_test
+      DATABASE_PLATFORM_URL: postgres://app_platform:app_platform_pw@localhost:5433/erp_test
+      # 48 characters, and not the placeholder — env.ts refuses to boot on either.
+      JWT_SECRET: ci-only-secret-not-used-anywhere-real-0123456789ab
+      PORT: 4055
+      # No SMTP on a runner; codes go to the log, which is what verify-mfa reads.
+      MAIL_TRANSPORT: console
+      # The WhatsApp suite runs its own mock gateway; a real URL here would make
+      # "gateway not configured" tests reach out to something.
+      EVOLUTION_API_URL: ''
+      EVOLUTION_API_KEY: ''
+      WHATSAPP_WORKER_INTERVAL_MS: 10000
+      # Seventeen suites sign in one after another. The production cap of five
+      # attempts per address per minute would fail every suite past the first,
+      # for reasons unrelated to what they test. Raised HERE ONLY.
+      AUTH_RATE_LIMIT_MAX: 200
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - run: npm ci --prefix server
+
+      # The runtime roles the migrations grant to. app_user is RLS-bound;
+      # app_platform is BYPASSRLS and must never be handed to a request handler.
+      - name: Create the database roles
+        run: |
+          psql "$DATABASE_ADMIN_URL" -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE app_user      LOGIN PASSWORD 'app_user_pw';
+          CREATE ROLE app_platform  LOGIN PASSWORD 'app_platform_pw' BYPASSRLS;
+          SQL
+
+      - name: Migrate
+        run: npx tsx scripts/migrate.ts
+        working-directory: server
+
+      - name: Bootstrap the permissions catalog
+        run: npx tsx scripts/seed.ts
+        working-directory: server
+        env:
+          ADMIN_EMAIL: ci@erptest.local
+          ADMIN_PASSWORD: ci-bootstrap-password-not-reused
+
+      - name: Seed the fixtures the suites expect
+        run: node scripts/seed-test-fixtures.mjs
+        working-directory: server
+
+      - name: Start the API
+        run: |
+          npx tsx src/index.ts &
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:4055/api/health && break
+            sleep 2
+          done
+          curl -sf http://localhost:4055/api/health || { echo "::error::API did not start"; exit 1; }
+        working-directory: server
+
+      # Isolation first: if tenant separation is broken, nothing below matters.
+      - run: node scripts/verify-rls.mjs
+        working-directory: server
+      - run: node scripts/verify-hardening.mjs
+        working-directory: server
+      - run: node scripts/verify-booking-cascade.mjs
+        working-directory: server
+      - run: node scripts/verify-lead-merge.mjs
+        working-directory: server
+      - run: node scripts/verify-golive.mjs
+        working-directory: server
+      - run: node scripts/verify-writes.mjs
+        working-directory: server
+      - run: node scripts/verify-portal.mjs
+        working-directory: server
+      - run: node scripts/verify-accounts.mjs
+        working-directory: server
+      - run: node scripts/verify-landbd.mjs
+        working-directory: server
+      - run: node scripts/verify-whatsapp.mjs
+        working-directory: server
+      - run: node scripts/verify-mfa.mjs
+        working-directory: server
+      - run: node scripts/verify-role-hierarchy.mjs
+        working-directory: server
+      - run: node scripts/verify-ratelimit.mjs
+        working-directory: server
+      - run: node scripts/verify-production-readiness.mjs
+        working-directory: server
+      - run: node scripts/verify-revocation.mjs
+        working-directory: server
+      - run: node scripts/verify-public-capture.mjs
+        working-directory: server
+      - run: node scripts/verify-notifications.mjs
+        working-directory: server
+      - run: node scripts/verify-demand-letters.mjs
+        working-directory: server
+      - run: node scripts/verify-rera-escrow.mjs
+        working-directory: server
+      - run: node scripts/verify-site-visits.mjs
+        working-directory: server
+      - run: node scripts/verify-leasing.mjs
+        working-directory: server
+
+      # Signs in as every role and checks each reaches its own modules and no
+      # others. Needs a workspace with one account per role, which is exactly
+      # what the demo seeder builds — so it seeds first rather than sharing the
+      # fixtures the other suites create and tear down.
+      #
+      # The test fixtures are re-run too, deliberately. Twenty suites have
+      # touched the shared platform accounts by this point — verify-mfa turns
+      # a second factor ON and leaves it on — and this suite signs in as those
+      # accounts. Re-seeding restores them (the seeder's ON CONFLICT resets
+      # active and mfa_email_enabled) so a role failure here means a role
+      # failure, not an inherited side effect from step nineteen.
+      - name: Restore the shared fixtures
+        run: node scripts/seed-test-fixtures.mjs
+        working-directory: server
+      - name: Seed a workspace with one account per role
+        run: node scripts/seed-demo-workspace.mjs
+        working-directory: server
+        env:
+          SEED_DB_URL: postgres://postgres:postgres@localhost:5433/erp_test
+      - run: node scripts/verify-role-logins.mjs
+        working-directory: server
+
+  secrets:
+    name: No secrets in the tree
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      # A real key was committed once and only caught by hand before a push.
+      - name: Scan for committed credentials
+        run: |
+          fail=0
+          if git ls-files | grep -E '(^|/)\.env$'; then
+            echo "::error::a .env file is tracked"; fail=1
+          fi
+          # Long hex strings next to a key-ish name, in files that should only
+          # ever carry placeholders.
+          if git grep -nIE '(API_KEY|SECRET|PASSWORD|TOKEN)[[:space:]]*[:=][[:space:]]*['"'"'"]?[A-Za-z0-9+/]{32,}' \
+               -- deploy/ server/src/ src/ | grep -vE 'CHANGE_ME|example|\$\{|process\.env|placeholder'; then
+            echo "::error::a literal credential looks committed"; fail=1
+          fi
+          exit $fail

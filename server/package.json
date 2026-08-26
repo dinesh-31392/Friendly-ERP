@@ -37,7 +37,8 @@
     "verify:files": "node scripts/verify-file-storage.mjs",
     "verify:pdf": "node scripts/verify-demand-pdf.mjs",
     "verify:costsheets": "node scripts/verify-cost-sheets.mjs",
-    "verify:cancellations": "node scripts/verify-cancellations.mjs"
+    "verify:cancellations": "node scripts/verify-cancellations.mjs",
+    "verify:metrics": "node scripts/verify-metrics.mjs"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",

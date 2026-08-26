@@ -177,6 +177,9 @@ jobs:
 
       - name: Cancellation refunds — including the negative one
         run: node scripts/verify-cancellations.mjs
+
+      - name: Metrics — bounded cardinality, and health that can fail
+        run: node scripts/verify-metrics.mjs
         working-directory: server
       - run: node scripts/verify-portal.mjs
         working-directory: server

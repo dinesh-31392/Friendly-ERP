@@ -2,6 +2,7 @@ import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
 import multipart from '@fastify/multipart';
+import { installMetrics } from './metrics.js';
 import rateLimit from '@fastify/rate-limit';
 import { randomUUID } from 'node:crypto';
 import { env } from './env.js';
@@ -63,6 +64,11 @@ const app = Fastify({ logger: true, trustProxy: 1 });
 // Security headers on every API response (nosniff, frame-deny, HSTS, no-referrer).
 // CSP is left to nginx, which serves the HTML the browser actually renders.
 await app.register(helmet, { contentSecurityPolicy: false });
+
+// Attached BEFORE the routes so its hooks see every request, including the
+// ones that never reach a handler. Called directly rather than registered:
+// see installMetrics for why a plugin context would have observed nothing.
+await installMetrics(app);
 
 /**
  * Multipart, for the document upload route.

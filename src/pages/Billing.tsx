@@ -2,12 +2,14 @@ import { useState, useMemo, useEffect } from 'react';
 import {
   IndianRupee, Download, Filter, Search, CheckCircle, Clock, AlertTriangle,
   Plus, X, Trash2, Receipt, Landmark, PiggyBank, ArrowUpRight, ShieldCheck, Send, Bell, Scale,
+  FileText, Loader2,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { getByTenant, logAudit } from '../services/db';
 import {
   isApiEnabled, apiGetInvoices, apiCreateInvoice, apiUpdateInvoice, apiDeleteInvoice,
   apiGetDemandLetters, apiGetDemandsDue, apiIssueDemandLetter, apiSettleDemandLetter, apiRemindDemandLetter,
+  apiDemandLetterPdf,
   apiGetReraPosition, apiAllocateEscrow,
   type ApiDemandLetter, type ApiDemandDue, type ApiReraPosition,
 } from '../services/apiClient';
@@ -114,6 +116,28 @@ export default function Billing() {
    * so a role that can open Billing can always at least read these.
    */
   const [demands, setDemands] = useState<ApiDemandLetter[]>([]);
+  const [pdfBusy, setPdfBusy] = useState<string | null>(null);
+
+  /**
+   * Open a demand letter as the document it becomes once it leaves here.
+   *
+   * A new tab rather than a download: collections reads the letter before
+   * sending it, and a file that lands in Downloads unread is a file that gets
+   * sent unread. The object URL is revoked on a timer — revoking immediately
+   * closes the tab that was just opened.
+   */
+  const openLetterPdf = async (id: string) => {
+    setPdfBusy(id);
+    try {
+      const { url } = await apiDemandLetterPdf(id);
+      window.open(url, '_blank', 'noopener,noreferrer');
+      window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Could not generate the letter');
+    } finally {
+      setPdfBusy(null);
+    }
+  };
   const [demandsDue, setDemandsDue] = useState<ApiDemandDue[]>([]);
   const [reraPosition, setReraPosition] = useState<ApiReraPosition[]>([]);
   useEffect(() => {
@@ -1002,6 +1026,21 @@ export default function Billing() {
                     <div className="text-right">
                       <p className="text-sm font-semibold text-zinc-900">{formatCurrency(l.totalAmount, currency)}</p>
                       <p className="text-[11px] text-zinc-400">incl. {formatCurrency(l.interestAmount, currency)} interest</p>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      {/* Outside the manage/issued gate on purpose: a settled
+                          letter still has to be produced for a dispute, and
+                          reading one is not the same act as raising it. */}
+                      <button
+                        onClick={() => openLetterPdf(l.id)}
+                        disabled={pdfBusy === l.id}
+                        className="flex items-center gap-1 px-2.5 py-1.5 border border-zinc-200 rounded-lg text-[11px] font-semibold text-zinc-600 hover:bg-zinc-50 disabled:opacity-50"
+                        title="Open the letter as a PDF"
+                      >
+                        {pdfBusy === l.id
+                          ? <Loader2 className="h-3 w-3 animate-spin" />
+                          : <FileText className="h-3 w-3" />} PDF
+                      </button>
                     </div>
                     {canManage && l.status === 'issued' && (
                       <div className="flex items-center gap-1.5">

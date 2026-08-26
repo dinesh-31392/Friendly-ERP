@@ -1881,6 +1881,25 @@ export async function apiRemindDemandLetter(id: string): Promise<ApiDemandLetter
   return res.demandLetter;
 }
 
+/**
+ * The demand letter as the document the buyer receives.
+ *
+ * Fetched rather than linked, for the same reason as document downloads: the
+ * session is a Bearer token, and a browser-initiated navigation carries no
+ * Authorization header. Returns an object URL the caller must revoke.
+ */
+export async function apiDemandLetterPdf(id: string): Promise<{ url: string; filename: string }> {
+  const res = await fetch(`${getApiUrl()}/api/demand-letters/${id}/pdf`, {
+    headers: { ...(getApiToken() ? { Authorization: `Bearer ${getApiToken()}` } : {}) },
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Could not generate the letter (${res.status})`);
+  }
+  const match = /filename="([^"]+)"/i.exec(res.headers.get('Content-Disposition') ?? '');
+  return { url: URL.createObjectURL(await res.blob()), filename: match?.[1] ?? 'demand-letter.pdf' };
+}
+
 // ── RERA & escrow (migration 042) ────────────────────────────────────────────
 //
 // The seventy per cent designated-account obligation, made countable. This

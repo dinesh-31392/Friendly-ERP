@@ -34,7 +34,8 @@
     "verify:rera": "node scripts/verify-rera-escrow.mjs",
     "verify:visits": "node scripts/verify-site-visits.mjs",
     "verify:logins": "node scripts/verify-role-logins.mjs",
-    "verify:files": "node scripts/verify-file-storage.mjs"
+    "verify:files": "node scripts/verify-file-storage.mjs",
+    "verify:pdf": "node scripts/verify-demand-pdf.mjs"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",
@@ -47,11 +48,13 @@
     "fastify": "^5.1.0",
     "jsonwebtoken": "^9.0.2",
     "nodemailer": "^9.0.5",
+    "pdfkit": "^0.20.1",
     "pg": "^8.13.1"
   },
   "devDependencies": {
     "@types/jsonwebtoken": "^9.0.7",
     "@types/node": "^22.10.0",
+    "@types/pdfkit": "^0.17.6",
     "@types/pg": "^8.11.10",
     "tsx": "^4.19.2",
     "typescript": "^5.9.3"

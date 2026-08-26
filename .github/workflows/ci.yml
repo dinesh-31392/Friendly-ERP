@@ -168,6 +168,9 @@ jobs:
 
       - name: File storage — upload, isolation, and the ways it could leak
         run: node scripts/verify-file-storage.mjs
+
+      - name: Demand letters render as PDFs a buyer can be served
+        run: node scripts/verify-demand-pdf.mjs
         working-directory: server
       - run: node scripts/verify-portal.mjs
         working-directory: server

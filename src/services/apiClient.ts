@@ -1900,6 +1900,107 @@ export async function apiDemandLetterPdf(id: string): Promise<{ url: string; fil
   return { url: URL.createObjectURL(await res.blob()), filename: match?.[1] ?? 'demand-letter.pdf' };
 }
 
+// ── Cancellation & refund (migration 051) ────────────────────────────────────
+//
+// `refundAmount` is SIGNED. Negative means the buyer owes the builder — which
+// happens whenever the agreed forfeiture exceeds what the buyer had paid, and
+// is the case an implementation that clamps at zero silently writes off. The
+// server also sends `buyerOwes` so a client cannot miss the sign by formatting
+// it away.
+
+export type CancellationStatus = 'requested' | 'approved' | 'refunded' | 'rejected';
+export type CancellationReason =
+  'buyer_finance' | 'buyer_personal' | 'project_delay' | 'builder_initiated' | 'transfer' | 'other';
+
+export interface ApiCancellation {
+  id: string;
+  bookingId: string;
+  requestedOn: string;
+  cancelledOn: string | null;
+  reasonCategory: CancellationReason;
+  reason: string;
+  consideration: number;
+  totalReceived: number;
+  forfeiturePct: number;
+  forfeitureAmount: number;
+  otherDeductions: number;
+  gstRemitted: number;
+  gstRefundable: boolean;
+  refundAmount: number;
+  buyerOwes: boolean;
+  status: CancellationStatus;
+  approvedAt: string | null;
+  refundedOn: string | null;
+  refundReference: string;
+  createdAt: string;
+  customerName?: string;
+  unitCode?: string;
+  projectName?: string;
+}
+
+export interface ApiRefundPreview {
+  consideration: number;
+  totalReceived: number;
+  forfeiturePct: number;
+  forfeitureAmount: number;
+  otherDeductions: number;
+  gstRemitted: number;
+  gstRefundable: boolean;
+  refundAmount: number;
+  buyerOwes: boolean;
+  customerName?: string;
+  unitCode?: string;
+  projectName?: string;
+}
+
+export async function apiGetCancellations(status?: CancellationStatus): Promise<ApiCancellation[]> {
+  const res = await request<{ cancellations: ApiCancellation[] }>(
+    `/api/cancellations${status ? `?status=${status}` : ''}`);
+  return res.cancellations;
+}
+
+/** What a refund WOULD be, so the decision is made with the number visible. */
+export async function apiPreviewRefund(bookingId: string, opts: {
+  forfeiturePct?: number; otherDeductions?: number; gstRemitted?: number; gstRefundable?: boolean;
+} = {}): Promise<ApiRefundPreview> {
+  const q = new URLSearchParams();
+  for (const [k, v] of Object.entries(opts)) if (v !== undefined) q.set(k, String(v));
+  const res = await request<{ preview: ApiRefundPreview }>(
+    `/api/bookings/${bookingId}/cancellation-preview${q.toString() ? `?${q}` : ''}`);
+  return res.preview;
+}
+
+export async function apiCancelBooking(input: {
+  bookingId: string; reasonCategory?: CancellationReason; reason?: string;
+  forfeiturePct?: number; otherDeductions?: number; gstRemitted?: number; gstRefundable?: boolean;
+}): Promise<ApiCancellation> {
+  const res = await request<{ cancellation: ApiCancellation }>('/api/cancellations', {
+    method: 'POST', body: JSON.stringify(input),
+  });
+  return res.cancellation;
+}
+
+export async function apiSetCancellationStatus(
+  id: string, status: Exclude<CancellationStatus, 'requested'>, refundReference?: string,
+): Promise<ApiCancellation> {
+  const res = await request<{ cancellation: ApiCancellation }>(`/api/cancellations/${id}`, {
+    method: 'PATCH', body: JSON.stringify({ status, ...(refundReference ? { refundReference } : {}) }),
+  });
+  return res.cancellation;
+}
+
+export async function apiCancellationPdf(id: string): Promise<{ url: string; filename: string }> {
+  const res = await fetch(`${getApiUrl()}/api/cancellations/${id}/pdf`, {
+    headers: { ...(getApiToken() ? { Authorization: `Bearer ${getApiToken()}` } : {}) },
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Could not render the statement (${res.status})`);
+  }
+  const match = /filename="([^"]+)"/i.exec(res.headers.get('Content-Disposition') ?? '');
+  return { url: URL.createObjectURL(await res.blob()), filename: match?.[1] ?? 'refund-statement.pdf' };
+}
+
 // ── Cost sheets (migration 050) ──────────────────────────────────────────────
 //
 // The itemised statement a buyer decides on and takes to their bank. The tax

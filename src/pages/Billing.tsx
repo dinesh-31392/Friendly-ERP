@@ -2,7 +2,7 @@ import { useState, useMemo, useEffect } from 'react';
 import {
   IndianRupee, Download, Filter, Search, CheckCircle, Clock, AlertTriangle,
   Plus, X, Trash2, Receipt, Landmark, PiggyBank, ArrowUpRight, ShieldCheck, Send, Bell, Scale,
-  FileText, Loader2,
+  FileText, Loader2, Undo2,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { getByTenant, logAudit } from '../services/db';
@@ -10,6 +10,7 @@ import {
   isApiEnabled, apiGetInvoices, apiCreateInvoice, apiUpdateInvoice, apiDeleteInvoice,
   apiGetDemandLetters, apiGetDemandsDue, apiIssueDemandLetter, apiSettleDemandLetter, apiRemindDemandLetter,
   apiDemandLetterPdf,
+  apiGetCancellations, apiSetCancellationStatus, apiCancellationPdf, type ApiCancellation,
   apiGetReraPosition, apiAllocateEscrow,
   type ApiDemandLetter, type ApiDemandDue, type ApiReraPosition,
 } from '../services/apiClient';
@@ -39,7 +40,7 @@ const billStatusColors: Record<VendorBillStatus, string> = {
 
 const invoiceTypes = ['Booking Token', '1st Installment', '2nd Installment', '3rd Installment', 'Final Payment', 'Quotation', 'Refund'];
 
-type Tab = 'receivables' | 'payables' | 'budgets' | 'compliance' | 'demands' | 'rera';
+type Tab = 'receivables' | 'payables' | 'budgets' | 'compliance' | 'demands' | 'rera' | 'refunds';
 
 export default function Billing() {
   const { user, tenant, hasPermission } = useAuth();
@@ -140,6 +141,7 @@ export default function Billing() {
   };
   const [demandsDue, setDemandsDue] = useState<ApiDemandDue[]>([]);
   const [reraPosition, setReraPosition] = useState<ApiReraPosition[]>([]);
+  const [refunds, setRefunds] = useState<ApiCancellation[]>([]);
   useEffect(() => {
     if (!isApiEnabled()) return;
     let cancelled = false;
@@ -147,6 +149,7 @@ export default function Billing() {
     apiGetDemandLetters().then(set(setDemands)).catch(() => {});
     apiGetDemandsDue().then(set(setDemandsDue)).catch(() => {});
     apiGetReraPosition().then(set(setReraPosition)).catch(() => {});
+    apiGetCancellations().then(set(setRefunds)).catch(() => {});
     return () => { cancelled = true; };
   }, [tenantId, refreshKey]);
 
@@ -547,6 +550,9 @@ export default function Billing() {
     // Compliance they need no extra gate here.
     { id: 'demands' as Tab, label: 'Demands', icon: Send },
     { id: 'rera' as Tab, label: 'RERA & Escrow', icon: Scale },
+    // Approving and paying a refund is a finance act; RAISING the cancellation
+    // is a sales one and lives on the booking. Deliberately different hands.
+    { id: 'refunds' as Tab, label: 'Refunds', icon: Undo2 },
   ];
   const filingsDue = filings.filter(f => f.status === 'pending' && new Date(f.dueDate).getTime() <= Date.now() + 14 * 86400000).length;
 
@@ -1075,6 +1081,103 @@ export default function Billing() {
           bank transactions entered, so a project whose designated account has
           never been reconciled shows its whole obligation as a shortfall,
           which is the correct thing to show. */}
+      {tab === 'refunds' && (
+        <div className="bg-white rounded-2xl border border-zinc-200/60 overflow-hidden">
+          <div className="px-5 py-4 border-b border-zinc-100">
+            <h3 className="font-semibold text-zinc-900">Cancellations &amp; refunds</h3>
+            <p className="text-xs text-zinc-500 mt-0.5">
+              Raised on the booking by sales; approved and paid here. A negative figure means the
+              forfeiture exceeded what the buyer had paid — the balance is owed TO the developer.
+            </p>
+          </div>
+          {refunds.length === 0 ? (
+            <div className="py-14 text-center">
+              <Undo2 className="h-10 w-10 text-zinc-200 mx-auto mb-2" />
+              <p className="text-sm font-medium text-zinc-600">No cancellations</p>
+              <p className="text-xs text-zinc-400 mt-0.5">Cancel a booking to raise one.</p>
+            </div>
+          ) : (
+            <div className="divide-y divide-zinc-50">
+              {refunds.map(c => (
+                <div key={c.id} className="px-5 py-3 flex items-center gap-4 flex-wrap">
+                  <div className="flex-1 min-w-[180px]">
+                    <p className="text-sm font-medium text-zinc-900">{c.customerName ?? 'Purchaser'}</p>
+                    <p className="text-[11px] text-zinc-400">
+                      {[c.projectName, c.unitCode].filter(Boolean).join(' — ') || '—'}
+                      {' · '}forfeited {c.forfeiturePct}% of {formatCurrency(c.consideration, currency)}
+                      {!c.gstRefundable && c.gstRemitted > 0 && ` · GST ${formatCurrency(c.gstRemitted, currency)} withheld`}
+                    </p>
+                  </div>
+                  <div className="text-right">
+                    {/* The sign is the point. A refund and a shortfall must not
+                        look the same on a screen someone approves from. */}
+                    <p className={`text-sm font-semibold ${c.buyerOwes ? 'text-red-600' : 'text-zinc-900'}`}>
+                      {formatCurrency(Math.abs(c.refundAmount), currency)}
+                    </p>
+                    <p className="text-[11px] text-zinc-400">
+                      {c.buyerOwes ? 'owed BY the buyer' : 'refundable'} · received {formatCurrency(c.totalReceived, currency)}
+                    </p>
+                  </div>
+                  <span className={`text-[11px] font-semibold px-2.5 py-1 rounded-full capitalize ${
+                    c.status === 'refunded' ? 'bg-emerald-50 text-emerald-700'
+                    : c.status === 'approved' ? 'bg-blue-50 text-blue-700'
+                    : c.status === 'rejected' ? 'bg-red-50 text-red-600'
+                    : 'bg-amber-50 text-amber-700'}`}>{c.status}</span>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      onClick={async () => {
+                        setPdfBusy(c.id);
+                        try {
+                          const { url } = await apiCancellationPdf(c.id);
+                          window.open(url, '_blank', 'noopener,noreferrer');
+                          window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+                        } catch (e) { toast.error(e instanceof Error ? e.message : 'Could not render the statement'); }
+                        finally { setPdfBusy(null); }
+                      }}
+                      disabled={pdfBusy === c.id}
+                      className="flex items-center gap-1 px-2.5 py-1.5 border border-zinc-200 rounded-lg text-[11px] font-semibold text-zinc-600 hover:bg-zinc-50 disabled:opacity-50"
+                    >
+                      {pdfBusy === c.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <FileText className="h-3 w-3" />} Statement
+                    </button>
+                    {canManage && c.status === 'requested' && (
+                      <>
+                        <button
+                          onClick={async () => {
+                            try { await apiSetCancellationStatus(c.id, 'approved'); toast.success('Approved'); refresh(); }
+                            catch (e) { toast.error(e instanceof Error ? e.message : 'Could not approve'); }
+                          }}
+                          className="px-2.5 py-1.5 bg-indigo-600 text-white rounded-lg text-[11px] font-semibold hover:bg-indigo-700"
+                        >Approve</button>
+                        <button
+                          onClick={async () => {
+                            try { await apiSetCancellationStatus(c.id, 'rejected'); toast.success('Rejected'); refresh(); }
+                            catch (e) { toast.error(e instanceof Error ? e.message : 'Could not reject'); }
+                          }}
+                          className="px-2.5 py-1.5 border border-zinc-200 rounded-lg text-[11px] font-semibold text-zinc-600 hover:bg-zinc-50"
+                        >Reject</button>
+                      </>
+                    )}
+                    {canManage && c.status === 'approved' && (
+                      <button
+                        onClick={async () => {
+                          // The reference is what makes the payout traceable in
+                          // a bank statement; the server refuses a payout without one.
+                          const ref = prompt('Payment reference (UTR, cheque number, or transaction id):')?.trim();
+                          if (!ref) return;
+                          try { await apiSetCancellationStatus(c.id, 'refunded', ref); toast.success('Refund recorded'); refresh(); }
+                          catch (e) { toast.error(e instanceof Error ? e.message : 'Could not record the refund'); }
+                        }}
+                        className="px-2.5 py-1.5 bg-emerald-600 text-white rounded-lg text-[11px] font-semibold hover:bg-emerald-700"
+                      >Record payout</button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {tab === 'rera' && (
         <div className="bg-white rounded-2xl border border-zinc-200/60 overflow-hidden">
           <div className="px-5 py-4 border-b border-zinc-100 flex items-center justify-between gap-3 flex-wrap">

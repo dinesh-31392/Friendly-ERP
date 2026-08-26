@@ -36,7 +36,8 @@
     "verify:logins": "node scripts/verify-role-logins.mjs",
     "verify:files": "node scripts/verify-file-storage.mjs",
     "verify:pdf": "node scripts/verify-demand-pdf.mjs",
-    "verify:costsheets": "node scripts/verify-cost-sheets.mjs"
+    "verify:costsheets": "node scripts/verify-cost-sheets.mjs",
+    "verify:cancellations": "node scripts/verify-cancellations.mjs"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",

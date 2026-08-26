@@ -1900,6 +1900,93 @@ export async function apiDemandLetterPdf(id: string): Promise<{ url: string; fil
   return { url: URL.createObjectURL(await res.blob()), filename: match?.[1] ?? 'demand-letter.pdf' };
 }
 
+// ── Broker payout runs (migration 052) ───────────────────────────────────────
+//
+// GST is ADDED to a payout; TDS under 194-H is SUBTRACTED from it, and is
+// computed on the brokerage rather than the GST-inclusive figure. The threshold
+// is aggregate across the financial year, so the run that crosses it carries
+// the catch-up for everything paid earlier without deduction. All of that is
+// server-side; nothing here recomputes a figure.
+
+export type PayoutRunStatus = 'draft' | 'approved' | 'paid' | 'cancelled';
+
+export interface ApiPayoutLine {
+  id: string;
+  brokerId: string;
+  brokerName?: string;
+  agencyName?: string;
+  reraId?: string;
+  grossAmount: number;
+  gstPct: number;
+  gstAmount: number;
+  fyPriorGross: number;
+  fyPriorTds: number;
+  tdsPct: number;
+  tdsAmount: number;
+  netAmount: number;
+}
+
+export interface ApiPayoutRun {
+  id: string;
+  runNo: number;
+  periodStart: string;
+  periodEnd: string;
+  fyStart: string;
+  tdsPct: number;
+  tdsThreshold: number;
+  status: PayoutRunStatus;
+  grossTotal: number;
+  gstTotal: number;
+  tdsTotal: number;
+  netTotal: number;
+  paidOn: string | null;
+  paymentReference: string;
+  approvedAt: string | null;
+  createdAt: string;
+  lines: ApiPayoutLine[];
+}
+
+export async function apiGetPayoutRuns(): Promise<ApiPayoutRun[]> {
+  const res = await request<{ runs: ApiPayoutRun[] }>('/api/broker-payouts');
+  return res.runs;
+}
+
+export async function apiGetPayoutRun(id: string): Promise<ApiPayoutRun> {
+  const res = await request<{ run: ApiPayoutRun }>(`/api/broker-payouts/${id}`);
+  return res.run;
+}
+
+export async function apiBuildPayoutRun(input: {
+  periodStart: string; periodEnd: string;
+  tdsPct?: number; tdsThreshold?: number; defaultGstPct?: number;
+}): Promise<ApiPayoutRun> {
+  const res = await request<{ run: ApiPayoutRun }>('/api/broker-payouts', {
+    method: 'POST', body: JSON.stringify(input),
+  });
+  return res.run;
+}
+
+export async function apiSetPayoutRunStatus(
+  id: string, status: Exclude<PayoutRunStatus, 'draft'>, paymentReference?: string,
+): Promise<ApiPayoutRun> {
+  const res = await request<{ run: ApiPayoutRun }>(`/api/broker-payouts/${id}`, {
+    method: 'PATCH', body: JSON.stringify({ status, ...(paymentReference ? { paymentReference } : {}) }),
+  });
+  return res.run;
+}
+
+export async function apiPayoutRunPdf(id: string): Promise<{ url: string; filename: string }> {
+  const res = await fetch(`${getApiUrl()}/api/broker-payouts/${id}/pdf`, {
+    headers: { ...(getApiToken() ? { Authorization: `Bearer ${getApiToken()}` } : {}) },
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Could not render the advice (${res.status})`);
+  }
+  const match = /filename="([^"]+)"/i.exec(res.headers.get('Content-Disposition') ?? '');
+  return { url: URL.createObjectURL(await res.blob()), filename: match?.[1] ?? 'brokerage-advice.pdf' };
+}
+
 // ── Cancellation & refund (migration 051) ────────────────────────────────────
 //
 // `refundAmount` is SIGNED. Negative means the buyer owes the builder — which

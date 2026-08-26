@@ -1900,6 +1900,120 @@ export async function apiDemandLetterPdf(id: string): Promise<{ url: string; fil
   return { url: URL.createObjectURL(await res.blob()), filename: match?.[1] ?? 'demand-letter.pdf' };
 }
 
+// ── Possession & snags (migration 053) ───────────────────────────────────────
+//
+// `blockingSnags` counts only MAJOR and CRITICAL open snags, and `duesNow` is
+// computed live from receipts. Both gate acceptance server-side; the client
+// shows them so a site office knows before it asks, not after it is refused.
+
+export type PossessionStatus = 'offered' | 'inspected' | 'accepted' | 'withdrawn';
+export type SnagSeverity = 'minor' | 'major' | 'critical';
+export type SnagStatus = 'open' | 'in_progress' | 'resolved' | 'rejected';
+export type SnagCategory =
+  'civil' | 'plumbing' | 'electrical' | 'carpentry' | 'painting' | 'flooring' | 'fittings' | 'other';
+
+export interface ApiSnag {
+  id: string;
+  possessionId: string;
+  raisedOn: string;
+  location: string;
+  category: SnagCategory;
+  description: string;
+  severity: SnagSeverity;
+  status: SnagStatus;
+  assignedTo: string | null;
+  assignedName?: string;
+  targetDate: string | null;
+  resolvedOn: string | null;
+  resolution: string;
+  photoFileId: string | null;
+}
+
+export interface ApiPossession {
+  id: string;
+  bookingId: string;
+  status: PossessionStatus;
+  ocReference: string;
+  ocDatedOn: string | null;
+  offeredOn: string;
+  inspectedOn: string | null;
+  acceptedOn: string | null;
+  duesOutstanding: number;
+  receivedBy: string;
+  notes: string;
+  createdAt: string;
+  customerName?: string;
+  unitCode?: string;
+  projectName?: string;
+  blockingSnags: number;
+  duesNow?: number;
+  snags: ApiSnag[];
+}
+
+export async function apiGetPossessions(status?: PossessionStatus): Promise<ApiPossession[]> {
+  const res = await request<{ possessions: ApiPossession[] }>(
+    `/api/possessions${status ? `?status=${status}` : ''}`);
+  return res.possessions;
+}
+
+export async function apiGetPossession(id: string): Promise<ApiPossession> {
+  const res = await request<{ possession: ApiPossession }>(`/api/possessions/${id}`);
+  return res.possession;
+}
+
+export async function apiOfferPossession(input: {
+  bookingId: string; ocReference: string; ocDatedOn?: string; notes?: string;
+}): Promise<ApiPossession> {
+  const res = await request<{ possession: ApiPossession }>('/api/possessions', {
+    method: 'POST', body: JSON.stringify(input),
+  });
+  return res.possession;
+}
+
+/** `force` overrides the snag and dues gates. The server then freezes the
+ *  outstanding balance onto the record and prints it on the acknowledgement. */
+export async function apiUpdatePossession(id: string, input: {
+  status?: Exclude<PossessionStatus, 'offered'>; receivedBy?: string; notes?: string; force?: boolean;
+}): Promise<ApiPossession> {
+  const res = await request<{ possession: ApiPossession }>(`/api/possessions/${id}`, {
+    method: 'PATCH', body: JSON.stringify(input),
+  });
+  return res.possession;
+}
+
+export async function apiRaiseSnag(possessionId: string, input: {
+  description: string; location?: string; category?: SnagCategory; severity?: SnagSeverity;
+  assignedTo?: string; targetDate?: string; photoFileId?: string;
+}): Promise<ApiSnag> {
+  const res = await request<{ snag: ApiSnag }>(`/api/possessions/${possessionId}/snags`, {
+    method: 'POST', body: JSON.stringify(input),
+  });
+  return res.snag;
+}
+
+export async function apiUpdateSnag(id: string, input: {
+  status?: SnagStatus; resolution?: string; assignedTo?: string; targetDate?: string; severity?: SnagSeverity;
+}): Promise<ApiSnag> {
+  const res = await request<{ snag: ApiSnag }>(`/api/snags/${id}`, {
+    method: 'PATCH', body: JSON.stringify(input),
+  });
+  return res.snag;
+}
+
+/** The offer of possession, or the handover acknowledgement once the keys are
+ *  gone — the server picks by status, because they are different documents. */
+export async function apiPossessionPdf(id: string): Promise<{ url: string; filename: string }> {
+  const res = await fetch(`${getApiUrl()}/api/possessions/${id}/pdf`, {
+    headers: { ...(getApiToken() ? { Authorization: `Bearer ${getApiToken()}` } : {}) },
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Could not render the letter (${res.status})`);
+  }
+  const match = /filename="([^"]+)"/i.exec(res.headers.get('Content-Disposition') ?? '');
+  return { url: URL.createObjectURL(await res.blob()), filename: match?.[1] ?? 'possession.pdf' };
+}
+
 // ── Broker payout runs (migration 052) ───────────────────────────────────────
 //
 // GST is ADDED to a payout; TDS under 194-H is SUBTRACTED from it, and is

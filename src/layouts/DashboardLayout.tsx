@@ -48,6 +48,9 @@ const NAV_GROUPS: NavGroupDef[] = [
       // Sits beside Bookings because it is the step before one: a buyer is
       // priced, then booked, and the accepted sheet is what the booking cites.
       { to: '/cost-sheets', icon: FileSpreadsheet, label: 'Cost Sheets', permission: 'view_bookings' },
+      // The other end of the same lifecycle: priced, booked, and eventually
+      // handed over. Same permission, because it is the same desk.
+      { to: '/possession', icon: KeyRound, label: 'Possession', permission: 'view_bookings' },
       // The rental portfolio sits with sales: the desk that fills a unit papers it.
       { to: '/leasing', icon: KeyRound, label: 'Leasing', permission: 'view_leasing' },
       { to: '/sales-performance', icon: TrendingUp, label: 'Sales Performance', permission: 'view_sales_performance' },

@@ -41,6 +41,7 @@ const PAGES: [string, () => Promise<{ default: React.ComponentType }>][] = [
   ['SiteVisits',  () => import('../SiteVisits')],
   ['Bookings',    () => import('../Bookings')],
   ['CostSheets',  () => import('../CostSheets')],
+  ['Possession',  () => import('../Possession')],
   ['Billing',     () => import('../Billing')],
   ['Accounts',    () => import('../Accounts')],
   ['HR',          () => import('../HR')],

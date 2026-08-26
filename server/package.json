@@ -39,7 +39,8 @@
     "verify:costsheets": "node scripts/verify-cost-sheets.mjs",
     "verify:cancellations": "node scripts/verify-cancellations.mjs",
     "verify:metrics": "node scripts/verify-metrics.mjs",
-    "verify:payouts": "node scripts/verify-broker-payouts.mjs"
+    "verify:payouts": "node scripts/verify-broker-payouts.mjs",
+    "verify:possession": "node scripts/verify-possession.mjs"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",

@@ -183,6 +183,9 @@ jobs:
 
       - name: Broker payouts — 194-H across the financial year
         run: node scripts/verify-broker-payouts.mjs
+
+      - name: Possession — the two gates before the keys change hands
+        run: node scripts/verify-possession.mjs
         working-directory: server
       - run: node scripts/verify-portal.mjs
         working-directory: server

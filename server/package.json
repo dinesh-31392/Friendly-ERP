@@ -33,11 +33,13 @@
     "verify:demands": "node scripts/verify-demand-letters.mjs",
     "verify:rera": "node scripts/verify-rera-escrow.mjs",
     "verify:visits": "node scripts/verify-site-visits.mjs",
-    "verify:logins": "node scripts/verify-role-logins.mjs"
+    "verify:logins": "node scripts/verify-role-logins.mjs",
+    "verify:files": "node scripts/verify-file-storage.mjs"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",
     "@fastify/helmet": "^13.1.0",
+    "@fastify/multipart": "^10.1.1",
     "@fastify/rate-limit": "^11.1.0",
     "@types/nodemailer": "^8.0.1",
     "argon2": "^0.41.1",

@@ -399,6 +399,9 @@ export interface Document {
   size: string;
   status: string;
   url: string;
+  /** Set when real bytes are stored with us, null when the row is only a link
+   *  to somewhere else. The two need different open/download behaviour. */
+  fileId?: string | null;
 }
 
 export interface Reminder {

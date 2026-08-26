@@ -1,6 +1,7 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
+import multipart from '@fastify/multipart';
 import rateLimit from '@fastify/rate-limit';
 import { randomUUID } from 'node:crypto';
 import { env } from './env.js';
@@ -60,6 +61,20 @@ const app = Fastify({ logger: true, trustProxy: 1 });
 // Security headers on every API response (nosniff, frame-deny, HSTS, no-referrer).
 // CSP is left to nginx, which serves the HTML the browser actually renders.
 await app.register(helmet, { contentSecurityPolicy: false });
+
+/**
+ * Multipart, for the document upload route.
+ *
+ * `attachFieldsToBody` is deliberately OFF: it buffers the whole file into
+ * memory before a handler sees it, which turns a 25 MB upload into 25 MB of
+ * heap per concurrent request. The route consumes `req.file()` as a stream and
+ * writes it to disk as it arrives, so the process holds a chunk, not a file.
+ *
+ * The size ceiling is set per-request by the route (MAX_UPLOAD_BYTES) so the
+ * transport aborts an oversized body mid-flight instead of accepting it and
+ * rejecting it afterwards.
+ */
+await app.register(multipart);
 
 /**
  * Rate limiting, keyed by WHO rather than by where they are sitting.

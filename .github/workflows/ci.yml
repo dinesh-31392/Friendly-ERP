@@ -165,6 +165,9 @@ jobs:
       - run: node scripts/verify-golive.mjs
         working-directory: server
       - run: node scripts/verify-writes.mjs
+
+      - name: File storage — upload, isolation, and the ways it could leak
+        run: node scripts/verify-file-storage.mjs
         working-directory: server
       - run: node scripts/verify-portal.mjs
         working-directory: server

@@ -452,6 +452,66 @@ export async function apiDeleteDocument(id: string): Promise<void> {
   await request<void>(`/api/documents/${id}`, { method: 'DELETE' });
 }
 
+/**
+ * Upload a real file into the register.
+ *
+ * Not routed through `request()`: that helper sets `Content-Type:
+ * application/json`, and a multipart body needs the browser to set the header
+ * itself so it can append the boundary. Setting it by hand produces a body the
+ * server cannot parse.
+ *
+ * Metadata fields are appended BEFORE the file on purpose. The server reads the
+ * file as a stream and only sees the fields that arrived ahead of it; a field
+ * appended afterwards is silently absent, which would show up as every upload
+ * landing with a blank project.
+ */
+export async function apiUploadDocument(
+  file: File,
+  meta: { name?: string; type?: string; project?: string; date?: string; status?: string } = {},
+): Promise<Document> {
+  const form = new FormData();
+  for (const [k, v] of Object.entries(meta)) if (v) form.append(k, v);
+  form.append('file', file, file.name);
+
+  const res = await fetch(`${getApiUrl()}/api/documents/upload`, {
+    method: 'POST',
+    headers: { ...(getApiToken() ? { Authorization: `Bearer ${getApiToken()}` } : {}) },
+    body: form,
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Upload failed (${res.status})`);
+  }
+  return (await res.json()).document;
+}
+
+/**
+ * Fetch a stored file and hand back an object URL.
+ *
+ * A plain `<a href>` cannot be used: the session is a Bearer token in a header,
+ * not a cookie, so a browser-initiated navigation to the download URL arrives
+ * unauthenticated and 401s. The file has to be fetched with the header attached
+ * and then handed to the browser as a blob.
+ *
+ * The caller MUST revokeObjectURL when done — each one pins the whole file in
+ * memory until the tab closes, and a user who previews twenty drawings would
+ * otherwise hold twenty of them.
+ */
+export async function apiDownloadDocument(id: string): Promise<{ url: string; filename: string }> {
+  const res = await fetch(`${getApiUrl()}/api/documents/${id}/file`, {
+    headers: { ...(getApiToken() ? { Authorization: `Bearer ${getApiToken()}` } : {}) },
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Download failed (${res.status})`);
+  }
+  const disposition = res.headers.get('Content-Disposition') ?? '';
+  const utf8 = /filename\*=UTF-8''([^;]+)/i.exec(disposition);
+  const plain = /filename="([^"]+)"/i.exec(disposition);
+  const filename = utf8 ? decodeURIComponent(utf8[1]) : plain?.[1] ?? 'download';
+  return { url: URL.createObjectURL(await res.blob()), filename };
+}
+
 // ── Campaigns + templates (server-backed module) ─────────────────────────────
 
 export async function apiGetCampaigns(): Promise<Campaign[]> {

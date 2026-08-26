@@ -171,6 +171,9 @@ jobs:
 
       - name: Demand letters render as PDFs a buyer can be served
         run: node scripts/verify-demand-pdf.mjs
+
+      - name: Cost sheets — per-line GST, and 194-IA at the threshold
+        run: node scripts/verify-cost-sheets.mjs
         working-directory: server
       - run: node scripts/verify-portal.mjs
         working-directory: server

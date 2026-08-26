@@ -1900,6 +1900,116 @@ export async function apiDemandLetterPdf(id: string): Promise<{ url: string; fil
   return { url: URL.createObjectURL(await res.blob()), filename: match?.[1] ?? 'demand-letter.pdf' };
 }
 
+// ── Cost sheets (migration 050) ──────────────────────────────────────────────
+//
+// The itemised statement a buyer decides on and takes to their bank. The tax
+// arithmetic lives entirely on the server — GST is per line and never on a
+// statutory levy, TDS under 194-IA is a DEDUCTION from the builder's receipt
+// rather than an addition to the buyer's cost — so nothing here recomputes a
+// total. The client sends what the line IS and renders what comes back.
+
+export type CostSheetSection = 'consideration' | 'statutory' | 'deposit' | 'other';
+export type CostSheetBasis = 'per_sqft' | 'lump_sum' | 'pct_of_consideration';
+export type CostSheetStatus = 'draft' | 'issued' | 'accepted' | 'superseded' | 'cancelled';
+
+export interface ApiCostSheetLine {
+  id?: string;
+  sequence?: number;
+  section: CostSheetSection;
+  label: string;
+  basis: CostSheetBasis;
+  rate: number;
+  quantity?: number;
+  amount?: number;
+  gstPct: number;
+  gstAmount?: number;
+}
+
+export interface ApiCostSheetTotals {
+  consideration: number; statutory: number; deposits: number; other: number;
+  gst: number; gross: number; tds: number; netToBuilder: number; payableByBuyer: number;
+}
+
+export interface ApiCostSheet {
+  id: string;
+  unitId: string | null;
+  leadId: string | null;
+  bookingId: string | null;
+  sheetNo: number;
+  status: CostSheetStatus;
+  areaSqft: number;
+  baseRate: number;
+  tdsPct: number;
+  tdsThreshold: number;
+  validUntil: string | null;
+  notes: string;
+  createdAt: string;
+  issuedAt: string | null;
+  unitCode?: string;
+  projectName?: string;
+  customerName?: string;
+  lines: ApiCostSheetLine[];
+  totals?: ApiCostSheetTotals;
+}
+
+export async function apiGetCostSheets(): Promise<ApiCostSheet[]> {
+  const res = await request<{ costSheets: ApiCostSheet[] }>('/api/cost-sheets');
+  return res.costSheets;
+}
+
+export async function apiGetCostSheet(id: string): Promise<ApiCostSheet> {
+  const res = await request<{ costSheet: ApiCostSheet }>(`/api/cost-sheets/${id}`);
+  return res.costSheet;
+}
+
+export async function apiCreateCostSheet(input: {
+  unitId?: string; leadId?: string; areaSqft?: number; baseRate?: number;
+  tdsPct?: number; tdsThreshold?: number; validUntil?: string; notes?: string;
+  lines?: Array<Pick<ApiCostSheetLine, 'section' | 'label' | 'basis' | 'rate' | 'gstPct'> & { quantity?: number }>;
+}): Promise<ApiCostSheet> {
+  const res = await request<{ costSheet: ApiCostSheet }>('/api/cost-sheets', {
+    method: 'POST', body: JSON.stringify(input),
+  });
+  return res.costSheet;
+}
+
+export async function apiSetCostSheetLines(
+  id: string,
+  lines: Array<Pick<ApiCostSheetLine, 'section' | 'label' | 'basis' | 'rate' | 'gstPct'> & { quantity?: number }>,
+): Promise<ApiCostSheet> {
+  const res = await request<{ costSheet: ApiCostSheet }>(`/api/cost-sheets/${id}/lines`, {
+    method: 'PUT', body: JSON.stringify({ lines }),
+  });
+  return res.costSheet;
+}
+
+export async function apiSetCostSheetStatus(
+  id: string, status: Exclude<CostSheetStatus, 'draft'>,
+): Promise<ApiCostSheet> {
+  const res = await request<{ costSheet: ApiCostSheet }>(`/api/cost-sheets/${id}`, {
+    method: 'PATCH', body: JSON.stringify({ status }),
+  });
+  return res.costSheet;
+}
+
+export async function apiDeleteCostSheet(id: string): Promise<void> {
+  await request<void>(`/api/cost-sheets/${id}`, { method: 'DELETE' });
+}
+
+/** The sheet as the buyer's bank reads it. Same Bearer-token reason as the
+ *  other PDF endpoints: it has to be fetched, not linked. */
+export async function apiCostSheetPdf(id: string): Promise<{ url: string; filename: string }> {
+  const res = await fetch(`${getApiUrl()}/api/cost-sheets/${id}/pdf`, {
+    headers: { ...(getApiToken() ? { Authorization: `Bearer ${getApiToken()}` } : {}) },
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Could not render the cost sheet (${res.status})`);
+  }
+  const match = /filename="([^"]+)"/i.exec(res.headers.get('Content-Disposition') ?? '');
+  return { url: URL.createObjectURL(await res.blob()), filename: match?.[1] ?? 'cost-sheet.pdf' };
+}
+
 // ── RERA & escrow (migration 042) ────────────────────────────────────────────
 //
 // The seventy per cent designated-account obligation, made countable. This

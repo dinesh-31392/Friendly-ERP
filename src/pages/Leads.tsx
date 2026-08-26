@@ -31,8 +31,11 @@ import {
 } from '../services/callService';
 import toast from 'react-hot-toast';
 
-function normalizePhone(phone: string): string {
-  return phone.replace(/\D/g, '').slice(-10);
+function normalizePhone(phone: string | undefined | null): string {
+  // Fed from CSV import rows as well as from leads, and a spreadsheet column
+  // can simply be blank — so this answers "no digits" rather than throwing and
+  // taking the import preview down with it.
+  return (phone ?? '').replace(/D/g, '').slice(-10);
 }
 
 
@@ -373,7 +376,7 @@ export default function Leads() {
   const duplicateGroups = useMemo(() => {
     const groups: Record<string, Lead[]> = {};
     leads.forEach(l => {
-      const key = normalizePhone(l.phone) || l.email.toLowerCase();
+      const key = normalizePhone(l.phone) || (l.email ?? '').toLowerCase();
       if (!key) return;
       groups[key] = groups[key] || [];
       groups[key].push(l);
@@ -493,7 +496,7 @@ export default function Leads() {
     const inPhone = normalizePhone(phone);
     const existing = leads.find(l =>
       (inPhone && normalizePhone(l.phone) === inPhone) ||
-      (email && l.email.toLowerCase() === email.toLowerCase())
+      (email && (l.email ?? '').toLowerCase() === email.toLowerCase())
     );
     if (existing) {
       if (!confirm(`A lead with this phone/email already exists ("${existing.name}"). Create anyway?`)) return;
@@ -660,7 +663,7 @@ export default function Leads() {
       return;
     }
     const existingPhones = new Set(allLeadsData.map(l => normalizePhone(l.phone)).filter(Boolean));
-    const existingEmails = new Set(allLeadsData.map(l => l.email.toLowerCase()).filter(Boolean));
+    const existingEmails = new Set(allLeadsData.map(l => (l.email ?? '').toLowerCase()).filter(Boolean));
     const valid: ImportRow[] = [];
     let invalid = 0, dupes = 0;
     rows.slice(1).forEach(r => {
@@ -912,7 +915,7 @@ export default function Leads() {
                             <div className="flex items-center gap-2.5">
                               <div className={`h-8 w-8 rounded-lg ${lead.priority === 'hot' ? 'bg-gradient-to-br from-red-100 to-orange-100' : 'bg-zinc-100'} flex items-center justify-center`}>
                                 <span className={`text-xs font-bold ${lead.priority === 'hot' ? 'text-orange-600' : 'text-zinc-500'}`}>
-                                  {lead.name.split(' ').map(n => n[0]).join('')}
+                                  {(lead.name ?? '?').split(' ').filter(Boolean).map(n => n[0]).join('') || '?'}
                                 </span>
                               </div>
                               <div>
@@ -1195,7 +1198,7 @@ export default function Leads() {
                   <div className="flex items-center gap-3">
                     <div className={`h-10 w-10 rounded-xl ${lead.priority === 'hot' ? 'bg-gradient-to-br from-red-100 to-orange-100' : 'bg-zinc-100'} flex items-center justify-center shrink-0`}>
                       <span className={`text-sm font-bold ${lead.priority === 'hot' ? 'text-orange-600' : 'text-zinc-500'}`}>
-                        {lead.name.split(' ').map(n => n[0]).join('')}
+                        {(lead.name ?? '?').split(' ').filter(Boolean).map(n => n[0]).join('') || '?'}
                       </span>
                     </div>
                     <div className="min-w-0">
@@ -1262,7 +1265,7 @@ export default function Leads() {
               <h3 className="font-semibold text-zinc-900 flex items-center gap-2">
                 <div className={`h-8 w-8 rounded-lg ${selectedLead.priority === 'hot' ? 'bg-gradient-to-br from-red-100 to-orange-100' : 'bg-zinc-100'} flex items-center justify-center`}>
                   <span className={`text-xs font-bold ${selectedLead.priority === 'hot' ? 'text-orange-600' : 'text-zinc-500'}`}>
-                    {selectedLead.name.split(' ').map(n => n[0]).join('')}
+                    {(selectedLead.name ?? '?').split(' ').filter(Boolean).map(n => n[0]).join('') || '?'}
                   </span>
                 </div>
                 <span className="truncate">{selectedLead.name}</span>
@@ -1387,7 +1390,7 @@ export default function Leads() {
                   className="w-full text-sm font-semibold bg-white border border-zinc-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
                 >
                   {allUsers.filter(u => u.role !== 'super_admin' && u.active).map(u => (
-                    <option key={u.id} value={u.id}>{u.name} ({u.role.replace('_', ' ')})</option>
+                    <option key={u.id} value={u.id}>{u.name ?? 'Unnamed'} ({(u.role ?? '').replace('_', ' ') || 'no role'})</option>
                   ))}
                 </select>
               </div>
@@ -1974,7 +1977,7 @@ export default function Leads() {
                     <label className="block text-xs font-semibold text-zinc-500 uppercase mb-1">Assign To</label>
                     <select name="assignedTo" defaultValue={userId} className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20">
                       {allUsers.filter(u => u.role !== 'super_admin' && u.active).map(u => (
-                        <option key={u.id} value={u.id}>{u.name} ({u.role.replace('_', ' ')})</option>
+                        <option key={u.id} value={u.id}>{u.name ?? 'Unnamed'} ({(u.role ?? '').replace('_', ' ') || 'no role'})</option>
                       ))}
                     </select>
                   </div>
@@ -2012,7 +2015,7 @@ export default function Leads() {
                     {group.map((lead, li) => (
                       <div key={lead.id} className="flex items-center gap-3 p-2.5 rounded-lg bg-zinc-50">
                         <div className="h-8 w-8 rounded-lg bg-white border border-zinc-200 flex items-center justify-center shrink-0">
-                          <span className="text-xs font-bold text-zinc-600">{lead.name.split(' ').map(n => n[0]).join('')}</span>
+                          <span className="text-xs font-bold text-zinc-600">{(lead.name ?? '?').split(' ').filter(Boolean).map(n => n[0]).join('') || '?'}</span>
                         </div>
                         <div className="flex-1 min-w-0">
                           <p className="text-sm font-semibold text-zinc-900">{lead.name} {li === 0 && <span className="text-[10px] text-indigo-500 font-normal bg-indigo-50 px-1.5 py-0.5 rounded">Primary</span>}</p>

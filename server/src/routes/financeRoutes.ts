@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { withTenantContext } from '../db.js';
 import { requireAuth } from '../auth.js';
+import { PAGE_QUERY, readPage, keysetWhere, takePage } from '../pagination.js';
 
 const UUID = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$';
 
@@ -191,14 +192,26 @@ export async function financeRoutes(app: FastifyInstance): Promise<void> {
 
   // ── Journal entries ────────────────────────────────────────────────────────
 
-  app.get('/api/journal-entries', { preHandler: requireAuth }, async (req, reply) =>
+  app.get<{ Querystring: { limit?: number; cursor?: string } }>(
+    '/api/journal-entries',
+    { preHandler: requireAuth, schema: { querystring: { type: 'object', properties: PAGE_QUERY } } },
+    async (req, reply) =>
     withTenantContext(req.ctx, async (db) => {
       // The books themselves — every posting the business has made. If any
       // endpoint in this file deserves the narrower key it is this one.
       const { rows: [{ allowed }] } = await db.query(`SELECT has_permission('view_accounts') AS allowed`);
       if (!allowed) return reply.code(403).send({ error: 'Missing permission: view_accounts' });
-      const { rows } = await db.query(`${JE_SELECT} ORDER BY je.entry_date DESC, je.created_at DESC`);
-      return { entries: rows.map(toApiJournalEntry) };
+      // The ledger never shrinks, so this is the read most certain to outgrow
+      // one response. Keyed on created_at: entry_date is the accounting date
+      // and can be back-dated, which would move a row between pages.
+      const page = readPage(req.query);
+      const ks = keysetWhere(page, 'je.created_at', 'je.id', 1);
+      const { rows } = await db.query(
+        `${JE_SELECT} ${ks.sql ? `WHERE ${ks.sql}` : ''}
+          ORDER BY je.created_at DESC, je.id DESC
+          LIMIT ${page.limit + 1}`, ks.params);
+      const out = takePage(rows, page, 'created_at');
+      return { entries: out.rows.map(toApiJournalEntry), nextCursor: out.nextCursor };
     }),
   );
 

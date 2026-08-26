@@ -2,8 +2,13 @@
 // On mobile these launch the actual app; on desktop they open the default
 // handler (e.g. WhatsApp Web, mail client).
 
-export function telHref(phone: string): string {
-  return `tel:${phone.replace(/[^+\d]/g, '')}`;
+// Every helper here takes a value straight off an API row, and phone and email
+// are both nullable in the schema. These run inline while a list renders, so an
+// absent number does not degrade one row — it throws mid-render and replaces the
+// whole page with an error boundary. Each one accepts an absent value and
+// returns a link that simply does nothing.
+export function telHref(phone?: string | null): string {
+  return `tel:${(phone ?? '').replace(/[^+\d]/g, '')}`;
 }
 
 /**
@@ -24,7 +29,7 @@ export function telHref(phone: string): string {
  * it in full. It raises the effort of casual copying; it does not stop a
  * determined user who can already read the record.
  */
-export function maskPhone(phone: string, visibleFromEnd = 4): string {
+export function maskPhone(phone?: string | null, visibleFromEnd = 4): string {
   if (!phone) return '';
   const chars = [...phone];
   let masked = 0;
@@ -34,18 +39,18 @@ export function maskPhone(phone: string, visibleFromEnd = 4): string {
   return chars.join('');
 }
 
-export function whatsappHref(phone: string, text?: string): string {
-  const digits = phone.replace(/\D/g, '');
+export function whatsappHref(phone?: string | null, text?: string): string {
+  const digits = (phone ?? '').replace(/\D/g, '');
   return `https://wa.me/${digits}${text ? `?text=${encodeURIComponent(text)}` : ''}`;
 }
 
-export function mailtoHref(email: string, subject?: string, body?: string): string {
+export function mailtoHref(email?: string | null, subject?: string, body?: string): string {
   // The recipient is attacker-controllable (a lead's email arrives from the
   // public microsite), so encode it — a raw value like
   // `a@b.com?cc=attacker@x.com` would otherwise inject extra mailto headers.
   // encodeURIComponent turns the `?` into %3F so it can't start a new query;
   // `@`→%40 stays valid for mail clients.
-  const to = encodeURIComponent(email.trim());
+  const to = encodeURIComponent((email ?? '').trim());
   const params = new URLSearchParams();
   if (subject) params.set('subject', subject);
   if (body) params.set('body', body);

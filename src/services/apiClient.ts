@@ -642,9 +642,38 @@ export async function apiUpdateAccount(id: string, patch: { name?: string; activ
   return res.account;
 }
 
+/**
+ * Follow a paginated endpoint's cursor until it runs out.
+ *
+ * The server bounds every growing list now, which is what stops one customer's
+ * ledger arriving as a single enormous response. The pages that consume these
+ * lists still filter and total client-side, so they need all of it — and
+ * silently handing them the first 200 rows would look exactly like data loss.
+ * This walks the cursor instead.
+ *
+ * The cap is a guard, not a limit anyone should reach: 200 a page over 50
+ * pages is 10,000 records. A workspace past that needs the LIST UI to page,
+ * not a bigger number here — so it stops and says so rather than looping.
+ */
+async function fetchAllPages<T>(
+  path: string, key: string, pageSize = 200, maxPages = 50,
+): Promise<T[]> {
+  const all: T[] = [];
+  let cursor: string | null = null;
+  for (let i = 0; i < maxPages; i++) {
+    const q = new URLSearchParams({ limit: String(pageSize) });
+    if (cursor) q.set('cursor', cursor);
+    const res = await request<Record<string, unknown>>(`${path}?${q}`);
+    all.push(...((res[key] as T[]) ?? []));
+    cursor = (res.nextCursor as string | null) ?? null;
+    if (!cursor) return all;
+  }
+  console.warn(`${path}: stopped after ${maxPages} pages — this list needs paging in the UI`);
+  return all;
+}
+
 export async function apiGetJournalEntries(): Promise<JournalEntry[]> {
-  const res = await request<{ entries: JournalEntry[] }>('/api/journal-entries');
-  return res.entries;
+  return fetchAllPages<JournalEntry>('/api/journal-entries', 'entries');
 }
 
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
@@ -978,7 +1007,10 @@ export interface ApiApprovalWorkflow { id: string; actionType: string; threshold
 export async function apiGetApprovalWorkflows(): Promise<ApiApprovalWorkflow[]> {
   return (await request<{ workflows: ApiApprovalWorkflow[] }>('/api/approval-workflows')).workflows;
 }
-export async function apiSaveApprovalWorkflow(input: { actionType: string; thresholdAmount?: number | null; approverRoleId: string }): Promise<ApiApprovalWorkflow> {
+/** approverRoleId is optional: omitted, the server keeps the approver already
+ *  on the rule, or defaults a new one to builder_admin. Setting a threshold and
+ *  choosing who signs off are two separate decisions. */
+export async function apiSaveApprovalWorkflow(input: { actionType: string; thresholdAmount?: number | null; approverRoleId?: string }): Promise<ApiApprovalWorkflow> {
   return (await request<{ workflow: ApiApprovalWorkflow }>('/api/approval-workflows', { method: 'PUT', body: JSON.stringify(input) })).workflow;
 }
 export async function apiDeleteApprovalWorkflow(actionType: string): Promise<void> {
@@ -1424,8 +1456,7 @@ export async function apiSaveChatbotConfig(cfg: Partial<ApiChatbotConfig>): Prom
 // the localStorage-only tables.
 
 export async function apiGetInvoices(): Promise<Invoice[]> {
-  const res = await request<{ invoices: Invoice[] }>('/api/invoices');
-  return res.invoices;
+  return fetchAllPages<Invoice>('/api/invoices', 'invoices');
 }
 
 export async function apiCreateInvoice(input: Partial<Invoice>): Promise<Invoice> {
@@ -1462,8 +1493,7 @@ function invoiceBody(i: Partial<Invoice>): Record<string, unknown> {
 }
 
 export async function apiGetTasks(): Promise<Task[]> {
-  const res = await request<{ tasks: Task[] }>('/api/crm-tasks');
-  return res.tasks;
+  return fetchAllPages<Task>('/api/crm-tasks', 'tasks');
 }
 
 export async function apiCreateTask(input: Partial<Task>): Promise<Task> {

@@ -881,12 +881,20 @@ export default function Settings() {
                       <input
                         type="number" min="0"
                         defaultValue={approvalRules[action]}
-                        onBlur={e => {
+                        onBlur={async e => {
                           const v = Number(e.target.value) || 0;
-                          if (v !== approvalRules[action]) {
-                            setApprovalThreshold(tenantId, action, v);
+                          if (v === approvalRules[action]) return;
+                          // Confirm only after the SERVER has it. This used to
+                          // report success on a write that never left the
+                          // browser, so the threshold applied on one machine
+                          // and nowhere else.
+                          try {
+                            await setApprovalThreshold(tenantId, action, v);
                             refresh();
                             toast.success(`${label} threshold updated`);
+                          } catch (err) {
+                            e.target.value = String(approvalRules[action]);
+                            toast.error(err instanceof Error ? err.message : 'Could not save the threshold');
                           }
                         }}
                         className="w-full mt-1.5 px-3 py-2 bg-zinc-50 border border-zinc-200 rounded-lg text-sm text-right font-semibold"

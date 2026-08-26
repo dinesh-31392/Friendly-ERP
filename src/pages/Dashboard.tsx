@@ -37,7 +37,8 @@ const iconMap: Record<string, React.ElementType> = {
 };
 
 /** "2026-08" → "Aug 2026". Payroll months are stored as YYYY-MM. */
-function monthLabel(month: string): string {
+function monthLabel(month: string | undefined): string {
+  if (!month) return '—';
   const [y, m] = month.split('-').map(Number);
   if (!y || !m) return month;
   return new Date(y, m - 1, 1).toLocaleDateString('en-IN', { month: 'short', year: 'numeric' });
@@ -394,7 +395,12 @@ export default function Dashboard() {
   const callerLens = ownLeadsOnly && !hasPermission('create_bookings');
   const contactedLeads = rangedLeads.filter(l => l.stage !== 'new' && l.stage !== 'lost').length;
   const today = todayKey();
-  const followUpsDue = tasks.filter(t => t.status !== 'completed' && t.dueDate.slice(0, 10) <= today).length;
+  // A task with NO due date is not overdue — it is undated. crm_tasks.due_date
+  // is nullable (its own query orders NULLS LAST) while the Task type declares
+  // it required, so this sliced undefined and took the dashboard down for any
+  // workspace holding one.
+  const followUpsDue = tasks.filter(
+    t => t.status !== 'completed' && !!t.dueDate && t.dueDate.slice(0, 10) <= today).length;
   const visitsBooked = tasks.filter(t => t.status !== 'completed' && t.category === 'visit').length;
 
   const kpiData: { label: string; value: string | number; change: number | null; icon: string }[] = [

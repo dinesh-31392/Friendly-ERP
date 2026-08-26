@@ -4,6 +4,7 @@ import * as authService from '../services/authService';
 import { isApiEnabled, apiLogin, apiVerifyLoginCode, isMfaChallenge, clearApiToken, apiLogout, getStoredApiSession } from '../services/apiClient';
 import { hydrateLedger } from '../services/accountsService';
 import { syncPipelineFromServer } from '../services/metaService';
+import { syncApprovalRules } from '../services/approvalService';
 import { initializeDatabase } from '../services/db';
 import { ensureBranchMigration } from '../services/branchService';
 import { isTrialExpired } from '../services/planService';
@@ -88,6 +89,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!isApiEnabled() || !tenant?.id) return;
     syncPipelineFromServer(tenant.id).catch(() => { /* keep the cached pipeline */ });
+  }, [tenant?.id]);
+
+  // Approval thresholds. needsApproval() is called inline while rows render, so
+  // it has to answer synchronously from a cache — this is what makes that cache
+  // the SERVER's answer rather than a browser-local invention. Until it existed,
+  // a threshold set in Settings never left the device that set it.
+  //
+  // A failure keeps whatever is cached rather than reverting to defaults:
+  // silently loosening an approval gate is the worst available failure mode.
+  useEffect(() => {
+    if (!isApiEnabled() || !tenant?.id) return;
+    syncApprovalRules(tenant.id).catch(() => { /* keep the cached thresholds */ });
   }, [tenant?.id]);
 
   const verifyLoginCode = useCallback(async (challengeId: string, code: string) => {

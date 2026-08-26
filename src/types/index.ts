@@ -1451,6 +1451,12 @@ export interface ScoreFactor { label: string; points: number; detail: string }
 export function explainLeadScore(lead: {
   stage: LeadStage; priority: Priority; budget: number; lastContact: string; source: string;
 }, pipeline?: { id: string }[]): { score: number; factors: ScoreFactor[]; nextBestAction: string } {
+  // A lead is a row from the API, not a value this module constructed, and a
+  // row may predate a column or arrive from a partial payload. The score runs
+  // inline while the list renders, so one absent `stage` took the whole Leads
+  // page down behind an error boundary rather than degrading one row.
+  const stage: LeadStage = lead.stage ?? 'new';
+  const source: string = lead.source ?? 'Unknown';
   const factors: ScoreFactor[] = [];
   const stageScores: Record<string, number> = {
     new: 5, contacted: 12, qualified: 20, visit_scheduled: 28, negotiation: 36, booked: 40, lost: 0,
@@ -1473,12 +1479,12 @@ export function explainLeadScore(lead: {
    */
   const positional = (): number => {
     const ids = (pipeline ?? []).map(s => s.id).filter(id => id !== 'booked' && id !== 'lost');
-    const i = ids.indexOf(lead.stage);
+    const i = ids.indexOf(stage);
     if (i < 0 || ids.length < 2) return 18;          // genuinely unknown — old behaviour
     return Math.round(5 + (i / (ids.length - 1)) * 31);   // 5 … 36, matching the named map
   };
-  const stagePts = stageScores[lead.stage] ?? positional();
-  factors.push({ label: 'Pipeline stage', points: stagePts, detail: `At "${lead.stage.replace('_', ' ')}" — ${stagePts >= 28 ? 'deep in the funnel' : stagePts >= 12 ? 'progressing' : 'early stage'}` });
+  const stagePts = stageScores[stage] ?? positional();
+  factors.push({ label: 'Pipeline stage', points: stagePts, detail: `At "${stage.replace('_', ' ')}" — ${stagePts >= 28 ? 'deep in the funnel' : stagePts >= 12 ? 'progressing' : 'early stage'}` });
 
   const priorityScores: Record<Priority, number> = { hot: 25, warm: 15, cold: 5 };
   const prioPts = priorityScores[lead.priority] ?? 0;
@@ -1499,14 +1505,14 @@ export function explainLeadScore(lead: {
   factors.push({ label: 'Engagement recency', points: recencyPts, detail: recencyDetail });
 
   const strongSources = ['Referral', 'Walk-in', 'Website'];
-  const srcPts = strongSources.includes(lead.source) ? 5 : 2;
-  factors.push({ label: 'Lead source', points: srcPts, detail: `${lead.source}${strongSources.includes(lead.source) ? ' — high-intent channel' : ''}` });
+  const srcPts = strongSources.includes(source) ? 5 : 2;
+  factors.push({ label: 'Lead source', points: srcPts, detail: `${source}${strongSources.includes(source) ? ' — high-intent channel' : ''}` });
 
   const score = Math.min(100, factors.reduce((s, f) => s + f.points, 0));
 
   // Human-actionable recommendation derived from the weakest lever
   let nextBestAction = 'Keep nurturing on the current plan.';
-  if (lead.stage !== 'booked' && lead.stage !== 'lost') {
+  if (stage !== 'booked' && stage !== 'lost') {
     if (daysSince > 7) nextBestAction = 'Reach out now — engagement has gone cold and recency is your biggest score drag.';
     else if (stagePts < 20) nextBestAction = 'Qualify budget & timeline to move this out of the early funnel.';
     // Matched on the stage KEY containing "visit" rather than one exact
@@ -1514,8 +1520,8 @@ export function explainLeadScore(lead: {
     // provisioned one calls it site_visit, so the exact check never fired for a
     // real workspace and told reps to "book a site visit" for leads that had
     // already been to site.
-    else if (/visit/.test(lead.stage)) nextBestAction = 'Confirm the site visit and prep a personalized unit shortlist.';
-    else if (lead.stage === 'negotiation') nextBestAction = 'Send the payment plan and push for a booking token.';
+    else if (/visit/.test(stage)) nextBestAction = 'Confirm the site visit and prep a personalized unit shortlist.';
+    else if (stage === 'negotiation') nextBestAction = 'Send the payment plan and push for a booking token.';
     else nextBestAction = 'Book a site visit while interest is warm.';
   }
   return { score, factors, nextBestAction };

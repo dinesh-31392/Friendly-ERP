@@ -201,7 +201,7 @@ export default function Brokers() {
               <div className="flex items-start justify-between mb-3">
                 <div className="flex items-center gap-3">
                   <div className="h-11 w-11 rounded-xl bg-gradient-to-br from-indigo-50 to-violet-50 flex items-center justify-center">
-                    <span className="text-sm font-bold text-indigo-600">{b.name.split(' ').map(n => n[0]).join('')}</span>
+                    <span className="text-sm font-bold text-indigo-600">{(b.name ?? '').split(' ').filter(Boolean).map(n => n[0]).join('').slice(0, 2) || '?'}</span>
                   </div>
                   <div>
                     <p className="text-sm font-semibold text-zinc-900">{b.name}</p>

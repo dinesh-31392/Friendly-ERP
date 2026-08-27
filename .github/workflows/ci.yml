@@ -189,6 +189,18 @@ jobs:
 
       - name: Scheduler — two instances, one winner
         run: node scripts/verify-scheduler.mjs
+
+      - name: Retention and erasure — erase, redact, or retain with a reason
+        run: node scripts/verify-privacy.mjs
+
+      - name: Tally export — the sign convention, and masters before vouchers
+        run: node scripts/verify-tally.mjs
+
+      - name: Payment gateway — raw-body signatures and idempotency
+        run: node scripts/verify-gateway.mjs
+
+      - name: Portal lead ingest — per-portal mapping and dedupe
+        run: node scripts/verify-lead-ingest.mjs
         working-directory: server
       - run: node scripts/verify-portal.mjs
         working-directory: server

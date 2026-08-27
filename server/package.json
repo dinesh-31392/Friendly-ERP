@@ -41,7 +41,11 @@
     "verify:metrics": "node scripts/verify-metrics.mjs",
     "verify:payouts": "node scripts/verify-broker-payouts.mjs",
     "verify:possession": "node scripts/verify-possession.mjs",
-    "verify:scheduler": "node scripts/verify-scheduler.mjs"
+    "verify:scheduler": "node scripts/verify-scheduler.mjs",
+    "verify:privacy": "node scripts/verify-privacy.mjs",
+    "verify:tally": "node scripts/verify-tally.mjs",
+    "verify:gateway": "node scripts/verify-gateway.mjs",
+    "verify:ingest": "node scripts/verify-lead-ingest.mjs"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",

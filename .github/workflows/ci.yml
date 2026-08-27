@@ -186,6 +186,9 @@ jobs:
 
       - name: Possession — the two gates before the keys change hands
         run: node scripts/verify-possession.mjs
+
+      - name: Scheduler — two instances, one winner
+        run: node scripts/verify-scheduler.mjs
         working-directory: server
       - run: node scripts/verify-portal.mjs
         working-directory: server

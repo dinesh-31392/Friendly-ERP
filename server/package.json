@@ -40,7 +40,8 @@
     "verify:cancellations": "node scripts/verify-cancellations.mjs",
     "verify:metrics": "node scripts/verify-metrics.mjs",
     "verify:payouts": "node scripts/verify-broker-payouts.mjs",
-    "verify:possession": "node scripts/verify-possession.mjs"
+    "verify:possession": "node scripts/verify-possession.mjs",
+    "verify:scheduler": "node scripts/verify-scheduler.mjs"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",

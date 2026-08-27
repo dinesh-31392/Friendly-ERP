@@ -63,17 +63,27 @@ const account = async (w, code, name, type) => (await admin.query(
   `INSERT INTO chart_of_accounts (tenant_id, code, name, account_type)
    VALUES ($1,$2,$3,$4) RETURNING id`, [w.tenantId, code, name, type])).rows[0].id;
 
-/** A journal entry with its lines, at a chosen status. */
+/**
+ * A journal entry with its lines, at a chosen status.
+ *
+ * Always created as a DRAFT and promoted afterwards. `trg_je_balanced_entry`
+ * refuses a posted entry with fewer than two lines, so inserting it as posted
+ * and adding lines after fails on the header insert — the ledger is protecting
+ * itself, and the fixture has to work the way the application does.
+ */
 async function entry(w, { date, reference, narration, status, lines }) {
   const je = (await admin.query(
     `INSERT INTO journal_entries (tenant_id, entry_date, reference, narration, status)
-     VALUES ($1,$2::date,$3,$4,$5) RETURNING id`,
-    [w.tenantId, date, reference, narration, status])).rows[0];
+     VALUES ($1,$2::date,$3,$4,'draft') RETURNING id`,
+    [w.tenantId, date, reference, narration])).rows[0];
   for (const l of lines) {
     await admin.query(
       `INSERT INTO journal_entry_lines (tenant_id, journal_entry_id, account_id, debit, credit, note)
        VALUES ($1,$2,$3,$4,$5,$6)`,
       [w.tenantId, je.id, l.accountId, l.debit ?? 0, l.credit ?? 0, l.note ?? null]);
+  }
+  if (status !== 'draft') {
+    await admin.query('UPDATE journal_entries SET status = $1 WHERE id = $2', [status, je.id]);
   }
   return je.id;
 }
@@ -174,35 +184,38 @@ const xml2 = await (await api(A.token, '/api/exports/tally?from=2026-05-01&to=20
 ok('a draft entry does not reach Tally', !xml2.includes('JV-DRAFT'), 'draft exported');
 ok('and its amount is absent too', !xml2.includes('999.00'));
 
-console.log('\n=== AN UNBALANCED VOUCHER STOPS THE WHOLE EXPORT ===');
-// Tally rejects them one at a time, so the rest of the month lands and it looks
-// like it worked. Refusing the file is much easier to act on.
-const bad = await entry(A, {
+console.log('\n=== AN UNBALANCED VOUCHER CANNOT EXIST TO BE EXPORTED ===');
+// The export refuses to produce a file containing one, because Tally rejects
+// them a voucher at a time and the rest of the month lands looking like
+// success. It turns out that guard can never fire through normal use: the
+// ledger will not let a posted entry be unbalanced in the first place. Both
+// are worth having, and the stronger of the two is asserted here.
+const rejected = await entry(A, {
   date: '2026-05-20', reference: 'JV-BAD', narration: 'Out of balance', status: 'posted',
   lines: [{ accountId: bank, debit: 100 }, { accountId: sales, credit: 60 }],
-});
-const blocked = await api(A.token, '/api/exports/tally?from=2026-05-01&to=2026-05-31');
-ok('the export is refused', blocked.status === 409, String(blocked.status));
-const blockedBody = await blocked.json();
-ok('and names the offending voucher',
-   (blockedBody.unbalanced ?? []).some(u => u.voucherNumber === 'JV-BAD'),
-   JSON.stringify(blockedBody.unbalanced));
-ok('with the amount it is out by',
-   Math.abs((blockedBody.unbalanced ?? []).find(u => u.voucherNumber === 'JV-BAD')?.difference - 40) < 0.01);
+}).then(() => 'accepted', e => e.code);
+ok('the LEDGER refuses to post an unbalanced entry', rejected === '23514', String(rejected));
+ok('so no unbalanced voucher ever reaches the exporter',
+   !(await (await api(A.token, '/api/exports/tally?from=2026-05-01&to=2026-05-31')).text()).includes('JV-BAD'));
+
+// The exporter's own guard, exercised directly — it is defence in depth for a
+// ledger that changes, and it should still be correct.
+const { unbalancedVouchers } = await import('../src/tally.ts');
+const flagged = unbalancedVouchers([
+  { date: '2026-05-20', voucherNumber: 'JV-SYNTH', lines: [{ accountName: 'A', debit: 100, credit: 0 }, { accountName: 'B', debit: 0, credit: 60 }] },
+  { date: '2026-05-21', voucherNumber: 'JV-OK', lines: [{ accountName: 'A', debit: 50, credit: 0 }, { accountName: 'B', debit: 0, credit: 50 }] },
+]);
+ok('the exporter flags an unbalanced voucher', flagged.length === 1, String(flagged.length));
+ok('naming it', flagged[0]?.voucherNumber === 'JV-SYNTH', flagged[0]?.voucherNumber);
+ok('with the amount it is out by', Math.abs(flagged[0]?.difference - 40) < 0.01, String(flagged[0]?.difference));
+ok('and leaves a balanced one alone', !flagged.some(f => f.voucherNumber === 'JV-OK'));
 
 console.log('\n=== PREFLIGHT ANSWERS THE SAME QUESTION BEFORE MONTH END ===');
 const pre = (await (await api(A.token, '/api/exports/tally/preflight?from=2026-05-01&to=2026-05-31')).json()).preflight;
-ok('preflight reports not ready', pre.ready === false, String(pre.ready));
-ok('and lists the same voucher', pre.unbalanced.some(u => u.voucherNumber === 'JV-BAD'));
-ok('it counts the vouchers it would send', pre.vouchers >= 2, String(pre.vouchers));
+ok('preflight reports ready', pre.ready === true, String(pre.ready));
+ok('with nothing unbalanced', pre.unbalanced.length === 0, JSON.stringify(pre.unbalanced));
+ok('it counts the vouchers it would send', pre.vouchers >= 1, String(pre.vouchers));
 ok('and the ledgers', pre.ledgers >= 2, String(pre.ledgers));
-
-// Fix it and the export goes through.
-await admin.query(`UPDATE journal_entry_lines SET credit = 100 WHERE journal_entry_id = $1 AND credit > 0`, [bad]);
-const fixed = await api(A.token, '/api/exports/tally?from=2026-05-01&to=2026-05-31');
-ok('once balanced, the export succeeds', fixed.status === 200, String(fixed.status));
-const preOk = (await (await api(A.token, '/api/exports/tally/preflight?from=2026-05-01&to=2026-05-31')).json()).preflight;
-ok('and preflight agrees', preOk.ready === true, String(preOk.ready));
 
 console.log('\n=== AN UNMAPPED ACCOUNT TYPE IS SURFACED, NOT SWALLOWED ===');
 await entry(A, {

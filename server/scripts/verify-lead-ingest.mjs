@@ -173,9 +173,12 @@ ok('the redelivery returns 200, not an error', retry.status === 200, String(retr
 const retryBody = await retry.json();
 ok('and says it was a duplicate', retryBody.duplicate === true);
 ok('resolving to the SAME lead', retryBody.leadId === mbId, `${retryBody.leadId} vs ${mbId}`);
+// phone_normalized is generated and keeps EVERY digit, so '09820011111' and
+// '919820011111' are both this buyer. The last ten are the mobile number.
 ok('no second row was written',
    Number((await admin.query(
-     `SELECT count(*)::int n FROM leads WHERE tenant_id=$1 AND phone_normalized='9820011111'`,
+     `SELECT count(*)::int n FROM leads
+       WHERE tenant_id=$1 AND right(phone_normalized, 10)='9820011111'`,
      [A.tenantId])).rows[0].n) === 1);
 
 // The number arrived as 09820011111 first and +91 98200 11111 second — the

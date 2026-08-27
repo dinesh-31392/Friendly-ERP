@@ -88,6 +88,17 @@ export async function planErasure(
     }
   }
 
+  /**
+   * Count, with NO defensive catch.
+   *
+   * A caught query error does not un-poison a Postgres transaction: the
+   * statement aborts the block, every later statement fails with 25P02, and the
+   * `catch` hides the cause. An earlier version wrapped these in `.catch(() => 0)`
+   * to tolerate an optional table, and one wrong column name (`audit_logs`
+   * keys on `record_id`, not `entity_id`) turned the whole erasure into an
+   * opaque 500 with the real error swallowed. If a query here is wrong, it
+   * should say so.
+   */
   const countIn = async (sql: string, params: unknown[] = [leadIds]) =>
     Number((await db.query(sql, params)).rows[0]?.n ?? 0);
 
@@ -103,7 +114,7 @@ export async function planErasure(
   }
 
   const visits = await countIn(
-    `SELECT count(*)::int n FROM site_visits WHERE lead_id = ANY($1::uuid[])`).catch(() => 0);
+    `SELECT count(*)::int n FROM site_visits WHERE lead_id = ANY($1::uuid[])`);
   if (visits) {
     steps.push({
       entity: 'site_visits', action: 'erased', recordCount: visits, legalBasis: '',
@@ -122,7 +133,7 @@ export async function planErasure(
     });
 
     const invoices = await countIn(
-      `SELECT count(*)::int n FROM invoices WHERE lead_id = ANY($1::uuid[])`, [ids]).catch(() => 0);
+      `SELECT count(*)::int n FROM invoices WHERE lead_id = ANY($1::uuid[])`, [ids]);
     if (invoices) {
       steps.push({
         entity: 'invoices', action: 'retained', recordCount: invoices,
@@ -136,7 +147,7 @@ export async function planErasure(
   // is not altered, because a trail that can be rewritten on request is not a
   // trail — and the Act's own accountability obligations depend on it.
   const audits = await countIn(
-    `SELECT count(*)::int n FROM audit_logs WHERE entity_id = ANY($1::uuid[])`).catch(() => 0);
+    `SELECT count(*)::int n FROM audit_logs WHERE record_id = ANY($1::uuid[])`);
   if (audits) {
     steps.push({
       entity: 'audit_logs', action: 'retained', recordCount: audits,
@@ -172,15 +183,19 @@ export async function executeErasure(
     // lead keeps its booking, and its activities go either way — they are the
     // conversation, and nothing requires keeping it.
     await db.query('DELETE FROM lead_activities WHERE lead_id = ANY($1::uuid[])', [plan.leadIds]);
-    await db.query('DELETE FROM site_visits WHERE lead_id = ANY($1::uuid[])', [plan.leadIds])
-      .catch(() => undefined);
+    await db.query('DELETE FROM site_visits WHERE lead_id = ANY($1::uuid[])', [plan.leadIds]);
   }
 
   if (redactedLeadIds.length) {
     // The row survives so the booking still resolves; the person does not.
+    //
+    // `phone_normalized` is deliberately absent: it is a GENERATED column
+    // derived from `phone`, so Postgres refuses an explicit assignment and
+    // clearing `phone` clears it anyway. Naming it here fails the whole
+    // erasure with "cannot insert a non-DEFAULT value into column".
     await db.query(
       `UPDATE leads
-          SET name = $2, email = '', phone = '', phone_normalized = NULL
+          SET name = $2, email = '', phone = ''
         WHERE id = ANY($1::uuid[])`,
       [redactedLeadIds, REDACTED]);
   }

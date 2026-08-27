@@ -192,9 +192,15 @@ export async function leadSourceRoutes(app: FastifyInstance): Promise<void> {
           // again in three months is a NEW lead a salesperson wants; the same
           // enquiry redelivered ten minutes later is not.
           if (normalised) {
+            // `phone_normalized` is a generated column holding EVERY digit, so
+            // "+91 98200 11111" stores as 919820011111 and "09820011111" as
+            // 09820011111 — the same buyer, two values, and a direct comparison
+            // never matches. The last ten digits are the mobile number itself,
+            // with country code and trunk prefix discarded, which is what makes
+            // a portal retry and a web-form re-submission resolve to one lead.
             const { rows: [dup] } = await db.query(
               `SELECT id FROM leads
-                WHERE phone_normalized = $1
+                WHERE right(phone_normalized, 10) = $1
                   AND created_at > now() - interval '30 days'
                 ORDER BY created_at DESC LIMIT 1`,
               [normalised]);
@@ -233,8 +239,11 @@ export async function leadSourceRoutes(app: FastifyInstance): Promise<void> {
              VALUES (app_current_tenant(), $1, $2, $3, $4, $5, $6, $7, $8,
                      'new', 'warm', $9, $10::jsonb, now())
              RETURNING id`,
+            // `project` is NOT NULL on leads — a portal enquiry that names no
+            // project (a generic "send me details" from a listings page, which
+            // is most of them) would otherwise fail the whole insert.
             [lead.name || 'Portal enquiry', lead.email || null, lead.phone,
-             SOURCE_LABELS[source], projectId, projectName || null, lead.budget,
+             SOURCE_LABELS[source], projectId, projectName || '', lead.budget,
              lead.configuration || null, rep[0]?.id ?? null,
              JSON.stringify({ ...lead.extra, ...(lead.message ? { message: lead.message } : {}) })]);
 

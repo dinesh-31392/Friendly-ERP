@@ -109,6 +109,12 @@ jobs:
       # for reasons unrelated to what they test. Raised HERE ONLY.
       AUTH_RATE_LIMIT_MAX: 200
 
+      # Obviously-fake gateway keys. The suite signs its own webhooks with these,
+      # so signature verification is genuinely exercised; nothing reaches Razorpay.
+      RAZORPAY_KEY_ID: rzp_test_ci_only
+      RAZORPAY_KEY_SECRET: ci-only-not-a-real-secret-0123456789
+      RAZORPAY_WEBHOOK_SECRET: ci-only-webhook-secret-0123456789
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

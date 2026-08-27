@@ -35,19 +35,9 @@ async function workspace(slug, perms) {
   const t = (await admin.query(
     `INSERT INTO tenants (name, company, slug, email) VALUES ($1,$1,$2,$3) RETURNING id`,
     [`${MARK} ${slug}`, `${MARK}-${slug}`, `${MARK}-${slug}@pv.test`])).rows[0];
-  // 054 seeds policies for tenants that exist when it runs; a workspace created
-  // afterwards needs them too, which is what this mirrors.
-  await admin.query(
-    `INSERT INTO retention_policies (tenant_id, entity, retain_days, legal_basis, statutory)
-     SELECT $1, entity, retain_days, legal_basis, statutory
-       FROM retention_policies WHERE tenant_id = (SELECT id FROM tenants WHERE id <> $1 LIMIT 1)
-     ON CONFLICT DO NOTHING`, [t.id]).catch(() => {});
-  if (!(await admin.query('SELECT 1 FROM retention_policies WHERE tenant_id=$1 LIMIT 1', [t.id])).rowCount) {
-    await admin.query(
-      `INSERT INTO retention_policies (tenant_id, entity, retain_days, legal_basis, statutory) VALUES
-        ($1,'bookings',3650,'Books of account — Companies Act, 2013 s.128(5)',true),
-        ($1,'leads',1095,'',false)`, [t.id]);
-  }
+  // No policy seeding here on purpose. A workspace must arrive with its
+  // statutory floors already in place — if this helper had to install them,
+  // the test would be proving its own fixture rather than the product.
   const role = (await admin.query(
     `INSERT INTO roles (tenant_id, name, is_system) VALUES ($1,'Ops',false) RETURNING id`, [t.id])).rows[0];
   if (perms.length) {
@@ -91,9 +81,11 @@ const B = await workspace('b', ['manage_settings']);
 /** A lead, optionally with a booking behind it. */
 async function person(w, { name, email, phone, booked }) {
   const lead = (await admin.query(
-    `INSERT INTO leads (tenant_id, name, email, phone, phone_normalized)
-     VALUES ($1,$2,$3,$4,$5) RETURNING id`,
-    [w.tenantId, name, email, phone, phone.replace(/\D/g, '').slice(-10)])).rows[0];
+    // phone_normalized is a GENERATED column — Postgres derives it from phone
+    // and refuses an explicit value.
+    `INSERT INTO leads (tenant_id, name, email, phone)
+     VALUES ($1,$2,$3,$4) RETURNING id`,
+    [w.tenantId, name, email, phone])).rows[0];
   await admin.query(
     `INSERT INTO lead_activities (tenant_id, lead_id, type, notes)
      VALUES ($1,$2,'note','Called, interested in a 3BHK')`, [w.tenantId, lead.id]);
@@ -155,7 +147,19 @@ ok('the preview finds them', preview1.matched === 1, String(preview1.matched));
 const leadStep = preview1.steps.find(s => s.entity === 'leads');
 ok('and plans to ERASE, not redact', leadStep?.action === 'erased', leadStep?.action);
 ok('their activities go too', preview1.steps.some(s => s.entity === 'lead_activities' && s.action === 'erased'));
-ok('nothing is retained', preview1.retainedCount === 0, String(preview1.retainedCount));
+// Nothing of the PERSON is kept. The audit trail is, and legitimately so — an
+// `audit_leads` trigger records every lead insert, and a trail that can be
+// rewritten on request is not a trail. It is the one thing allowed to survive,
+// and it has to carry its basis.
+const retainedInPreview = preview1.steps.filter(s => s.action === 'retained');
+ok('no personal record is retained',
+   !retainedInPreview.some(s => ['leads', 'lead_activities', 'site_visits'].includes(s.entity)),
+   JSON.stringify(retainedInPreview.map(s => s.entity)));
+ok('only the audit trail is',
+   retainedInPreview.every(s => s.entity === 'audit_logs'),
+   JSON.stringify(retainedInPreview.map(s => s.entity)));
+ok('and it states why it is kept',
+   retainedInPreview.every(s => s.legalBasis.trim().length > 0));
 
 console.log('\n=== NOTHING IS DESTROYED WITHOUT VERIFYING WHO IS ASKING ===');
 // An erasure request is otherwise a perfect way to delete a rival's pipeline.

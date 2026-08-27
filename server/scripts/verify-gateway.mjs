@@ -128,12 +128,27 @@ console.log(`\n(gateway ${configured ? 'IS' : 'is NOT'} configured in this envir
 
 console.log('\n=== ORDER CREATION NEVER TRUSTS A CLIENT AMOUNT ===');
 const m1 = await milestone(A, 1000000);
-const withAmount = await api(A.token, '/api/payments/gateway/order', {
-  method: 'POST', body: JSON.stringify({ paymentScheduleId: m1.scheduleId, amount: 1 }),
+// Fastify's ajv is configured with `removeAdditional`, so a rogue `amount`
+// is STRIPPED rather than rejected. Either is safe; what matters is that it
+// cannot influence what gets charged. The clean proof is a milestone that is
+// already settled: the server refuses it on its own arithmetic, and a client
+// naming any amount at all changes nothing.
+const settled = await milestone(A, 250000);
+await admin.query(
+  `INSERT INTO payments (tenant_id, payment_schedule_id, amount, payment_date, mode)
+   VALUES ($1,$2,250000,CURRENT_DATE,'bank_transfer')`, [A.tenantId, settled.scheduleId]);
+
+const honest = await api(A.token, '/api/payments/gateway/order', {
+  method: 'POST', body: JSON.stringify({ paymentScheduleId: settled.scheduleId }),
 });
-// additionalProperties: false — a body that names its own amount is rejected
-// outright rather than having the field quietly ignored.
-ok('a body carrying an amount is rejected', withAmount.status === 400, String(withAmount.status));
+ok('a fully paid milestone cannot be ordered against', honest.status === 409, String(honest.status));
+
+const sneaky = await api(A.token, '/api/payments/gateway/order', {
+  method: 'POST', body: JSON.stringify({ paymentScheduleId: settled.scheduleId, amount: 1 }),
+});
+ok('and naming an amount does not change that', sneaky.status === 409, String(sneaky.status));
+ok('the refusal is the server\'s own arithmetic, not the client\'s',
+   /already fully paid/i.test((await sneaky.json()).error ?? ''), 'unexpected message');
 
 if (!configured) {
   const unconfigured = await api(A.token, '/api/payments/gateway/order', {

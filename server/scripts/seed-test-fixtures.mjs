@@ -125,6 +125,11 @@ await user(platform, 'aud@erptest.local',    'auditor',         'Test Auditor');
 // The other side of every isolation assertion.
 const rival = await tenant('rivaltest', 'Rival Builders');
 await user(rival, 'admin@rivaltest.local', 'builder_admin', 'Rival Admin');
+// The isolation suites (accounts, land/BD, whatsapp) sign in as this address to
+// prove one workspace cannot read another's rows. It was never seeded — it had
+// simply been created by hand in a long-lived test database, so those three
+// suites passed locally and would fail on any fresh one, CI included.
+await user(rival, 'badmin@rival.test', 'builder_admin', 'Rival Builder Admin');
 
 const { rows: [n] } = await c.query('SELECT count(*)::int c FROM users WHERE email LIKE $1', ['%test.local']);
 console.log(`fixtures ready — 2 tenants, ${n.c} users, pipelines seeded`);

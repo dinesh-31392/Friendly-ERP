@@ -161,10 +161,12 @@ CREATE INDEX IF NOT EXISTS idx_erasure_actions_request ON erasure_actions (reque
  * timestamp, and a sweep that deletes a fortnight early is a compliance failure
  * while one that deletes a fortnight late is not.
  */
+CREATE OR REPLACE FUNCTION seed_retention_policies(p_tenant uuid)
+RETURNS void
+LANGUAGE sql AS $$
 INSERT INTO retention_policies (tenant_id, entity, retain_days, legal_basis, statutory)
-SELECT t.id, v.entity, v.days, v.basis, v.statutory
-  FROM tenants t
- CROSS JOIN (VALUES
+SELECT p_tenant, v.entity, v.days, v.basis, v.statutory
+  FROM (VALUES
    ('bookings',        3650, 'Books of account — Companies Act, 2013 s.128(5); Income Tax Act, 1961 Rule 6F', true),
    ('invoices',        3650, 'Books of account — Companies Act, 2013 s.128(5)', true),
    ('payments',        3650, 'Books of account — Companies Act, 2013 s.128(5)', true),
@@ -179,6 +181,35 @@ SELECT t.id, v.entity, v.days, v.basis, v.statutory
    ('site_visits',     1095, '', false)
  ) AS v(entity, days, basis, statutory)
 ON CONFLICT (tenant_id, entity) DO NOTHING;
+$$;
+
+-- Every EXISTING workspace.
+SELECT seed_retention_policies(id) FROM tenants;
+
+/**
+ * And every workspace created from now on.
+ *
+ * Seeding only the tenants that existed when this migration ran would leave
+ * every workspace signed up afterwards with no retention policy at all — no
+ * statutory floor, nothing for the sweep to read, and an erasure request with
+ * no basis to cite. A trigger rather than a line in the signup handler because
+ * there is more than one path that creates a tenant (signup, the seeder, the
+ * test fixtures), and the one that gets forgotten is the one that matters.
+ */
+CREATE OR REPLACE FUNCTION seed_retention_policies_on_tenant()
+RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  PERFORM seed_retention_policies(NEW.id);
+  RETURN NEW;
+END $$;
+
+DROP TRIGGER IF EXISTS trg_seed_retention_policies ON tenants;
+CREATE TRIGGER trg_seed_retention_policies
+  AFTER INSERT ON tenants
+  FOR EACH ROW EXECUTE FUNCTION seed_retention_policies_on_tenant();
+
+GRANT EXECUTE ON FUNCTION seed_retention_policies(uuid) TO app_user, app_platform;
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON retention_policies TO app_user;
 GRANT SELECT, INSERT, UPDATE, DELETE ON erasure_requests   TO app_user;

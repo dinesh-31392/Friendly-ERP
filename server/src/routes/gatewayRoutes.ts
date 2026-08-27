@@ -40,9 +40,15 @@ export async function gatewayRoutes(app: FastifyInstance): Promise<void> {
    * unicode escaping all differ — and the signature then never matches, which
    * presents as "the gateway is misconfigured" and wastes a day.
    *
-   * Registered as the JSON parser for the whole instance because Fastify has
-   * no per-route parser; the buffer is small and dropped with the request.
+   * Fastify installs its own JSON parser at boot, so this replaces it rather
+   * than adding a second — `addContentTypeParser` alone throws
+   * FST_ERR_CTP_ALREADY_PRESENT and takes the whole server down at startup.
+   *
+   * Both calls are ENCAPSULATED to this plugin, which is what we want: only the
+   * routes below pay for keeping a buffer, and every other route in the app
+   * keeps Fastify's own parser untouched.
    */
+  app.removeContentTypeParser('application/json');
   app.addContentTypeParser('application/json', { parseAs: 'buffer' },
     (req, body: Buffer, done) => {
       (req as RawRequest).rawBody = body;

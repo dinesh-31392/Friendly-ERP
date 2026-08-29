@@ -63,6 +63,28 @@ describe('every tabbed panel mounts on an empty workspace', () => {
   }
 });
 
+describe('no Settings tab is listed without a panel behind it', () => {
+  it('every tab renders something other than the placeholder', async () => {
+    // Retention & Erasure shipped rendering its real panel AND a "Coming soon"
+    // card, because the placeholder was driven by a denylist of implemented
+    // tabs that a new tab had to be added to by hand. Mounting the panel alone
+    // cannot see that — the placeholder is the page's, not the panel's — so
+    // this drives the real tab strip the way a user does.
+    vi.doMock('../../services/apiClient', () => apiClientStub());
+    const { default: Settings, settingsTabs } = await import('../Settings');
+    const { getAllByText, queryAllByText } = renderPage(<Settings />);
+
+    for (const { label } of settingsTabs.filter(t => !t.soon)) {
+      const [tab] = getAllByText(label);
+      tab.click();
+      await new Promise(r => setTimeout(r, 0));
+      expect(queryAllByText(/Coming soon/i), `${label} shows the placeholder`).toHaveLength(0);
+    }
+    vi.doUnmock('../../services/apiClient');
+    vi.resetModules();
+  });
+});
+
 describe('every tabbed panel survives a holed payload', () => {
   for (const [name, load] of PANELS) {
     it(`${name} survives a holed payload`, async () => {

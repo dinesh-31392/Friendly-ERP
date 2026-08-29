@@ -26,7 +26,9 @@ import type { User as UserType, Tenant, Role, AuditLog } from '../types';
 import { todayISO } from '../utils/format';
 import toast from 'react-hot-toast';
 
-const settingsTabs = [
+/** `soon: true` marks a tab that is listed but has no panel behind it yet;
+ *  it renders the placeholder instead. Omitting it means built. */
+export const settingsTabs: { id: string; label: string; icon: typeof Building2; soon?: boolean }[] = [
   { id: 'profile', label: 'Builder Profile', icon: Building2 },
   { id: 'brand', label: 'Brand Voice', icon: Palette },
   { id: 'team', label: 'Team & Roles', icon: Users },
@@ -1600,7 +1602,14 @@ export default function Settings() {
           </div>
         )}
 
-        {!['profile', 'team', 'brand', 'pipeline', 'permissions', 'integrations', 'autoreply', 'storage', 'notifications', 'billing', 'audit', 'danger'].includes(activeTab) && (
+        {/* Placeholder for a tab that is listed but not built yet.
+            This used to be a denylist of every implemented tab, which meant a
+            new tab was "Coming soon" until someone remembered to add it here —
+            and Retention & Erasure shipped rendering its real panel with a
+            Coming soon card underneath. The flag inverts that: a tab is built
+            unless it says otherwise, so forgetting leaves no placeholder rather
+            than a contradictory one. Nothing is marked `soon` today. */}
+        {settingsTabs.find(t => t.id === activeTab)?.soon && (
           <div className="bg-white rounded-2xl border border-zinc-200/60 p-12 text-center">
             <div className="h-16 w-16 rounded-2xl bg-zinc-100 mx-auto mb-4 flex items-center justify-center">
               <SettingsIcon className="h-7 w-7 text-zinc-300" />

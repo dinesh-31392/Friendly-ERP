@@ -1,9 +1,10 @@
 import { useState, useEffect } from 'react';
-import { Loader2, FileJson, AlertTriangle, CheckCircle2, Send } from 'lucide-react';
+import { Loader2, FileJson, AlertTriangle, CheckCircle2, Send, X } from 'lucide-react';
 import {
   isApiEnabled, apiGetGstReturns, apiPreviewGstReturn, apiPrepareGstReturn,
-  apiFileGstReturn, apiGstReturnJson,
+  apiFileGstReturn, apiGstReturnJson, apiSetInvoiceTax,
 } from '../services/apiClient';
+import { GST_STATES, GST_RATES, DEFAULT_SAC } from '../utils/gstStates';
 import type { ApiGstReturn, ApiGstPreview, GstForm } from '../services/apiClient';
 import { formatCurrency } from '../utils/format';
 import toast from 'react-hot-toast';
@@ -37,7 +38,153 @@ const label = (p: string) => {
   return `${names[mm] ?? p.slice(0, 2)} ${p.slice(2)}`;
 };
 
+/** One untaxed invoice, exactly as the preview reports it — derived from the
+ *  payload type rather than restated, so the two cannot drift. */
+type Untaxed = NonNullable<ApiGstPreview['untaxed']>[number];
+
+/**
+ * Record the tax on one invoice.
+ *
+ * The panel used to list untaxed invoices and tell the reader to "record their
+ * tax and prepare again" — with nothing anywhere in the product that could do
+ * it. The server route and its client binding both existed; no screen called
+ * them. This is that screen.
+ *
+ * Nothing here computes the split. Rate, place of supply and the workspace's
+ * own state decide CGST+SGST versus IGST, and that decision is the server's —
+ * doing it twice is how the two copies drift apart.
+ */
+function TaxForm({ invoice, currency, onClose, onSaved }: {
+  invoice: Untaxed; currency: string; onClose: () => void; onSaved: () => void;
+}) {
+  // The invoice total is the honest starting point for the taxable value, but
+  // it is a starting point: a total that already includes tax is not the base.
+  const [taxableValue, setTaxableValue] = useState(String(invoice.amount ?? 0));
+  const [gstRate, setGstRate] = useState(5);
+  const [placeOfSupply, setPlaceOfSupply] = useState('27');
+  const [customerGstin, setCustomerGstin] = useState('');
+  const [hsnSac, setHsnSac] = useState(DEFAULT_SAC);
+  const [postCompletion, setPostCompletion] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSaving(true);
+    try {
+      await apiSetInvoiceTax(invoice.id, {
+        taxableValue: Number(taxableValue) || 0,
+        gstRate, placeOfSupply,
+        // Sent only when filled. An empty GSTIN is a B2C supply, not a bad one,
+        // and the server refuses a GSTIN whose check digit does not match.
+        ...(customerGstin.trim() ? { customerGstin: customerGstin.trim().toUpperCase() } : {}),
+        ...(hsnSac.trim() ? { hsnSac: hsnSac.trim() } : {}),
+        postCompletion,
+      });
+      toast.success('Tax recorded');
+      onSaved();
+      onClose();
+    } catch (err) {
+      // Two failures the server states precisely and the user can act on: an
+      // invalid GSTIN check digit, and a workspace with no GSTIN of its own.
+      toast.error(err instanceof Error ? err.message : 'Could not record the tax');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+      onClick={onClose}>
+      <form onSubmit={submit} onClick={e => e.stopPropagation()}
+        className="bg-white rounded-2xl shadow-2xl w-full max-w-lg p-6 space-y-4 max-h-[90vh] overflow-y-auto">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h3 className="text-lg font-semibold text-zinc-900">Record tax</h3>
+            <p className="text-xs text-zinc-500 mt-0.5">
+              {invoice.invoiceNo ?? invoice.id.slice(0, 8)}
+              {invoice.leadName ? ` · ${invoice.leadName}` : ''}
+              {' · '}{formatCurrency(invoice.amount ?? 0, currency)} invoiced
+            </p>
+          </div>
+          <button type="button" onClick={onClose} className="p-1.5 rounded-lg hover:bg-zinc-100">
+            <X className="h-4 w-4 text-zinc-500" />
+          </button>
+        </div>
+
+        <label className="block">
+          <span className="block text-[11px] font-semibold text-zinc-500 uppercase mb-1">Taxable value</span>
+          <input type="number" min={0} step="0.01" value={taxableValue} required
+            onChange={e => setTaxableValue(e.target.value)}
+            className="w-full px-3 py-2 bg-zinc-50 border border-zinc-200 rounded-xl text-sm tabular-nums" />
+          <span className="block text-[10px] text-zinc-400 mt-0.5">
+            The base the rate applies to — not the tax-inclusive total.
+          </span>
+        </label>
+
+        <label className="block">
+          <span className="block text-[11px] font-semibold text-zinc-500 uppercase mb-1">Rate</span>
+          <select value={gstRate} onChange={e => setGstRate(Number(e.target.value))}
+            disabled={postCompletion}
+            className="w-full px-3 py-2 bg-zinc-50 border border-zinc-200 rounded-xl text-sm disabled:opacity-50">
+            {GST_RATES.map(r => <option key={r.rate} value={r.rate}>{r.label}</option>)}
+          </select>
+        </label>
+
+        <label className="block">
+          <span className="block text-[11px] font-semibold text-zinc-500 uppercase mb-1">Place of supply</span>
+          <select value={placeOfSupply} onChange={e => setPlaceOfSupply(e.target.value)}
+            className="w-full px-3 py-2 bg-zinc-50 border border-zinc-200 rounded-xl text-sm">
+            {GST_STATES.map(s => <option key={s.code} value={s.code}>{s.code} — {s.name}</option>)}
+          </select>
+          <span className="block text-[10px] text-zinc-400 mt-0.5">
+            Where the property is, not where the buyer lives. This is what splits
+            CGST+SGST from IGST.
+          </span>
+        </label>
+
+        <div className="grid grid-cols-2 gap-3">
+          <label className="block">
+            <span className="block text-[11px] font-semibold text-zinc-500 uppercase mb-1">
+              Buyer GSTIN <span className="normal-case font-normal text-zinc-400">(optional)</span>
+            </span>
+            <input value={customerGstin} maxLength={15} placeholder="B2C if blank"
+              onChange={e => setCustomerGstin(e.target.value.toUpperCase())}
+              className="w-full px-3 py-2 bg-zinc-50 border border-zinc-200 rounded-xl text-sm font-mono uppercase" />
+          </label>
+          <label className="block">
+            <span className="block text-[11px] font-semibold text-zinc-500 uppercase mb-1">HSN / SAC</span>
+            <input value={hsnSac} maxLength={8} onChange={e => setHsnSac(e.target.value)}
+              className="w-full px-3 py-2 bg-zinc-50 border border-zinc-200 rounded-xl text-sm font-mono" />
+          </label>
+        </div>
+
+        <label className="flex items-start gap-2.5 p-3 bg-zinc-50 rounded-xl cursor-pointer">
+          <input type="checkbox" checked={postCompletion} className="mt-0.5"
+            onChange={e => setPostCompletion(e.target.checked)} />
+          <span className="text-xs text-zinc-600">
+            <span className="font-medium text-zinc-800">Sold after completion</span> — outside the levy.
+            A finished unit is immovable property, not a supply of service, so no GST
+            arises and the rate is forced to zero.
+          </span>
+        </label>
+
+        <div className="flex justify-end gap-2 pt-1">
+          <button type="button" onClick={onClose}
+            className="px-4 py-2 border border-zinc-200 rounded-xl text-sm font-semibold text-zinc-600 hover:bg-zinc-50">
+            Cancel
+          </button>
+          <button type="submit" disabled={saving}
+            className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 disabled:opacity-60">
+            {saving && <Loader2 className="h-4 w-4 animate-spin" />}Record tax
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 export default function GstReturnsPanel({ currency = 'INR' }: { currency?: string }) {
+  const [taxing, setTaxing] = useState<Untaxed | null>(null);
   const [form, setForm] = useState<GstForm>('GSTR1');
   const [period, setPeriod] = useState(currentPeriod());
   const [preview, setPreview] = useState<ApiGstPreview | null>(null);
@@ -196,12 +343,16 @@ export default function GstReturnsPanel({ currency = 'INR' }: { currency?: strin
               </p>
               <div className="space-y-1">
                 {(preview.untaxed ?? []).slice(0, 8).map(u => (
-                  <div key={u.id} className="flex items-baseline justify-between text-[12px]">
+                  <button key={u.id} type="button" onClick={() => setTaxing(u)}
+                    className="w-full flex items-baseline justify-between gap-3 text-[12px] text-left px-2 -mx-2 py-1 rounded-lg hover:bg-zinc-50">
                     <span className="text-zinc-600">
                       {u.invoiceNo ?? u.id.slice(0, 8)} · {u.leadName}
                     </span>
-                    <span className="tabular-nums text-zinc-500">{formatCurrency(u.amount, currency)}</span>
-                  </div>
+                    <span className="flex items-baseline gap-3">
+                      <span className="tabular-nums text-zinc-500">{formatCurrency(u.amount, currency)}</span>
+                      <span className="text-[11px] font-semibold text-indigo-600">Record tax</span>
+                    </span>
+                  </button>
                 ))}
                 {(preview.untaxed ?? []).length > 8 && (
                   <p className="text-[11px] text-zinc-400">…and {(preview.untaxed ?? []).length - 8} more</p>
@@ -253,6 +404,17 @@ export default function GstReturnsPanel({ currency = 'INR' }: { currency?: strin
           </div>
         )}
       </div>
+
+      {taxing && (
+        <TaxForm
+          invoice={taxing}
+          currency={currency}
+          onClose={() => setTaxing(null)}
+          // Bumping the key re-runs the preview, so the invoice just taxed
+          // leaves the untaxed list and lands in the totals above it.
+          onSaved={() => setRefreshKey(k => k + 1)}
+        />
+      )}
     </div>
   );
 }

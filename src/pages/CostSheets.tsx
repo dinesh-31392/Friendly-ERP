@@ -6,7 +6,7 @@ import {
 import { useAuth } from '../context/AuthContext';
 import {
   isApiEnabled, apiGetCostSheets, apiGetCostSheet, apiCreateCostSheet,
-  apiSetCostSheetStatus, apiDeleteCostSheet, apiCostSheetPdf,
+  apiSetCostSheetStatus, apiDeleteCostSheet, apiCostSheetPdf, apiSetCostSheetLines,
   apiGetUnits, apiGetLeads,
 } from '../services/apiClient';
 import type { ApiCostSheet, ApiCostSheetLine, CostSheetSection } from '../services/apiClient';
@@ -72,6 +72,8 @@ export default function CostSheets() {
 
   const [search, setSearch] = useState('');
   const [showNew, setShowNew] = useState(false);
+  // Set while the modal is correcting an existing draft rather than making one.
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [selected, setSelected] = useState<ApiCostSheet | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
 
@@ -205,6 +207,49 @@ export default function CostSheets() {
 
   const updateLine = (i: number, patch: Partial<DraftLine>) =>
     setLines(prev => prev.map((l, idx) => idx === i ? { ...l, ...patch } : l));
+
+  /**
+   * Correct the lines on a draft.
+   *
+   * Lines could only ever be set at creation: `PUT /api/cost-sheets/:id/lines`
+   * existed and passed its suite, and nothing called it. A typo in a rate meant
+   * deleting the sheet and starting again.
+   *
+   * Drafts only, which is the server's rule and the right one — an issued sheet
+   * is a document a buyer has seen, so it is superseded rather than rewritten.
+   */
+  const editLines = (sheet: ApiCostSheet) => {
+    setEditingId(sheet.id);
+    setLines((sheet.lines ?? []).map(l => ({
+      section: l.section, label: l.label, basis: l.basis,
+      rate: l.rate, gstPct: l.gstPct, quantity: l.quantity,
+    })));
+    setSelected(null);
+    setShowNew(true);
+  };
+
+  const saveLines = async () => {
+    if (!editingId) return;
+    setSaving(true);
+    try {
+      const updated = await apiSetCostSheetLines(editingId, lines.filter(l => Number(l.rate) > 0));
+      toast.success('Cost sheet updated');
+      closeModal();
+      refresh();
+      setSelected(updated);
+    } catch (e) {
+      // 409 when it is no longer a draft — someone issued it in another tab.
+      toast.error(e instanceof Error ? e.message : 'Could not save those lines');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const closeModal = () => {
+    setShowNew(false);
+    setEditingId(null);
+    setUnitId(''); setLeadId(''); setValidUntil(''); setLines(TEMPLATE);
+  };
 
   if (!isApiEnabled()) {
     return (
@@ -403,6 +448,11 @@ export default function CostSheets() {
                 <FileText className="h-4 w-4" /> Open as PDF
               </button>
               {canManage && selected.status === 'draft' && (
+                <button onClick={() => editLines(selected)} className="px-4 py-2.5 border border-zinc-200 rounded-xl text-sm font-semibold text-zinc-600 hover:bg-zinc-50">
+                  Edit lines
+                </button>
+              )}
+              {canManage && selected.status === 'draft' && (
                 <button onClick={() => setStatus(selected.id, 'issued')} className="flex-1 px-4 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700">
                   Issue to buyer
                 </button>
@@ -419,13 +469,16 @@ export default function CostSheets() {
 
       {/* ── New sheet ─────────────────────────────────────────────────────── */}
       {showNew && (
-        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => setShowNew(false)}>
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={closeModal}>
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[90vh] overflow-y-auto p-6" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-semibold text-zinc-900">New Cost Sheet</h3>
-              <button onClick={() => setShowNew(false)} className="p-1.5 rounded-lg hover:bg-zinc-100"><X className="h-4 w-4 text-zinc-500" /></button>
+              <h3 className="text-lg font-semibold text-zinc-900">{editingId ? 'Edit cost sheet lines' : 'New Cost Sheet'}</h3>
+              <button onClick={closeModal} className="p-1.5 rounded-lg hover:bg-zinc-100"><X className="h-4 w-4 text-zinc-500" /></button>
             </div>
 
+            {/* Unit, customer and validity are fixed at creation — the lines
+                endpoint replaces lines and nothing else. */}
+            {!editingId && (
             <div className="grid grid-cols-3 gap-3 mb-4">
               <div>
                 <label className="block text-xs font-semibold text-zinc-500 uppercase mb-1">Unit</label>
@@ -450,6 +503,8 @@ export default function CostSheets() {
                 <input type="date" value={validUntil} onChange={e => setValidUntil(e.target.value)} className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm" />
               </div>
             </div>
+
+            )}
 
             <p className="text-[11px] text-zinc-400 mb-2">
               Leave a rate at zero to omit the line. Statutory charges are a percentage of the
@@ -502,12 +557,12 @@ export default function CostSheets() {
             </div>
 
             <div className="flex gap-3">
-              <button type="button" onClick={() => setShowNew(false)} className="flex-1 px-4 py-2.5 border border-zinc-200 rounded-xl text-sm font-medium text-zinc-600 hover:bg-zinc-50">Cancel</button>
+              <button type="button" onClick={closeModal} className="flex-1 px-4 py-2.5 border border-zinc-200 rounded-xl text-sm font-medium text-zinc-600 hover:bg-zinc-50">Cancel</button>
               <button
-                onClick={create} disabled={saving}
+                onClick={editingId ? saveLines : create} disabled={saving}
                 className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 disabled:opacity-60"
               >
-                {saving && <Loader2 className="h-4 w-4 animate-spin" />}{saving ? 'Drafting…' : 'Create draft'}
+                {saving && <Loader2 className="h-4 w-4 animate-spin" />}{editingId ? (saving ? 'Saving…' : 'Save lines') : (saving ? 'Drafting…' : 'Create draft')}
               </button>
             </div>
           </div>

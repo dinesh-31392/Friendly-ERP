@@ -45,7 +45,9 @@
     "verify:privacy": "node scripts/verify-privacy.mjs",
     "verify:tally": "node scripts/verify-tally.mjs",
     "verify:gateway": "node scripts/verify-gateway.mjs",
-    "verify:ingest": "node scripts/verify-lead-ingest.mjs"
+    "verify:ingest": "node scripts/verify-lead-ingest.mjs",
+    "verify:gst": "node scripts/verify-gst.mjs",
+    "verify:telephony": "node scripts/verify-telephony.mjs"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",

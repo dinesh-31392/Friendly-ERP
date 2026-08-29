@@ -207,6 +207,12 @@ jobs:
 
       - name: Portal lead ingest — per-portal mapping and dedupe
         run: node scripts/verify-lead-ingest.mjs
+
+      - name: GST returns — the intra/inter-state split, and three outward tables
+        run: node scripts/verify-gst.mjs
+
+      - name: Click-to-call — the rep number never reaches the customer
+        run: node scripts/verify-telephony.mjs
         working-directory: server
       - run: node scripts/verify-portal.mjs
         working-directory: server

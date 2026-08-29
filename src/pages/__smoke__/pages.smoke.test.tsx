@@ -38,6 +38,7 @@ const PAGES: [name: string, load: () => Promise<{ default: React.ComponentType }
   ['SiteVisits',       () => import('../SiteVisits')],
   ['Bookings',         () => import('../Bookings')],
   ['CostSheets',       () => import('../CostSheets')],
+  ['Customers',        () => import('../Customers')],
   ['Possession',       () => import('../Possession')],
   ['Inventory',        () => import('../Inventory')],
   ['Projects',         () => import('../Projects')],

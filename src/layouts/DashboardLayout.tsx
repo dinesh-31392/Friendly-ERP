@@ -45,6 +45,10 @@ const NAV_GROUPS: NavGroupDef[] = [
       // unreachable until a migration granted it to somebody.
       { to: '/site-visits', icon: MapPin, label: 'Site Visits', permission: 'view_leads' },
       { to: '/bookings', icon: BookOpenCheck, label: 'Bookings', permission: 'view_bookings' },
+      // Buyers, not enquiries: customers is its own table with its own KYC
+      // state. Gated on view_leads because the API is — a customer is where a
+      // lead ends up, and the same desk works both.
+      { to: '/customers', icon: UserCheck, label: 'Customers', permission: 'view_leads' },
       // Sits beside Bookings because it is the step before one: a buyer is
       // priced, then booked, and the accepted sheet is what the booking cites.
       { to: '/cost-sheets', icon: FileSpreadsheet, label: 'Cost Sheets', permission: 'view_bookings' },

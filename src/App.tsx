@@ -26,6 +26,7 @@ import Billing from './pages/Billing';
 import Service from './pages/Service';
 import Bookings from './pages/Bookings';
 import CostSheets from './pages/CostSheets';
+import Customers from './pages/Customers';
 import Possession from './pages/Possession';
 import Leasing from './pages/Leasing';
 import Brokers from './pages/Brokers';
@@ -138,6 +139,7 @@ function AppRoutes() {
         <Route path="/service" element={<PermissionGuard permission="view_service" module="service"><Service /></PermissionGuard>} />
         <Route path="/bookings" element={<PermissionGuard permission="view_bookings" module="bookings"><Bookings /></PermissionGuard>} />
         <Route path="/cost-sheets" element={<PermissionGuard permission="view_bookings" module="bookings"><CostSheets /></PermissionGuard>} />
+        <Route path="/customers" element={<PermissionGuard permission="view_leads"><Customers /></PermissionGuard>} />
         <Route path="/possession" element={<PermissionGuard permission="view_bookings" module="bookings"><Possession /></PermissionGuard>} />
         <Route path="/leasing" element={<PermissionGuard permission="view_leasing" module="leasing"><Leasing /></PermissionGuard>} />
         <Route path="/brokers" element={<PermissionGuard permission="view_brokers" module="brokers"><Brokers /></PermissionGuard>} />

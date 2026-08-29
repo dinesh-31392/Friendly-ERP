@@ -1900,6 +1900,342 @@ export async function apiDemandLetterPdf(id: string): Promise<{ url: string; fil
   return { url: URL.createObjectURL(await res.blob()), filename: match?.[1] ?? 'demand-letter.pdf' };
 }
 
+// ── GST returns (migration 056) ──────────────────────────────────────────────
+//
+// Nothing here computes tax. The intra/inter-state split, the GSTIN check digit
+// and the three outward tables all live on the server — a second implementation
+// in a browser is a second chance to put the money in the wrong exchequer.
+
+export type GstForm = 'GSTR1' | 'GSTR3B';
+
+export interface ApiGstReturn {
+  id: string;
+  form: GstForm;
+  period: string;          // MMYYYY
+  status: 'prepared' | 'filed';
+  taxableValue: number;
+  cgst: number;
+  sgst: number;
+  igst: number;
+  invoiceCount: number;
+  preparedAt: string;
+  filedAt: string | null;
+  arn: string;
+  payload?: Record<string, unknown>;
+}
+
+export interface ApiGstPreview {
+  form: GstForm;
+  period: string;
+  from: string;
+  to: string;
+  payload: Record<string, unknown>;
+  /** Invoices in the period with no tax recorded. Named so they can be fixed
+   *  before the deadline rather than silently reported as exempt. */
+  untaxed: Array<{ id: string; invoiceNo: string | null; leadName: string; amount: number; issueDate: string }>;
+  ready: boolean;
+  gstinConfigured: boolean;
+}
+
+export async function apiGetGstReturns(): Promise<ApiGstReturn[]> {
+  const res = await request<{ returns: ApiGstReturn[] }>('/api/gst/returns');
+  return res.returns;
+}
+
+export async function apiPreviewGstReturn(form: GstForm, period: string): Promise<ApiGstPreview> {
+  const res = await request<{ preview: ApiGstPreview }>(
+    `/api/gst/returns/preview?form=${form}&period=${encodeURIComponent(period)}`);
+  return res.preview;
+}
+
+export async function apiPrepareGstReturn(form: GstForm, period: string): Promise<ApiGstReturn> {
+  const res = await request<{ return: ApiGstReturn }>('/api/gst/returns', {
+    method: 'POST', body: JSON.stringify({ form, period }),
+  });
+  return res.return;
+}
+
+export async function apiFileGstReturn(id: string, arn: string): Promise<ApiGstReturn> {
+  const res = await request<{ return: ApiGstReturn }>(`/api/gst/returns/${id}/file`, {
+    method: 'POST', body: JSON.stringify({ arn }),
+  });
+  return res.return;
+}
+
+/** Record the tax on one invoice. The split is computed server-side. */
+export async function apiSetInvoiceTax(id: string, input: {
+  taxableValue: number; gstRate: number; placeOfSupply: string;
+  customerGstin?: string; hsnSac?: string; postCompletion?: boolean; invoiceNo?: string;
+}): Promise<Record<string, unknown>> {
+  const res = await request<{ invoice: Record<string, unknown> }>(`/api/invoices/${id}/tax`, {
+    method: 'POST', body: JSON.stringify(input),
+  });
+  return res.invoice;
+}
+
+/** The file the GSTN offline tool ingests. Bearer token, so it is fetched. */
+export async function apiGstReturnJson(id: string): Promise<{ url: string; filename: string }> {
+  const res = await fetch(`${getApiUrl()}/api/gst/returns/${id}/json`, {
+    headers: { ...(getApiToken() ? { Authorization: `Bearer ${getApiToken()}` } : {}) },
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Could not download the return (${res.status})`);
+  }
+  const m = /filename="([^"]+)"/i.exec(res.headers.get('Content-Disposition') ?? '');
+  return { url: URL.createObjectURL(await res.blob()), filename: m?.[1] ?? 'gst-return.json' };
+}
+
+// ── Tally export (server/src/tally.ts) ───────────────────────────────────────
+
+export interface ApiTallyPreflight {
+  vouchers: number;
+  ledgers: number;
+  unbalanced: Array<{ voucherNumber: string; difference: number }>;
+  ready: boolean;
+  suspense: Array<{ name: string; accountType: string }>;
+}
+
+export async function apiTallyPreflight(from: string, to: string): Promise<ApiTallyPreflight> {
+  const res = await request<{ preflight: ApiTallyPreflight }>(
+    `/api/exports/tally/preflight?from=${from}&to=${to}`);
+  return res.preflight;
+}
+
+/** The import file. Refuses to produce one that would half-import, so a 409
+ *  here carries the offending vouchers rather than a generic failure. */
+export async function apiTallyExport(from: string, to: string): Promise<{ url: string; filename: string }> {
+  const res = await fetch(`${getApiUrl()}/api/exports/tally?from=${from}&to=${to}`, {
+    headers: { ...(getApiToken() ? { Authorization: `Bearer ${getApiToken()}` } : {}) },
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Could not export (${res.status})`);
+  }
+  const m = /filename="([^"]+)"/i.exec(res.headers.get('Content-Disposition') ?? '');
+  return { url: URL.createObjectURL(await res.blob()), filename: m?.[1] ?? 'tally.xml' };
+}
+
+// ── Retention & erasure (migration 054) ──────────────────────────────────────
+
+export interface ApiRetentionPolicy {
+  id: string;
+  entity: string;
+  retainDays: number | null;
+  legalBasis: string;
+  /** A floor set by law. Extendable, never shortenable. */
+  statutory: boolean;
+  updatedAt: string;
+}
+
+export interface ApiErasureAction {
+  id: string;
+  entity: string;
+  recordCount: number;
+  action: 'erased' | 'redacted' | 'retained';
+  legalBasis: string;
+  detail: string;
+}
+
+export interface ApiErasureRequest {
+  id: string;
+  subjectType: string;
+  subjectEmail: string;
+  subjectPhone: string;
+  subjectName: string;
+  receivedOn: string;
+  status: 'received' | 'verified' | 'completed' | 'refused';
+  verifiedAt: string | null;
+  completedAt: string | null;
+  refusedReason: string;
+  actions: ApiErasureAction[];
+}
+
+export interface ApiErasurePreview {
+  matched: number;
+  steps: Array<{ entity: string; action: string; recordCount: number; legalBasis: string; detail: string }>;
+  erasedCount: number;
+  redactedCount: number;
+  retainedCount: number;
+}
+
+export async function apiGetRetentionPolicies(): Promise<ApiRetentionPolicy[]> {
+  const res = await request<{ policies: ApiRetentionPolicy[] }>('/api/retention-policies');
+  return res.policies;
+}
+
+export async function apiSetRetentionDays(id: string, retainDays: number | null): Promise<ApiRetentionPolicy> {
+  const res = await request<{ policy: ApiRetentionPolicy }>(`/api/retention-policies/${id}`, {
+    method: 'PATCH', body: JSON.stringify({ retainDays }),
+  });
+  return res.policy;
+}
+
+export async function apiRetentionSweep(): Promise<Array<{ entity: string; retainDays: number; count: number }>> {
+  const res = await request<{ expired: Array<{ entity: string; retainDays: number; count: number }> }>(
+    '/api/retention-sweep');
+  return res.expired;
+}
+
+export async function apiGetErasureRequests(): Promise<ApiErasureRequest[]> {
+  const res = await request<{ requests: ApiErasureRequest[] }>('/api/erasure-requests');
+  return res.requests;
+}
+
+export async function apiGetErasureRequest(id: string): Promise<ApiErasureRequest> {
+  const res = await request<{ request: ApiErasureRequest }>(`/api/erasure-requests/${id}`);
+  return res.request;
+}
+
+export async function apiCreateErasureRequest(input: {
+  subjectEmail?: string; subjectPhone?: string; subjectName?: string; channel?: string;
+}): Promise<ApiErasureRequest> {
+  const res = await request<{ request: ApiErasureRequest }>('/api/erasure-requests', {
+    method: 'POST', body: JSON.stringify(input),
+  });
+  return res.request;
+}
+
+/** What WOULD happen. Available before verification, because the reply to a
+ *  Data Principal is written from it. */
+export async function apiPreviewErasure(id: string): Promise<ApiErasurePreview> {
+  const res = await request<{ preview: ApiErasurePreview }>(`/api/erasure-requests/${id}/preview`);
+  return res.preview;
+}
+
+export async function apiVerifyErasure(id: string, note: string): Promise<ApiErasureRequest> {
+  const res = await request<{ request: ApiErasureRequest }>(`/api/erasure-requests/${id}/verify`, {
+    method: 'POST', body: JSON.stringify({ note }),
+  });
+  return res.request;
+}
+
+export async function apiExecuteErasure(id: string): Promise<ApiErasureRequest> {
+  const res = await request<{ request: ApiErasureRequest }>(`/api/erasure-requests/${id}/execute`, {
+    method: 'POST',
+  });
+  return res.request;
+}
+
+export async function apiRefuseErasure(id: string, reason: string): Promise<ApiErasureRequest> {
+  const res = await request<{ request: ApiErasureRequest }>(`/api/erasure-requests/${id}/refuse`, {
+    method: 'POST', body: JSON.stringify({ reason }),
+  });
+  return res.request;
+}
+
+// ── Portal lead sources (migration 055) ──────────────────────────────────────
+
+export interface ApiLeadSource {
+  id: string;
+  sourceKey: string;
+  label: string;
+  active: boolean;
+  receivedCount: number;
+  lastSeenAt: string | null;
+  createdAt: string;
+}
+
+export async function apiGetLeadSources(): Promise<{ sources: ApiLeadSource[]; available: string[] }> {
+  return request<{ sources: ApiLeadSource[]; available: string[] }>('/api/lead-sources');
+}
+
+/** Mints or rotates a portal credential. The token comes back exactly once —
+ *  only its digest is stored, so it cannot be shown again. */
+export async function apiCreateLeadSource(sourceKey: string, label?: string): Promise<{
+  source: ApiLeadSource; secret: string; ingestUrl: string; note: string;
+}> {
+  return request<{ source: ApiLeadSource; secret: string; ingestUrl: string; note: string }>(
+    '/api/lead-sources', { method: 'POST', body: JSON.stringify({ sourceKey, ...(label ? { label } : {}) }) });
+}
+
+export async function apiSetLeadSourceActive(id: string, active: boolean): Promise<ApiLeadSource> {
+  const res = await request<{ source: ApiLeadSource }>(`/api/lead-sources/${id}`, {
+    method: 'PATCH', body: JSON.stringify({ active }),
+  });
+  return res.source;
+}
+
+// ── Telephony (migration 057) ────────────────────────────────────────────────
+
+export interface ApiTelephonySettings {
+  provider: string;
+  accountSid: string;
+  callerId: string;
+  recordCalls: boolean;
+  active: boolean;
+  callbackConfigured: boolean;
+  updatedAt: string | null;
+}
+
+export async function apiGetTelephonySettings(): Promise<{
+  settings: ApiTelephonySettings; credentialsConfigured: boolean;
+}> {
+  return request<{ settings: ApiTelephonySettings; credentialsConfigured: boolean }>(
+    '/api/telephony/settings');
+}
+
+export async function apiSaveTelephonySettings(input: {
+  accountSid: string; callerId: string; recordCalls?: boolean; active?: boolean; rotateSecret?: boolean;
+}): Promise<{
+  settings: ApiTelephonySettings; callbackSecret?: string; callbackUrl?: string;
+  note?: string; recordingNotice?: string;
+}> {
+  return request('/api/telephony/settings', { method: 'PUT', body: JSON.stringify(input) });
+}
+
+/**
+ * Place a call to a lead.
+ *
+ * The number dialled comes from the lead server-side — never from here. The
+ * rep's phone rings first, and the customer only ever sees the workspace line.
+ */
+export async function apiCallLead(leadId: string): Promise<{
+  id: string; status: string; providerCallId: string; callerId: string; note: string;
+}> {
+  const res = await request<{ call: { id: string; status: string; providerCallId: string; callerId: string; note: string } }>(
+    `/api/leads/${leadId}/call`, { method: 'POST' });
+  return res.call;
+}
+
+// ── Payment gateway (migration 055) ──────────────────────────────────────────
+
+export interface ApiGatewayEvent {
+  id: string;
+  eventId: string;
+  eventType: string;
+  orderRef: string;
+  paymentRef: string;
+  amount: number;
+  signatureVerified: boolean;
+  appliedAt: string | null;
+  receivedAt: string;
+}
+
+export async function apiGetGatewayEvents(): Promise<{ events: ApiGatewayEvent[]; configured: boolean }> {
+  return request<{ events: ApiGatewayEvent[]; configured: boolean }>('/api/payments/gateway/events');
+}
+
+/**
+ * Raise a gateway order against a milestone.
+ *
+ * The amount is NOT sent — the server computes it from what is outstanding.
+ * Returns the public key id, which is what Razorpay's checkout script needs in
+ * the browser; the key secret never leaves the server.
+ */
+export async function apiCreateGatewayOrder(paymentScheduleId: string): Promise<{
+  orderId: string; amount: number; amountRupees: number; currency: string;
+  keyId: string; customerName?: string; customerEmail?: string; milestone?: string;
+}> {
+  const res = await request<{ order: {
+    orderId: string; amount: number; amountRupees: number; currency: string;
+    keyId: string; customerName?: string; customerEmail?: string; milestone?: string;
+  } }>('/api/payments/gateway/order', {
+    method: 'POST', body: JSON.stringify({ paymentScheduleId }),
+  });
+  return res.order;
+}
+
 // ── Possession & snags (migration 053) ───────────────────────────────────────
 //
 // `blockingSnags` counts only MAJOR and CRITICAL open snags, and `duesNow` is

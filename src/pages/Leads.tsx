@@ -4,7 +4,7 @@ import {
   Search, Plus, Phone, MessageCircle, Mail, MapPin,
   Clock, X, Building2, Tag,
   Download, Upload, Trash2, Users, GitMerge, AlertTriangle, Gauge, Calendar, Sparkles, BookOpenCheck,
-  List, LayoutGrid, Kanban, UserCheck
+  List, LayoutGrid, Kanban, UserCheck, PhoneCall, Loader2,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { getByTenant, logAudit } from '../services/db';
@@ -16,7 +16,10 @@ import { telHref, mailtoHref, whatsappHref, maskPhone } from '../utils/contact';
 import { whatsappSend } from '../services/whatsappService';
 import { toCsv } from '../utils/csv';
 import { inviteCustomer, portalPath } from '../services/portalService';
-import { isApiEnabled, apiGetLeads, apiCreateTask, apiReassignLeadActivities } from '../services/apiClient';
+import {
+  isApiEnabled, apiGetLeads, apiCreateTask, apiReassignLeadActivities,
+  apiCallLead, apiGetTelephonySettings,
+} from '../services/apiClient';
 import { logLeadActivity, addLeadNote } from '../services/leadActivityWrites';
 import { createLead, patchLead, deleteLead as removeLead, patchLeads, deleteLeads } from '../services/leadWrites';
 import { useTenantUsers } from '../hooks/useTenantUsers';
@@ -278,6 +281,34 @@ export default function Leads() {
   }, [leads]);
 
   const refresh = () => setRefreshKey(k => k + 1);
+
+  // Click-to-call. Offered only when the workspace has telephony configured
+  // AND the deployment has credentials — otherwise the button would be a
+  // promise the server answers with a 503.
+  const [telephonyOn, setTelephonyOn] = useState(false);
+  const [callingLeadId, setCallingLeadId] = useState<string | null>(null);
+  useEffect(() => {
+    if (!isApiEnabled()) return;
+    let cancelled = false;
+    apiGetTelephonySettings()
+      .then(r => { if (!cancelled) setTelephonyOn(r.settings.active && r.credentialsConfigured); })
+      .catch(() => { /* not configured is the normal case, not an error */ });
+    return () => { cancelled = true; };
+  }, [tenantId]);
+
+  const placeCall = async (lead: Lead) => {
+    setCallingLeadId(lead.id);
+    try {
+      const call = await apiCallLead(lead.id);
+      // Said plainly, because it is the reason to use this rather than the
+      // dialler: the customer never sees the rep's number.
+      toast.success(`Your phone is ringing. ${lead.name} will see ${call.callerId}.`);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Could not place the call');
+    } finally {
+      setCallingLeadId(null);
+    }
+  };
 
   // Resolve the active date window once per change; leads are filtered by their
   // received date (createdAt).
@@ -1144,7 +1175,26 @@ export default function Leads() {
                             there is no hover at all, so these were unreachable
                             on every tablet the sales team actually uses. */}
                         <div className="flex items-center justify-end gap-0.5">
-                          <a href={telHref(lead.phone)} title={`Call ${maskPhone(lead.phone)}`} aria-label={`Call ${lead.name}`}
+                          {/* Two ways to call, and they are not the same act.
+                              The link opens the dialler on this device and puts
+                              the rep's own number on the customer's phone
+                              permanently. Click-to-call goes through the
+                              workspace line, rings the rep first, and logs the
+                              call — so it is offered whenever telephony is on,
+                              and the plain dialler remains as the fallback. */}
+                          {telephonyOn && (
+                            <button
+                              onClick={() => placeCall(lead)}
+                              disabled={callingLeadId === lead.id}
+                              title={`Call ${maskPhone(lead.phone)} from the workspace number`}
+                              aria-label={`Call ${lead.name} from the workspace number`}
+                              className="p-1.5 rounded-lg text-zinc-400 hover:text-indigo-600 hover:bg-indigo-50 disabled:opacity-50">
+                              {callingLeadId === lead.id
+                                ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                : <PhoneCall className="h-3.5 w-3.5" />}
+                            </button>
+                          )}
+                          <a href={telHref(lead.phone)} title={`Call ${maskPhone(lead.phone)} from this device`} aria-label={`Call ${lead.name}`}
                              className="p-1.5 rounded-lg text-zinc-400 hover:text-indigo-600 hover:bg-indigo-50">
                             <Phone className="h-3.5 w-3.5" />
                           </a>

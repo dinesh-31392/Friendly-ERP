@@ -50,6 +50,7 @@ const PAGES: [name: string, load: () => Promise<{ default: React.ComponentType }
   ['BD',               () => import('../BD')],
   ['Calendar',         () => import('../Calendar')],
   ['Documents',        () => import('../Documents')],
+  ['Settings',         () => import('../Settings')],
   ['Reports',          () => import('../Reports')],
   ['Service',          () => import('../Service')],
   ['Brokers',          () => import('../Brokers')],

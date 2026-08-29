@@ -50,6 +50,7 @@ const PAGES: [string, () => Promise<{ default: React.ComponentType }>][] = [
   ['Land',        () => import('../Land')],
   ['BD',          () => import('../BD')],
   ['Calendar',    () => import('../Calendar')],
+  ['Settings',    () => import('../Settings')],
   ['Brokers',     () => import('../Brokers')],
 ];
 

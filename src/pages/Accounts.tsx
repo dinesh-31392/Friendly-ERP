@@ -6,6 +6,7 @@ import {
 import { useAuth } from '../context/AuthContext';
 import { getByTenant, update, logAudit } from '../services/db';
 import { isApiEnabled } from '../services/apiClient';
+import TallyExportPanel from '../components/TallyExportPanel';
 import {
   ensureCoa, postEntry, postDraft, postRaApproved, postApPayment,
   trialBalance, profitAndLoss, balanceSheet, nextRaNumber, contractorLedger,
@@ -745,6 +746,8 @@ export default function Accounts() {
 
       {/* ── Journal ── */}
       {tab === 'journal' && (
+        <div className="space-y-4">
+        <TallyExportPanel />
         <div className="bg-white rounded-2xl border border-zinc-200/60 overflow-hidden">
           <div className="px-5 py-4 border-b border-zinc-100 flex items-center gap-3 flex-wrap">
             <h3 className="font-semibold text-zinc-900">Journal Entries</h3>
@@ -803,6 +806,7 @@ export default function Accounts() {
               })}
             </div>
           )}
+        </div>
         </div>
       )}
 

@@ -4,13 +4,14 @@ import {
   Settings as SettingsIcon, Users, User, Shield, Building2, Palette, Bell,
   Link2, ChevronRight, Check, CreditCard, UserPlus, Trash2, X, RefreshCw, AlertTriangle,
   ScrollText, Sparkles, Download, FileText, Search, GitMerge, Send, Plus, Clock, Database, Zap,
-  Monitor,
+  Monitor, ShieldCheck,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { isApiEnabled, apiGetNotificationPrefs } from '../services/apiClient';
 import * as notificationWrites from '../services/notificationWrites';
 import IntegrationsPanel from '../components/IntegrationsPanel';
 import WhatsAppStoragePanel from '../components/WhatsAppStoragePanel';
+import PrivacyPanel from '../components/PrivacyPanel';
 import WhatsAppAutoReplyPanel from '../components/WhatsAppAutoReplyPanel';
 import PipelineSettings from '../components/PipelineSettings';
 import { PLANS, getPlanForTenant, getEffectiveLimits, withinLimit, planPriceLabel } from '../services/planService';
@@ -36,6 +37,9 @@ const settingsTabs = [
   { id: 'billing', label: 'Billing & Plan', icon: CreditCard },
   { id: 'autoreply', label: 'Auto-Reply', icon: Zap },
   { id: 'storage', label: 'Data Storage', icon: Database },
+  // Retention periods and erasure requests. Its own tab rather than buried in
+  // Data & Privacy: answering a DPDP request is a task, not a setting.
+  { id: 'retention', label: 'Retention & Erasure', icon: ShieldCheck },
   { id: 'audit', label: 'Audit Log', icon: ScrollText },
   { id: 'danger', label: 'Data & Privacy', icon: AlertTriangle },
 ];
@@ -913,6 +917,7 @@ export default function Settings() {
         {activeTab === 'integrations' && <IntegrationsPanel />}
         {activeTab === 'autoreply' && <WhatsAppAutoReplyPanel />}
         {activeTab === 'storage' && <WhatsAppStoragePanel />}
+        {activeTab === 'retention' && <PrivacyPanel />}
 
         {activeTab === 'notifications' && (
           <div className="bg-white rounded-2xl border border-zinc-200/60 p-6 space-y-4">

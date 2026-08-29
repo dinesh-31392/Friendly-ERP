@@ -32,6 +32,7 @@ const PANELS: [string, () => Promise<{ default: React.ComponentType }>][] = [
   ['GstReturnsPanel',     () => import('../../components/GstReturnsPanel')],
   ['TallyExportPanel',    () => import('../../components/TallyExportPanel')],
   ['ChannelIntegrations', () => import('../../components/ChannelIntegrations')],
+  ['ReceiptsPanel',       () => import('../../components/ReceiptsPanel')],
 ];
 
 let errorSpy: ReturnType<typeof vi.spyOn>;
@@ -61,6 +62,31 @@ describe('every tabbed panel mounts on an empty workspace', () => {
       vi.resetModules();
     });
   }
+});
+
+describe('panels that take props', () => {
+  // These cannot go in the list above, which mounts everything with no props.
+  // Passing the real props is the point: CallHistory returns null without a
+  // lead, so a propless mount would assert nothing at all.
+  it('CallHistory renders for a lead with no calls', async () => {
+    vi.doMock('../../services/apiClient', () => apiClientStub());
+    const { default: CallHistory } = await import('../../components/CallHistory');
+    expect(() => renderPage(<CallHistory leadId="lead-1" />)).not.toThrow();
+    await new Promise(r => setTimeout(r, 0));
+    expect(thrown()).toHaveLength(0);
+    vi.doUnmock('../../services/apiClient');
+    vi.resetModules();
+  });
+
+  it('ServiceRequestsPanel survives a holed payload', async () => {
+    vi.doMock('../../services/apiClient', () => apiClientStub({}, 'holed'));
+    const { default: Panel } = await import('../../components/ServiceRequestsPanel');
+    expect(() => renderPage(<Panel canManage />)).not.toThrow();
+    await new Promise(r => setTimeout(r, 0));
+    expect(thrown()).toHaveLength(0);
+    vi.doUnmock('../../services/apiClient');
+    vi.resetModules();
+  });
 });
 
 describe('no Settings tab is listed without a panel behind it', () => {

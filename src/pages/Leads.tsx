@@ -24,6 +24,7 @@ import { logLeadActivity, addLeadNote } from '../services/leadActivityWrites';
 import { createLead, patchLead, deleteLead as removeLead, patchLeads, deleteLeads } from '../services/leadWrites';
 import { useTenantUsers } from '../hooks/useTenantUsers';
 import DateRangeFilter from '../components/DateRangeFilter';
+import CallHistory from '../components/CallHistory';
 import StageFilter from '../components/StageFilter';
 import LeadWhatsAppChat from '../components/LeadWhatsAppChat';
 import { type DateRange, ALL_RANGE, resolveRange, inRange, rangeSlug, rangeLabel } from '../utils/dateRange';
@@ -1759,6 +1760,9 @@ export default function Leads() {
                 {leadActivities.length === 0 && <p className="text-xs text-zinc-400 text-center py-4">No activity recorded yet</p>}
               </div>
             </div>
+
+            {/* What the exchange observed, kept separate from what the rep wrote. */}
+            <CallHistory leadId={selectedLead.id} />
           </div>
         </div>
       </>

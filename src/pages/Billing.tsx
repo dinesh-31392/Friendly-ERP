@@ -15,6 +15,7 @@ import {
   type ApiDemandLetter, type ApiDemandDue, type ApiReraPosition,
 } from '../services/apiClient';
 import GstReturnsPanel from '../components/GstReturnsPanel';
+import ReceiptsPanel from '../components/ReceiptsPanel';
 import { isBillOverdue, projectActuals, formatPoNumber } from '../services/procurementService';
 import { isFilingOverdue, markFiled, nextDueDate } from '../services/complianceService';
 import { needsApproval } from '../services/approvalService';
@@ -41,7 +42,7 @@ const billStatusColors: Record<VendorBillStatus, string> = {
 
 const invoiceTypes = ['Booking Token', '1st Installment', '2nd Installment', '3rd Installment', 'Final Payment', 'Quotation', 'Refund'];
 
-type Tab = 'receivables' | 'payables' | 'budgets' | 'compliance' | 'demands' | 'rera' | 'refunds' | 'gst';
+type Tab = 'receivables' | 'receipts' | 'payables' | 'budgets' | 'compliance' | 'demands' | 'rera' | 'refunds' | 'gst';
 
 export default function Billing() {
   const { user, tenant, hasPermission } = useAuth();
@@ -556,6 +557,7 @@ export default function Billing() {
     { id: 'refunds' as Tab, label: 'Refunds', icon: Undo2 },
     // Return preparation sits beside Compliance rather than inside it: one
     // tracks deadlines, the other produces the thing you file.
+    { id: 'receipts' as Tab, label: 'Receipts', icon: FileText },
     { id: 'gst' as Tab, label: 'GST Returns', icon: FileText },
   ];
   const filingsDue = filings.filter(f => f.status === 'pending' && new Date(f.dueDate).getTime() <= Date.now() + 14 * 86400000).length;
@@ -1085,6 +1087,7 @@ export default function Billing() {
           bank transactions entered, so a project whose designated account has
           never been reconciled shows its whole obligation as a shortfall,
           which is the correct thing to show. */}
+      {tab === 'receipts' && <ReceiptsPanel currency={currency} />}
       {tab === 'gst' && <GstReturnsPanel currency={currency} />}
 
       {tab === 'refunds' && (

@@ -6,7 +6,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { getAll, create, update, remove, removeByTenant, logAudit, getByTenant } from '../services/db';
-import { apiGetTenants, apiCreateTenant, apiUpdateTenant, apiGetAuditLogs, isApiEnabled, apiGetTenantUsage, apiImpersonateTenant, type TenantUsage } from '../services/apiClient';
+import { apiGetTenants, apiCreateTenant, apiUpdateTenant, apiGetAuditLogs, isApiEnabled, apiGetTenantUsage, apiImpersonateTenant, apiGetBranches, apiCreateBranch, type TenantUsage } from '../services/apiClient';
 import { PLANS, platformMrrUsd, tenantMrrUsd, CONTROLLABLE_MODULES } from '../services/planService';
 import { getBranches, getLegacyBranch, branchName, visibleTenantsForUser } from '../services/branchService';
 import { uniqueSlug } from '../services/portalService';
@@ -85,7 +85,30 @@ export default function SuperAdmin() {
   }, [apiMode, manageTenant, refreshKey]);
   const allUsers = useMemo(() => getAll<UserType>('users'), [refreshKey]);
   const allLeads = useMemo(() => getAll<Lead>('leads'), [refreshKey]);
-  const branches = useMemo(() => getBranches(), [refreshKey]);
+  /**
+   * Branches live on the PLATFORM pool, not a tenant's schema, and they were
+   * read and written through the localStorage store while tenant assignment
+   * already went to the server via apiUpdateTenant. So a branch created here
+   * existed in one administrator's browser, and the workspace assigned to it
+   * carried a branchId the server had never seen.
+   */
+  const [apiBranches, setApiBranches] = useState<Branch[] | null>(null);
+  useEffect(() => {
+    if (!isApiEnabled()) { setApiBranches(null); return; }
+    let cancelled = false;
+    apiGetBranches()
+      .then(rows => {
+        if (cancelled) return;
+        setApiBranches(rows.map(b => ({
+          id: b.id, name: b.name, managerId: b.managerId ?? undefined, createdAt: b.createdAt,
+        }) as Branch));
+      })
+      // Platform staff only: a non-platform admin gets a 403 here and simply
+      // has no branch list, which is correct rather than an error to show.
+      .catch(() => { if (!cancelled) setApiBranches([]); });
+    return () => { cancelled = true; };
+  }, [refreshKey]);
+  const branches = useMemo(() => apiBranches ?? getBranches(), [apiBranches, refreshKey]);
   // The Gatekeeper: tech_team only ever sees its own branch's builders
   const tenants = useMemo(() => visibleTenantsForUser(user, allTenants), [user, allTenants]);
   const pendingTenants = useMemo(() => tenants.filter(t => t.approvalStatus === 'pending'), [tenants]);
@@ -187,15 +210,23 @@ export default function SuperAdmin() {
     toast.success(decision === 'approved' ? `"${t.name}" approved — they can now sign in` : `"${t.name}" rejected`);
   };
 
-  const handleAddBranch = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleAddBranch = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (!isSuperAdmin) return;
     const fd = new FormData(e.currentTarget);
     const name = (fd.get('name') as string || '').trim();
     if (!name) { toast.error('Branch name is required'); return; }
     const managerId = (fd.get('managerId') as string) || undefined;
-    const created = create<Branch>('branches', { id: '', name, managerId, createdAt: new Date().toISOString() });
-    platformAudit('create', created.id, `Created branch "${name}"`);
+    let createdId: string;
+    try {
+      createdId = isApiEnabled()
+        ? (await apiCreateBranch({ name, ...(managerId ? { managerId } : {}) })).id
+        : create<Branch>('branches', { id: '', name, managerId, createdAt: new Date().toISOString() }).id;
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not create that branch');
+      return;
+    }
+    platformAudit('create', createdId, `Created branch "${name}"`);
     setShowAddBranch(false);
     refresh();
     toast.success(`Branch "${name}" created`);

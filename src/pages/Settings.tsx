@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { isApiEnabled, apiGetNotificationPrefs } from '../services/apiClient';
+import { createUser, patchUser, deleteUser, canHardDeleteUsers } from '../services/userWrites';
 import * as notificationWrites from '../services/notificationWrites';
 import IntegrationsPanel from '../components/IntegrationsPanel';
 import WhatsAppStoragePanel from '../components/WhatsAppStoragePanel';
@@ -19,7 +20,7 @@ import { portalUrl, portalPath, isPremium, slugify, isSlugAvailable } from '../s
 import { getTenantSessions, revokeDeviceSession, currentSessionToken } from '../services/authService';
 import { getApprovalRules, setApprovalThreshold } from '../services/approvalService';
 import { downloadCsv } from '../utils/csv';
-import { getByTenant, update, create, remove, clearDatabase, logAudit } from '../services/db';
+import { getByTenant, update, clearDatabase, logAudit } from '../services/db';
 import { apiGetAuditLogs } from '../services/apiClient';
 import { useTenantUsers } from '../hooks/useTenantUsers';
 import type { User as UserType, Tenant, Role, AuditLog } from '../types';
@@ -56,6 +57,9 @@ export default function Settings() {
   const [refreshKey, setRefreshKey] = useState(0);
   const refresh = () => setRefreshKey(k => k + 1);
   const [showAddUser, setShowAddUser] = useState(false);
+  // The server issues a one-time password for a freshly invited member. Held
+  // in state because it comes back exactly once and cannot be fetched again.
+  const [newUserPassword, setNewUserPassword] = useState<{ name: string; email: string; password: string } | null>(null);
 
   const tenantUsers = useTenantUsers(tenant?.id || '', refreshKey);
 
@@ -213,7 +217,7 @@ export default function Settings() {
     setChannels(prev => prev.includes(ch) ? prev.filter(c => c !== ch) : [...prev, ch]);
   };
 
-  const handleAddUser = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleAddUser = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (!tenant) return;
     const form = e.currentTarget;
@@ -223,8 +227,11 @@ export default function Settings() {
     const password = formData.get('password') as string;
     const role = formData.get('role') as Role;
 
-    if (!name || !email || !password) { toast.error('Please fill all fields'); return; }
-    if (password.length < 6) { toast.error('Password must be at least 6 characters'); return; }
+    // Against the API the server issues a one-time password and the field is
+    // not rendered at all; only the demo store takes one from the form.
+    const needsPassword = !isApiEnabled();
+    if (!name || !email || (needsPassword && !password)) { toast.error('Please fill all fields'); return; }
+    if (needsPassword && password.length < 6) { toast.error('Password must be at least 6 characters'); return; }
 
     // Enforce the effective team-size limit — the plan's, unless the platform
     // admin set a custom override for this workspace
@@ -241,30 +248,49 @@ export default function Settings() {
     // Project-level scoping (user_project_assignments): front-line staff can
     // be limited to specific projects at invite time
     const projectIds = (formData.getAll('projectIds') as string[]).filter(Boolean);
-    const createdUser = create<UserType>('users', {
-      id: '', tenantId: tenant.id, name, email: email.toLowerCase(), password,
-      role, avatar: '', phone: (formData.get('phone') as string) || '',
-      ...(projectIds.length > 0 ? { projectIds } : {}),
-      active: true, createdAt: new Date().toISOString(),
-    });
-    if (user) logAudit({ tenantId: tenant.id, userId: user.id, userName: user.name, action: 'create', entity: 'user', entityId: createdUser.id, details: `Added team member "${name}" as ${role.replace('_', ' ')}` });
-    setShowAddUser(false);
-    refresh();
-    toast.success('Team member added');
+    try {
+      const { user: createdUser, temporaryPassword } = await createUser({
+        tenantId: tenant.id, name, email, password, role,
+        phone: (formData.get('phone') as string) || '',
+        ...(projectIds.length > 0 ? { projectIds } : {}),
+      });
+      if (user) logAudit({ tenantId: tenant.id, userId: user.id, userName: user.name, action: 'create', entity: 'user', entityId: createdUser.id, details: `Added team member "${name}" as ${role.replace('_', ' ')}` });
+      setShowAddUser(false);
+      refresh();
+      // Shown once and never retrievable, so it gets a panel rather than a
+      // toast that scrolls away while the admin looks for somewhere to copy it.
+      if (temporaryPassword) setNewUserPassword({ name, email: email.toLowerCase(), password: temporaryPassword });
+      else toast.success('Team member added');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not add that team member');
+    }
   };
 
-  const handleToggleActive = (u: UserType) => {
+  const handleToggleActive = async (u: UserType) => {
     if (u.id === user?.id) { toast.error("You cannot deactivate yourself"); return; }
-    update<UserType>('users', u.id, { active: !u.active });
+    // Revoking access is the one write here that must not merely appear to
+    // work: this used to touch localStorage only, so the account kept letting
+    // its holder in while the row went grey and the toast said otherwise.
+    try {
+      await patchUser(u.id, { active: !u.active });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not change that account');
+      return;
+    }
     if (user && tenant) logAudit({ tenantId: tenant.id, userId: user.id, userName: user.name, action: u.active ? 'deactivate' : 'activate', entity: 'user', entityId: u.id, details: `${u.active ? 'Deactivated' : 'Activated'} team member "${u.name}"` });
     refresh();
     toast.success(u.active ? 'User deactivated' : 'User activated');
   };
 
-  const handleDeleteUser = (u: UserType) => {
+  const handleDeleteUser = async (u: UserType) => {
     if (u.id === user?.id) { toast.error("You cannot delete yourself"); return; }
     if (!confirm(`Delete ${u.name}? This cannot be undone.`)) return;
-    remove('users', u.id);
+    try {
+      await deleteUser(u.id);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not remove that team member');
+      return;
+    }
     if (user && tenant) logAudit({ tenantId: tenant.id, userId: user.id, userName: user.name, action: 'delete', entity: 'user', entityId: u.id, details: `Removed team member "${u.name}"` });
     refresh();
     toast.success('User removed');
@@ -630,9 +656,13 @@ export default function Settings() {
                       <button onClick={() => handleToggleActive(u)} className="text-xs font-medium px-2 py-1 rounded-lg text-zinc-500 hover:bg-zinc-100 transition-colors">
                         {u.active ? 'Deactivate' : 'Activate'}
                       </button>
-                      <button onClick={() => handleDeleteUser(u)} className="p-1.5 rounded-lg hover:bg-red-50 text-zinc-400 hover:text-red-500 transition-colors">
-                        <Trash2 className="h-4 w-4" />
-                      </button>
+                      {/* The API has no delete route on purpose — a user row carries
+                          audit history and assignments. Deactivate ends access. */}
+                      {canHardDeleteUsers() && (
+                        <button onClick={() => handleDeleteUser(u)} className="p-1.5 rounded-lg hover:bg-red-50 text-zinc-400 hover:text-red-500 transition-colors">
+                          <Trash2 className="h-4 w-4" />
+                        </button>
+                      )}
                     </div>
                   )}
                 </div>
@@ -1623,6 +1653,43 @@ export default function Settings() {
       </div>
 
       {/* Add User Modal */}
+      {/* The one-time password, shown once because that is all the server will
+          ever tell us. It is the invited person's only way in, so it gets a
+          panel that waits to be dismissed rather than a toast that expires. */}
+      {newUserPassword && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 space-y-4">
+            <div>
+              <h3 className="text-lg font-semibold text-zinc-900">{newUserPassword.name} can now sign in</h3>
+              <p className="text-sm text-zinc-500 mt-0.5">
+                Give them this password. It is shown once and cannot be looked up again —
+                if it is lost, reset it from this screen to issue a new one.
+              </p>
+            </div>
+            <div className="bg-zinc-50 border border-zinc-200 rounded-xl p-4 space-y-2">
+              <div>
+                <p className="text-[11px] font-semibold text-zinc-500 uppercase">Email</p>
+                <p className="text-sm text-zinc-900 font-mono break-all">{newUserPassword.email}</p>
+              </div>
+              <div>
+                <p className="text-[11px] font-semibold text-zinc-500 uppercase">Temporary password</p>
+                <p className="text-base text-zinc-900 font-mono tracking-wide break-all">{newUserPassword.password}</p>
+              </div>
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => { navigator.clipboard?.writeText(newUserPassword.password); toast.success("Password copied"); }}
+                className="px-4 py-2 border border-zinc-200 rounded-xl text-sm font-semibold text-zinc-600 hover:bg-zinc-50">
+                Copy password
+              </button>
+              <button onClick={() => setNewUserPassword(null)}
+                className="px-4 py-2 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700">
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {showAddUser && (
         <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => setShowAddUser(false)}>
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 animate-fade-in" onClick={e => e.stopPropagation()}>
@@ -1644,10 +1711,14 @@ export default function Settings() {
                 <input name="phone" placeholder="+91 98765 43210" className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20" />
               </div>
               <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-semibold text-zinc-500 uppercase mb-1">Password *</label>
-                  <input name="password" type="password" required minLength={6} placeholder="Min 6 chars" className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20" />
-                </div>
+                {/* Only the demo store takes a password from the form. The API
+                    mints a one-time password and returns it once on create. */}
+                {!isApiEnabled() && (
+                  <div>
+                    <label className="block text-xs font-semibold text-zinc-500 uppercase mb-1">Password *</label>
+                    <input name="password" type="password" required minLength={6} placeholder="Min 6 chars" className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20" />
+                  </div>
+                )}
                 <div>
                   <label className="block text-xs font-semibold text-zinc-500 uppercase mb-1">Role *</label>
                   <select name="role" required defaultValue="sales_executive" className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20">

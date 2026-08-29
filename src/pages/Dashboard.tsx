@@ -8,7 +8,9 @@ import {
   UserCheck, Wallet, PhoneCall, CalendarCheck,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { getByTenant, update, logAudit } from '../services/db';
+import { getByTenant, logAudit } from '../services/db';
+import { patchLead } from '../services/leadWrites';
+import toast from 'react-hot-toast';
 import { apiGetLeads, apiGetUnits, apiGetProjects, apiGetTasks, apiGetLeadActivities } from '../services/apiClient';
 import { toActivity } from '../services/leadActivityWrites';
 import { useTenantUsers } from '../hooks/useTenantUsers';
@@ -515,9 +517,18 @@ export default function Dashboard() {
 
   const staleHours = (l: Lead) => Math.floor((Date.now() - new Date(l.lastContact).getTime()) / 3600000);
 
-  const handleReassignAtRisk = (lead: Lead) => {
+  const handleReassignAtRisk = async (lead: Lead) => {
     if (!topPerformer || !user) return;
-    update<Lead>('leads', lead.id, { assignedTo: topPerformer.id, lastContact: new Date().toISOString() });
+    // Through leadWrites, not `update` directly: this wrote to localStorage in
+    // both modes, so against the API the reassignment survived until the next
+    // refetch of /api/leads put the old owner back — silently, and only for
+    // the manager who did it.
+    try {
+      await patchLead(lead.id, { assignedTo: topPerformer.id, lastContact: new Date().toISOString() });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not reassign that lead');
+      return;
+    }
     logAudit({
       tenantId, userId: user.id, userName: user.name, action: 'reassign',
       entity: 'lead', entityId: lead.id,

@@ -1,12 +1,13 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   CalendarClock, CheckCircle2, XCircle, UserX, RefreshCw, MapPin,
-  Clock, ArrowRight, Users, TrendingUp,
+  Clock, ArrowRight, Users, TrendingUp, Plus,
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { useAuth } from '../context/AuthContext';
 import {
   apiGetSiteVisits, apiGetSiteVisitFunnel, apiRescheduleSiteVisit, apiCloseSiteVisit,
+  apiScheduleSiteVisit, apiGetLeads, apiGetUsers,
   type ApiSiteVisit,
 } from '../services/apiClient';
 import { receivedOn, sinceArrival, localeFor } from '../utils/format';
@@ -46,7 +47,7 @@ const OUTCOME_STYLE: Record<string, string> = {
 const label = (s: string) => s.replace(/_/g, ' ');
 
 export default function SiteVisits() {
-  const { hasPermission, tenant } = useAuth();
+  const { hasPermission, tenant, user } = useAuth();
   const appLocale = localeFor(tenant?.currency);
   const canWrite = hasPermission('manage_leads') || hasPermission('manage_own_leads');
 
@@ -57,7 +58,61 @@ export default function SiteVisits() {
   const [refreshKey, setRefreshKey] = useState(0);
   const [closing, setClosing] = useState<ApiSiteVisit | null>(null);
 
+  /**
+   * Scheduling a visit.
+   *
+   * The header above lists what this page exists to make possible — scheduled,
+   * reassigned, rescheduled, counted. Three of those shipped. `POST
+   * /api/site-visits` and `apiScheduleSiteVisit` both existed and were both
+   * tested, and nothing called either, so the conversion event of the whole
+   * funnel could still only be recorded after the fact as a lead activity.
+   */
+  const [scheduling, setScheduling] = useState(false);
+  const [leads, setLeads] = useState<Array<{ id: string; name: string }>>([]);
+  const [staff, setStaff] = useState<Array<{ id: string; name: string }>>([]);
+  const [form, setForm] = useState({ leadId: '', assignedTo: '', scheduledAt: '', durationMinutes: 45 });
+  const [saving, setSaving] = useState(false);
+
   const refresh = () => setRefreshKey(k => k + 1);
+
+  // Only when the modal opens — a workspace can hold thousands of leads, and
+  // the list of visits does not need them.
+  useEffect(() => {
+    if (!scheduling) return;
+    let cancelled = false;
+    Promise.all([apiGetLeads().catch(() => []), apiGetUsers().catch(() => [])])
+      .then(([l, u]) => {
+        if (cancelled) return;
+        setLeads((l as Array<{ id: string; name: string }>).slice(0, 500));
+        // Defaults to whoever is scheduling, which is right far more often
+        // than not — a rep books their own visit.
+        setStaff((u as Array<{ id: string; name: string; active?: boolean }>).filter(x => x.active !== false));
+        setForm(f => ({ ...f, assignedTo: f.assignedTo || user?.id || '' }));
+      });
+    return () => { cancelled = true; };
+  }, [scheduling, user?.id]);
+
+  const schedule = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSaving(true);
+    try {
+      await apiScheduleSiteVisit({
+        leadId: form.leadId,
+        assignedTo: form.assignedTo,
+        // datetime-local has no zone; the server stores an instant, so send one.
+        scheduledAt: new Date(form.scheduledAt).toISOString(),
+        durationMinutes: Number(form.durationMinutes) || 45,
+      });
+      toast.success('Visit scheduled');
+      setScheduling(false);
+      setForm({ leadId: '', assignedTo: '', scheduledAt: '', durationMinutes: 45 });
+      refresh();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not schedule that visit');
+    } finally {
+      setSaving(false);
+    }
+  };
 
   // The window is applied HERE rather than by the server so switching it does
   // not re-fetch: a diary is small, and the visits already in hand answer every
@@ -148,12 +203,22 @@ export default function SiteVisits() {
             Scheduled → completed → booked. {conversion}% of completed visits convert.
           </p>
         </div>
-        <button
-          onClick={refresh}
-          className="flex items-center gap-2 px-3 py-2.5 bg-white border border-zinc-200 rounded-xl text-sm font-medium text-zinc-600 hover:bg-zinc-50 transition-colors"
-        >
-          <RefreshCw className="h-4 w-4" /> Refresh
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={refresh}
+            className="flex items-center gap-2 px-3 py-2.5 bg-white border border-zinc-200 rounded-xl text-sm font-medium text-zinc-600 hover:bg-zinc-50 transition-colors"
+          >
+            <RefreshCw className="h-4 w-4" /> Refresh
+          </button>
+          {canWrite && (
+            <button
+              onClick={() => setScheduling(true)}
+              className="flex items-center gap-2 px-4 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 transition-colors"
+            >
+              <Plus className="h-4 w-4" /> Schedule visit
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
@@ -262,6 +327,83 @@ export default function SiteVisits() {
           </div>
         )}
       </div>
+
+      {scheduling && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-zinc-900/50 backdrop-blur-sm p-4"
+          onClick={() => setScheduling(false)} role="dialog" aria-modal="true" aria-label="Schedule site visit"
+        >
+          <form
+            onSubmit={schedule} onClick={e => e.stopPropagation()}
+            className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 space-y-4"
+          >
+            <div>
+              <h3 className="text-lg font-semibold text-zinc-900">Schedule a visit</h3>
+              <p className="text-sm text-zinc-500 mt-0.5">
+                The conversion event of the funnel — everything after this is measured against it.
+              </p>
+            </div>
+
+            <label className="block">
+              <span className="block text-[11px] font-semibold text-zinc-500 uppercase mb-1">Lead</span>
+              <select
+                required value={form.leadId}
+                onChange={e => setForm(f => ({ ...f, leadId: e.target.value }))}
+                className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm"
+              >
+                <option value="">Select a lead…</option>
+                {leads.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
+              </select>
+            </label>
+
+            <label className="block">
+              <span className="block text-[11px] font-semibold text-zinc-500 uppercase mb-1">Assigned to</span>
+              <select
+                required value={form.assignedTo}
+                onChange={e => setForm(f => ({ ...f, assignedTo: e.target.value }))}
+                className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm"
+              >
+                <option value="">Select someone…</option>
+                {staff.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+              </select>
+            </label>
+
+            <div className="grid grid-cols-3 gap-3">
+              <label className="block col-span-2">
+                <span className="block text-[11px] font-semibold text-zinc-500 uppercase mb-1">Date &amp; time</span>
+                <input
+                  type="datetime-local" required value={form.scheduledAt}
+                  onChange={e => setForm(f => ({ ...f, scheduledAt: e.target.value }))}
+                  className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm"
+                />
+              </label>
+              <label className="block">
+                <span className="block text-[11px] font-semibold text-zinc-500 uppercase mb-1">Minutes</span>
+                <input
+                  type="number" min={5} max={600} step={5} value={form.durationMinutes}
+                  onChange={e => setForm(f => ({ ...f, durationMinutes: Number(e.target.value) }))}
+                  className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm tabular-nums"
+                />
+              </label>
+            </div>
+
+            <div className="flex justify-end gap-2 pt-1">
+              <button
+                type="button" onClick={() => setScheduling(false)}
+                className="px-4 py-2.5 border border-zinc-200 rounded-xl text-sm font-semibold text-zinc-600 hover:bg-zinc-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit" disabled={saving}
+                className="px-4 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 disabled:opacity-60"
+              >
+                {saving ? 'Scheduling…' : 'Schedule visit'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
 
       {/* Closing a visit is where the funnel number comes from, so the outcome
           is required rather than optional — a completed visit with no outcome

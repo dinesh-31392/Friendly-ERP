@@ -47,7 +47,8 @@
     "verify:gateway": "node scripts/verify-gateway.mjs",
     "verify:ingest": "node scripts/verify-lead-ingest.mjs",
     "verify:gst": "node scripts/verify-gst.mjs",
-    "verify:telephony": "node scripts/verify-telephony.mjs"
+    "verify:telephony": "node scripts/verify-telephony.mjs",
+    "verify:einvoice": "node scripts/verify-einvoice.mjs"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",

@@ -2709,3 +2709,131 @@ export async function apiAllocateEscrow(projectId?: string): Promise<number> {
   });
   return res.allocated;
 }
+
+// ── E-invoicing / IRN (server/src/einvoice.ts, migration 058) ────────────────
+
+export interface ApiEinvoice {
+  id: string;
+  invoiceId: string;
+  docType: 'INV' | 'CRN' | 'DBN';
+  docNo: string;
+  issueDate: string;
+  financialYear: string;
+  supplierGstin: string;
+  buyerGstin: string;
+  taxableValue: number;
+  totalValue: number;
+  irn: string | null;
+  status: 'prepared' | 'registered' | 'cancelled' | 'rejected';
+  ackNo: string | null;
+  ackDate: string | null;
+  signedQr: string | null;
+  cancelReason: string | null;
+  cancelledAt: string | null;
+  rejectReason: string | null;
+  /** Whether the portal's 24-hour cancellation window is still open. */
+  cancellable: boolean;
+}
+
+export interface ApiEinvoicePreview {
+  invoiceId: string;
+  /** Whether this workspace is above the turnover threshold at all. */
+  enabled: boolean;
+  eligible: boolean;
+  reasons: string[];
+  irn: string | null;
+  financialYear: string;
+}
+
+export async function apiGetEinvoices(): Promise<ApiEinvoice[]> {
+  return (await request<{ einvoices: ApiEinvoice[] }>('/api/einvoices')).einvoices;
+}
+
+/** Read-only: why an invoice can or cannot be registered. */
+export async function apiEinvoicePreview(invoiceId: string): Promise<ApiEinvoicePreview> {
+  return request<ApiEinvoicePreview>(`/api/invoices/${invoiceId}/einvoice/preview`);
+}
+
+/** Builds and stores the INV-01 payload. Does NOT contact the portal. */
+export async function apiPrepareEinvoice(
+  invoiceId: string, docType: 'INV' | 'CRN' | 'DBN' = 'INV',
+): Promise<ApiEinvoice> {
+  const res = await request<{ einvoice: ApiEinvoice }>(`/api/invoices/${invoiceId}/einvoice`, {
+    method: 'POST', body: JSON.stringify({ docType }),
+  });
+  return res.einvoice;
+}
+
+/** Record what the IRP returned. The IRN is checked against the derived one. */
+export async function apiRegisterEinvoice(
+  id: string, input: { irn: string; ackNo: string; ackDate: string; signedQr?: string },
+): Promise<ApiEinvoice> {
+  const res = await request<{ einvoice: ApiEinvoice }>(`/api/einvoices/${id}/register`, {
+    method: 'POST', body: JSON.stringify(input),
+  });
+  return res.einvoice;
+}
+
+export async function apiCancelEinvoice(id: string, reason: string): Promise<ApiEinvoice> {
+  const res = await request<{ einvoice: ApiEinvoice }>(`/api/einvoices/${id}/cancel`, {
+    method: 'POST', body: JSON.stringify({ reason }),
+  });
+  return res.einvoice;
+}
+
+/** The INV-01 file to upload to the IRP. Bearer token, so it is fetched. */
+export async function apiEinvoiceJson(id: string): Promise<{ url: string; filename: string }> {
+  const res = await fetch(`${getApiUrl()}/api/einvoices/${id}/json`, {
+    headers: { ...(getApiToken() ? { Authorization: `Bearer ${getApiToken()}` } : {}) },
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Could not download the e-invoice (${res.status})`);
+  }
+  const m = /filename="([^"]+)"/i.exec(res.headers.get('Content-Disposition') ?? '');
+  return { url: URL.createObjectURL(await res.blob()), filename: m?.[1] ?? 'einvoice.json' };
+}
+
+export interface ApiEinvoiceCandidate {
+  id: string;
+  invoiceNo: string;
+  issueDate: string;
+  customerName: string;
+  customerGstin: string;
+  taxableValue: number;
+  totalValue: number;
+}
+
+/** Taxed B2B invoices with no live registration yet. */
+export async function apiEligibleForEinvoice(): Promise<ApiEinvoiceCandidate[]> {
+  return (await request<{ invoices: ApiEinvoiceCandidate[] }>('/api/einvoices/eligible')).invoices;
+}
+
+// ── The workspace editing itself (server/src/routes/workspaceRoutes.ts) ──────
+
+export interface ApiWorkspace {
+  id: string; name: string; company: string; slug: string;
+  email: string; phone: string; address: string; rera: string;
+  /** The original free-text field. Kept in step with `gstin` on save. */
+  gst: string;
+  /** What GST returns and e-invoicing actually read. */
+  gstin: string;
+  stateCode: string; city: string; pincode: string;
+  einvoicingEnabled: boolean;
+  currency: string; country: string; plan: string; status: string;
+}
+
+export async function apiGetWorkspace(): Promise<ApiWorkspace> {
+  return (await request<{ workspace: ApiWorkspace }>('/api/workspace')).workspace;
+}
+
+export async function apiUpdateWorkspace(patch: {
+  company?: string; name?: string; email?: string; phone?: string;
+  address?: string; rera?: string; gstin?: string; stateCode?: string;
+  city?: string; pincode?: string; einvoicingEnabled?: boolean;
+}): Promise<ApiWorkspace> {
+  const res = await request<{ workspace: ApiWorkspace }>('/api/workspace', {
+    method: 'PATCH', body: JSON.stringify(patch),
+  });
+  return res.workspace;
+}

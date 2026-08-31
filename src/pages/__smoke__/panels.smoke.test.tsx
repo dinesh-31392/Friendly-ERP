@@ -33,6 +33,7 @@ const PANELS: [string, () => Promise<{ default: React.ComponentType }>][] = [
   ['TallyExportPanel',    () => import('../../components/TallyExportPanel')],
   ['ChannelIntegrations', () => import('../../components/ChannelIntegrations')],
   ['ReceiptsPanel',       () => import('../../components/ReceiptsPanel')],
+  ['EinvoicePanel',       () => import('../../components/EinvoicePanel')],
 ];
 
 let errorSpy: ReturnType<typeof vi.spyOn>;

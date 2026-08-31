@@ -37,11 +37,34 @@ await admin.connect();
 const SUPPLIER_GSTIN = '27AAPFU0939F1ZV';
 const BUYER_MH_GSTIN = '27AACCM9910C1ZN';
 
+// The core stages. Lead writes are validated against the ACTIVE pipeline, so a
+// tenant without one cannot hold a lead at any stage.
+const PIPELINE = { stages: [
+  { key: 'new', id: 'new', label: 'New', color: 'bg-blue-500', core: true },
+  { key: 'contacted', id: 'contacted', label: 'Contacted', color: 'bg-indigo-500', core: true },
+  { key: 'qualified', id: 'qualified', label: 'Qualified', color: 'bg-violet-500', core: true },
+  { key: 'site_visit', id: 'site_visit', label: 'Site Visit', color: 'bg-amber-500', core: true },
+  { key: 'negotiation', id: 'negotiation', label: 'Negotiation', color: 'bg-orange-500', core: true },
+  { key: 'booked', id: 'booked', label: 'Booked', color: 'bg-emerald-500', core: true },
+  { key: 'lost', id: 'lost', label: 'Lost', color: 'bg-red-400', core: true },
+] };
+
 async function workspace(slug, perms, { gstin = SUPPLIER_GSTIN, state = '27' } = {}) {
   const t = (await admin.query(
     `INSERT INTO tenants (name, company, slug, email, gstin, state_code)
      VALUES ($1,$1,$2,$3,$4,$5) RETURNING id`,
     [`${MARK} ${slug}`, `${MARK}-${slug}`, `${MARK}-${slug}@gst.test`, gstin, state])).rows[0];
+  // A tenant with no active pipeline is not merely incomplete: lead stage
+  // validation refuses every write against it, and the suites that enumerate
+  // tenants (golive, cascade, merge) then fail naming a workspace they did not
+  // create. Suites that mint tenants directly must seed one, exactly as
+  // seed-test-fixtures does.
+  await admin.query(
+    `INSERT INTO schema_definitions (tenant_id, entity, kind, version, is_active, definition)
+     VALUES ($1,'lead','pipeline',1,true,$2)
+     ON CONFLICT (tenant_id, entity, kind, version)
+     DO UPDATE SET definition = EXCLUDED.definition, is_active = true`,
+    [t.id, JSON.stringify(PIPELINE)]);
   const role = (await admin.query(
     `INSERT INTO roles (tenant_id, name, is_system) VALUES ($1,'Accounts',false) RETURNING id`, [t.id])).rows[0];
   if (perms.length) {

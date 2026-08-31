@@ -16,6 +16,7 @@ import {
 } from '../services/apiClient';
 import GstReturnsPanel from '../components/GstReturnsPanel';
 import ReceiptsPanel from '../components/ReceiptsPanel';
+import EinvoicePanel from '../components/EinvoicePanel';
 import { isBillOverdue, projectActuals, formatPoNumber } from '../services/procurementService';
 import { isFilingOverdue, markFiled, nextDueDate } from '../services/complianceService';
 import { needsApproval } from '../services/approvalService';
@@ -42,7 +43,7 @@ const billStatusColors: Record<VendorBillStatus, string> = {
 
 const invoiceTypes = ['Booking Token', '1st Installment', '2nd Installment', '3rd Installment', 'Final Payment', 'Quotation', 'Refund'];
 
-type Tab = 'receivables' | 'receipts' | 'payables' | 'budgets' | 'compliance' | 'demands' | 'rera' | 'refunds' | 'gst';
+type Tab = 'receivables' | 'receipts' | 'payables' | 'budgets' | 'compliance' | 'demands' | 'rera' | 'refunds' | 'gst' | 'einvoice';
 
 export default function Billing() {
   const { user, tenant, hasPermission } = useAuth();
@@ -559,6 +560,7 @@ export default function Billing() {
     // tracks deadlines, the other produces the thing you file.
     { id: 'receipts' as Tab, label: 'Receipts', icon: FileText },
     { id: 'gst' as Tab, label: 'GST Returns', icon: FileText },
+    { id: 'einvoice' as Tab, label: 'E-Invoicing', icon: FileText },
   ];
   const filingsDue = filings.filter(f => f.status === 'pending' && new Date(f.dueDate).getTime() <= Date.now() + 14 * 86400000).length;
 
@@ -1089,6 +1091,7 @@ export default function Billing() {
           which is the correct thing to show. */}
       {tab === 'receipts' && <ReceiptsPanel currency={currency} />}
       {tab === 'gst' && <GstReturnsPanel currency={currency} />}
+      {tab === 'einvoice' && <EinvoicePanel currency={currency} />}
 
       {tab === 'refunds' && (
         <div className="bg-white rounded-2xl border border-zinc-200/60 overflow-hidden">

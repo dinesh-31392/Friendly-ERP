@@ -7,8 +7,9 @@ import {
   Monitor, ShieldCheck,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { isApiEnabled, apiGetNotificationPrefs } from '../services/apiClient';
+import { isApiEnabled, apiGetNotificationPrefs, apiGetWorkspace } from '../services/apiClient';
 import { createUser, patchUser, deleteUser, canHardDeleteUsers } from '../services/userWrites';
+import { saveWorkspaceProfile } from '../services/workspaceWrites';
 import * as notificationWrites from '../services/notificationWrites';
 import IntegrationsPanel from '../components/IntegrationsPanel';
 import WhatsAppStoragePanel from '../components/WhatsAppStoragePanel';
@@ -90,6 +91,12 @@ export default function Settings() {
   const [contactPhone, setContactPhone] = useState(tenant?.phone || '');
   const [rera, setRera] = useState(tenant?.rera || '');
   const [gst, setGst] = useState(tenant?.gst || '');
+  // Read by GST returns and e-invoicing. Previously unreachable: the form wrote
+  // the legacy free-text field and these read a different column entirely.
+  const [stateCode, setStateCode] = useState('');
+  const [city, setCity] = useState('');
+  const [pincode, setPincode] = useState('');
+  const [einvoicingEnabled, setEinvoicingEnabled] = useState(false);
   const [address, setAddress] = useState(tenant?.address || '');
   const [brandVoice, setBrandVoice] = useState(tenant?.brandVoice || '');
   const [audience, setAudience] = useState(tenant?.audience || '');
@@ -154,6 +161,28 @@ export default function Settings() {
   };
   const [notifications, setNotifications] = useState<Record<string, boolean>>(NOTIFICATION_DEFAULTS);
 
+  // The tax fields live on the server and are not part of the cached session,
+  // so they are fetched rather than read off `tenant`. Without this the form
+  // would show blanks over values that are actually set, and saving would
+  // clear them.
+  useEffect(() => {
+    if (!isApiEnabled()) return;
+    let cancelled = false;
+    apiGetWorkspace()
+      .then(w => {
+        if (cancelled) return;
+        setGst(w.gstin || w.gst || '');
+        setStateCode(w.stateCode || '');
+        setCity(w.city || '');
+        setPincode(w.pincode || '');
+        setEinvoicingEnabled(!!w.einvoicingEnabled);
+      })
+      // A viewer without manage_settings gets a 403 here and simply sees the
+      // fields they cannot edit anyway.
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [refreshKey]);
+
   useEffect(() => {
     if (!isApiEnabled()) return;
     apiGetNotificationPrefs()
@@ -177,21 +206,32 @@ export default function Settings() {
 
   const [savingProfile, setSavingProfile] = useState(false);
   
-  const handleSaveProfile = () => {
+  const handleSaveProfile = async () => {
     if (!tenant) return;
     if (!company.trim() || !brandName.trim()) {
       toast.error('Company name and brand name are required');
       return;
     }
     setSavingProfile(true);
-    setTimeout(() => {
-      update<Tenant>('tenants', tenant.id, { company, name: brandName, email: contactEmail, phone: contactPhone, rera, gst, address });
+    try {
+      // Through workspaceWrites: this wrote to localStorage behind a 500ms
+      // timeout that looked like a save, so in API mode the whole profile
+      // reverted at the next session refresh.
+      await saveWorkspaceProfile(tenant.id, {
+        company, name: brandName, email: contactEmail, phone: contactPhone,
+        rera, address, gstin: gst, stateCode, city, pincode, einvoicingEnabled,
+      });
       if (user) logAudit({ tenantId: tenant.id, userId: user.id, userName: user.name, action: 'update', entity: 'tenant', entityId: tenant.id, details: `Updated builder profile: ${company}` });
-      setSavingProfile(false);
       toast.success('Profile updated successfully');
       refresh();
       refreshSession();
-    }, 500);
+    } catch (err) {
+      // The server checks the GSTIN's check digit and that its first two digits
+      // agree with the state code; both refusals name the field.
+      toast.error(err instanceof Error ? err.message : 'Could not save the profile');
+    } finally {
+      setSavingProfile(false);
+    }
   };
 
   const [savingBrand, setSavingBrand] = useState(false);
@@ -445,16 +485,79 @@ export default function Settings() {
                 />
               </div>
               <div>
-                <label className="block text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-1.5">GST Number</label>
+                <label className="block text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-1.5">GSTIN</label>
                 <input 
                   disabled={!canManageSettings} 
                   value={gst} 
-                  onChange={e => setGst(e.target.value)} 
-                  placeholder="Enter GST number" 
+                  onChange={e => setGst(e.target.value.toUpperCase())} 
+                  placeholder="27AAPFU0939F1ZV" maxLength={15} 
                   className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-400 disabled:opacity-60 disabled:cursor-not-allowed" 
+                />
+                <p className="text-[10px] text-zinc-400 mt-1">
+                  Checked on save. GST returns and e-invoicing both read this — until it is
+                  set, no return can be filed and no invoice can be registered.
+                </p>
+              </div>
+            </div>
+
+            {/* The seller block the IRP validates. Separate from the address
+                above because Loc and Pin are their own mandatory fields on a
+                tax document, and one free-text line cannot be split into them
+                reliably enough to put on one. */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div>
+                <label className="block text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-1.5">State code</label>
+                <input
+                  disabled={!canManageSettings}
+                  value={stateCode}
+                  maxLength={2}
+                  onChange={e => setStateCode(e.target.value.replace(/\D/g, '').slice(0, 2))}
+                  placeholder="27"
+                  className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-400 disabled:opacity-60 disabled:cursor-not-allowed font-mono tabular-nums"
+                />
+                <p className="text-[10px] text-zinc-400 mt-1">
+                  Left blank, it is taken from the GSTIN's first two digits.
+                </p>
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-1.5">City</label>
+                <input
+                  disabled={!canManageSettings}
+                  value={city}
+                  onChange={e => setCity(e.target.value)}
+                  placeholder="Mumbai"
+                  className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-400 disabled:opacity-60 disabled:cursor-not-allowed"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-1.5">Pincode</label>
+                <input
+                  disabled={!canManageSettings}
+                  value={pincode}
+                  maxLength={6}
+                  onChange={e => setPincode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                  placeholder="400020"
+                  className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-400 disabled:opacity-60 disabled:cursor-not-allowed tabular-nums"
                 />
               </div>
             </div>
+
+            <label className="flex items-start gap-2.5 p-3 bg-zinc-50 rounded-xl cursor-pointer">
+              <input
+                type="checkbox"
+                disabled={!canManageSettings}
+                checked={einvoicingEnabled}
+                onChange={e => setEinvoicingEnabled(e.target.checked)}
+                className="mt-0.5"
+              />
+              <span className="text-xs text-zinc-600">
+                <span className="font-medium text-zinc-800">E-invoicing applies to this workspace</span> —
+                turn on once aggregate turnover crosses the threshold. Invoices in scope must then
+                carry an IRN before they are issued, and Billing → E-Invoicing lists the ones that
+                still need one. Below the threshold leave it off: nothing needs registering, and the
+                warnings would be noise.
+              </span>
+            </label>
             <div>
               <label className="block text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-1.5">Company Address</label>
               <textarea 

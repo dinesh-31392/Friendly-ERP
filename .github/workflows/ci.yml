@@ -216,6 +216,9 @@ jobs:
       - name: GST returns — the intra/inter-state split, and three outward tables
         run: node scripts/verify-gst.mjs
 
+      - name: E-invoicing — the IRN, the B2C exclusion, and the 24-hour window
+        run: node scripts/verify-einvoice.mjs
+
       - name: Click-to-call — the rep number never reaches the customer
         run: node scripts/verify-telephony.mjs
         working-directory: server

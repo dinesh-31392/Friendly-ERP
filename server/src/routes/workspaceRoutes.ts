@@ -43,6 +43,7 @@ export async function workspaceRoutes(app: FastifyInstance): Promise<void> {
       const { rows: [t] } = await db.query(
         `SELECT id, name, company, slug, email, phone, address, rera, gst,
                 gstin, state_code, city, pincode, einvoicing_enabled,
+                primary_color, logo_url, brand_voice, audience, channels,
                 currency, country, plan, status
            FROM tenants WHERE id = app_current_tenant()`);
       if (!t) return reply.code(404).send({ error: 'Workspace not found' });
@@ -60,6 +61,11 @@ export async function workspaceRoutes(app: FastifyInstance): Promise<void> {
           city: t.city ?? '',
           pincode: t.pincode ?? '',
           einvoicingEnabled: !!t.einvoicing_enabled,
+          primaryColor: t.primary_color ?? '',
+          logoUrl: t.logo_url ?? '',
+          brandVoice: t.brand_voice ?? '',
+          audience: t.audience ?? '',
+          channels: Array.isArray(t.channels) ? t.channels : [],
           currency: t.currency, country: t.country, plan: t.plan, status: t.status,
         },
       };
@@ -69,9 +75,15 @@ export async function workspaceRoutes(app: FastifyInstance): Promise<void> {
   /**
    * PATCH /api/workspace — update it.
    *
-   * Only the fields a workspace owns. Plan, status, slug and branch are the
-   * platform's and are deliberately absent: a builder admin raising their own
-   * plan by PATCHing this route is exactly the hole that omission closes.
+   * Only the fields a workspace owns. Plan, status and branch are the
+   * platform's and are deliberately absent from the schema: a builder admin
+   * raising their own plan by PATCHing this route is exactly the hole that
+   * omission closes, and the suite asserts both are rejected.
+   *
+   * The subdomain IS here, because a white-label workspace owns its own portal
+   * address — but it is globally unique, so a clash comes back as a 409 from
+   * the constraint rather than a pre-check, which under RLS could never see
+   * the row it would need to find.
    */
   app.patch<{
     Body: {
@@ -79,6 +91,8 @@ export async function workspaceRoutes(app: FastifyInstance): Promise<void> {
       address?: string; rera?: string;
       gstin?: string; stateCode?: string; city?: string; pincode?: string;
       einvoicingEnabled?: boolean;
+      primaryColor?: string; logoUrl?: string; slug?: string;
+      brandVoice?: string; audience?: string; channels?: string[];
     };
   }>(
     '/api/workspace',
@@ -100,6 +114,17 @@ export async function workspaceRoutes(app: FastifyInstance): Promise<void> {
             // Empty clears it; otherwise a real Indian pincode.
             pincode: { type: 'string', pattern: '^$|^[1-9][0-9]{5}$' },
             einvoicingEnabled: { type: 'boolean' },
+            // Branding. The logo is a data URI written by the client, capped
+            // well under the 2MB the upload control advertises.
+            primaryColor: { type: 'string', pattern: '^#[0-9a-fA-F]{6}$' },
+            logoUrl: { type: 'string', maxLength: 3_000_000 },
+            slug: { type: 'string', pattern: '^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$' },
+            brandVoice: { type: 'string', maxLength: 2000 },
+            audience: { type: 'string', maxLength: 500 },
+            channels: {
+              type: 'array', maxItems: 20,
+              items: { type: 'string', maxLength: 40 },
+            },
           },
         },
       },
@@ -145,6 +170,12 @@ export async function workspaceRoutes(app: FastifyInstance): Promise<void> {
         if (b.address !== undefined) put('address', b.address);
         if (b.rera !== undefined) put('rera', b.rera);
         if (b.city !== undefined) put('city', b.city);
+        if (b.primaryColor !== undefined) put('primary_color', b.primaryColor);
+        if (b.logoUrl !== undefined) put('logo_url', b.logoUrl);
+        if (b.slug !== undefined) put('slug', b.slug);
+        if (b.brandVoice !== undefined) put('brand_voice', b.brandVoice);
+        if (b.audience !== undefined) put('audience', b.audience);
+        if (b.channels !== undefined) put('channels', JSON.stringify(b.channels));
         if (b.pincode !== undefined) put('pincode', b.pincode);
         if (b.einvoicingEnabled !== undefined) put('einvoicing_enabled', b.einvoicingEnabled);
         if (gstin !== undefined) {
@@ -159,13 +190,28 @@ export async function workspaceRoutes(app: FastifyInstance): Promise<void> {
 
         if (!sets.length) return reply.code(400).send({ error: 'Nothing to update.' });
 
-        const { rows } = await db.query(
+        let rows;
+        try {
+          ({ rows } = await db.query(
           `UPDATE tenants SET ${sets.join(', ')}, updated_at = now()
             WHERE id = app_current_tenant()
             RETURNING id, name, company, slug, email, phone, address, rera, gst,
                       gstin, state_code, city, pincode, einvoicing_enabled,
                       currency, country, plan, status`,
-          vals);
+          vals));
+        } catch (e) {
+          // The subdomain is the workspace's public identity — the portal login
+          // and the microsite both resolve by it, so taking someone else's
+          // would hand you their customers' sign-in page. The uniqueness is
+          // enforced by the constraint rather than a SELECT, because tenants
+          // is under RLS: a pre-check could never see the row it must find.
+          if ((e as { code?: string }).code === '23505') {
+            return reply.code(409).send({
+              error: 'That subdomain is already taken — pick another.',
+            });
+          }
+          throw e;
+        }
         if (!rows[0]) return reply.code(404).send({ error: 'Workspace not found' });
 
         const t = rows[0];

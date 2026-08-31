@@ -114,7 +114,7 @@ export default function Settings() {
     reader.readAsDataURL(file);
   };
 
-  const handleSaveBranding = () => {
+  const handleSaveBranding = async () => {
     if (!tenant) return;
     const slug = slugify(slugValue);
     if (isPremium(tenant) && !slug) { toast.error('Subdomain cannot be empty'); return; }
@@ -125,11 +125,18 @@ export default function Settings() {
       toast.error(`"${slug}.friendlyerp.app" is already taken — pick another subdomain`);
       return;
     }
-    update<Tenant>('tenants', tenant.id, {
-      primaryColor,
-      logo: logoData,
-      ...(isPremium(tenant) ? { slug } : {}),
-    });
+    try {
+      // The server enforces the subdomain's uniqueness with the constraint;
+      // the client-side check above cannot see other tenants' rows under RLS.
+      await saveWorkspaceProfile(tenant.id, {
+        primaryColor,
+        logoUrl: logoData,
+        ...(isPremium(tenant) ? { slug } : {}),
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not save the branding');
+      return;
+    }
     if (user) logAudit({ tenantId: tenant.id, userId: user.id, userName: user.name, action: 'update', entity: 'tenant', entityId: tenant.id, details: 'Updated white-label branding' });
     toast.success('Branding saved — your portal and workspace now use it');
     refresh();
@@ -236,21 +243,24 @@ export default function Settings() {
 
   const [savingBrand, setSavingBrand] = useState(false);
   
-  const handleSaveBrand = () => {
+  const handleSaveBrand = async () => {
     if (!tenant) return;
     if (!brandVoice.trim()) {
       toast.error('Brand voice description is required');
       return;
     }
     setSavingBrand(true);
-    setTimeout(() => {
-      update<Tenant>('tenants', tenant.id, { brandVoice, audience, channels });
+    try {
+      await saveWorkspaceProfile(tenant.id, { brandVoice, audience, channels });
       if (user) logAudit({ tenantId: tenant.id, userId: user.id, userName: user.name, action: 'update', entity: 'tenant', entityId: tenant.id, details: 'Updated brand voice and AI settings' });
-      setSavingBrand(false);
       toast.success('Brand voice updated successfully');
       refresh();
       refreshSession();
-    }, 500);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not save the brand voice');
+    } finally {
+      setSavingBrand(false);
+    }
   };
 
   const toggleChannel = (ch: string) => {
@@ -339,6 +349,15 @@ export default function Settings() {
   const handleChangePlan = (planName: string) => {
     if (!tenant) return;
     if (tenant.plan === planName) return;
+    // A workspace does not raise its own plan. `/api/workspace` deliberately
+    // has no `plan` field — that is the platform's, and self-service billing
+    // does not exist yet — so against the API this used to write to
+    // localStorage and announce an upgrade that had not happened. Plan gates
+    // real limits, so believing it is worse than being told no.
+    if (isApiEnabled()) {
+      toast.error('Plan changes go through your account manager — this workspace cannot change its own plan.');
+      return;
+    }
     if (!confirm(`Switch to the ${planName} plan? (Demo build — no card is charged; in production this opens the payment gateway.)`)) return;
     update<Tenant>('tenants', tenant.id, { plan: planName, status: 'active', trialEndsAt: undefined });
     if (user) logAudit({ tenantId: tenant.id, userId: user.id, userName: user.name, action: 'update', entity: 'tenant', entityId: tenant.id, details: `Changed subscription plan to ${planName}` });

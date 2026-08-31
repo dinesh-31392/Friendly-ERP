@@ -33,6 +33,12 @@ export interface WorkspaceProfilePatch {
   city?: string;
   pincode?: string;
   einvoicingEnabled?: boolean;
+  primaryColor?: string;
+  logoUrl?: string;
+  slug?: string;
+  brandVoice?: string;
+  audience?: string;
+  channels?: string[];
 }
 
 /**
@@ -53,10 +59,12 @@ export async function saveWorkspaceProfile(
 
   // Demo store: the legacy free-text `gst` field is what the local Tenant type
   // has, so a GSTIN goes there.
-  const { gstin, einvoicingEnabled, stateCode, city, pincode, ...rest } = patch;
+  const { gstin, einvoicingEnabled, stateCode, city, pincode, logoUrl, ...rest } = patch;
   update<Tenant>('tenants', tenantId, {
     ...rest,
     ...(gstin !== undefined ? { gst: gstin } : {}),
+    // The demo Tenant type calls it `logo`, the column is `logo_url`.
+    ...(logoUrl !== undefined ? { logo: logoUrl } : {}),
   } as Partial<Tenant>);
   return null;
 }

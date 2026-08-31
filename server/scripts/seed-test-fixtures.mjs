@@ -103,6 +103,24 @@ async function tenant(slug, name) {
 }
 
 async function user(t, email, role, name) {
+  // One tenant per fixture address, enforced here rather than assumed.
+  //
+  // The upsert below is keyed on (tenant_id, email), so it is idempotent within
+  // a workspace but NOT across one being renamed. When this seeder's rival
+  // tenant slug changed from 'rival' to 'rivaltest', a long-lived test database
+  // kept both — two badmin@rival.test rows in two different tenants.
+  //
+  // The login route resolves an email without a tenant slug and refuses when it
+  // is ambiguous, which is correct behaviour and deliberately reports the same
+  // "Invalid email or password" as a wrong password. So the three isolation
+  // suites failed at "could not log in as rival tenant" with no hint that the
+  // cause was a stale row from an earlier schema.
+  //
+  // Deleting the strays makes a long-lived database self-heal instead of
+  // rotting silently. Safe here because this script seeds a TEST database and
+  // owns every address it writes.
+  await c.query('DELETE FROM users WHERE email = $1 AND tenant_id <> $2', [email, t.id]);
+
   // mfa_email_enabled = false: these accounts sign in programmatically, and a
   // second factor would make every suite measure the challenge flow instead of
   // what it is actually testing.

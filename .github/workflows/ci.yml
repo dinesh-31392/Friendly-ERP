@@ -103,6 +103,11 @@ jobs:
       # "gateway not configured" tests reach out to something.
       EVOLUTION_API_URL: ''
       EVOLUTION_API_KEY: ''
+      # Where the gateway and the telephony provider are told to call back. The
+      # connect route refuses without it rather than registering a webhook with
+      # no host, which is what it silently did before — so the WhatsApp suite
+      # needs one to get past /api/whatsapp/connect at all.
+      PUBLIC_URL: http://localhost:4055
       WHATSAPP_WORKER_INTERVAL_MS: 10000
       # Seventeen suites sign in one after another. The production cap of five
       # attempts per address per minute would fail every suite past the first,

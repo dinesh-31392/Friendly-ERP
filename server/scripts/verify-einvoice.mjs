@@ -104,7 +104,7 @@ const api = (token, path, init = {}) => fetch(BASE + path, {
 const post = (token, path, body) => api(token, path, { method: 'POST', body: JSON.stringify(body) });
 const get = (token, path) => api(token, path);
 
-const A = await workspace('a', ['view_finance', 'manage_finance']);
+const A = await workspace('a', ['view_finance', 'manage_finance', 'view_leads', 'manage_leads']);
 const B = await workspace('b', ['view_finance', 'manage_finance']);
 
 // ── the financial year, which decides the hash ──────────────────────────────
@@ -286,6 +286,82 @@ const noPerm = await api(readerOnly.token, '/api/workspace', {
   method: 'PATCH', body: JSON.stringify({ city: 'Nagpur' }),
 });
 ok('manage_settings is required to edit it', noPerm.status === 403, String(noPerm.status));
+
+
+console.log('\n=== PAN, WHICH 194-IA IS DEDUCTED AGAINST ===');
+// TDS under 194-IA has been computed since migration 050, but Form 26QB —
+// the challan the buyer actually files — needs the PAN of both parties, and
+// nothing stored one. These are the columns that make the deduction filable.
+
+// A GSTIN embeds its holder's PAN at characters 3 to 12, so a registered
+// builder never types it twice — and where both are given they must agree.
+const gstinPan = BUYER_MH_GSTIN.slice(2, 12);
+const panMismatch = await patch({ pan: `ZZZPZ9999Z` });
+ok('a PAN disagreeing with the workspace GSTIN is refused',
+  panMismatch.status === 400, String(panMismatch.status));
+
+const panShape = await patch({ pan: `NOTAPAN123` });
+ok('so is one of the wrong shape', panShape.status === 400, String(panShape.status));
+
+const panOk = await patch({ pan: gstinPan });
+ok('the PAN inside the GSTIN is accepted', panOk.status === 200,
+  String(panOk.status) + ' ' + JSON.stringify(await panOk.clone().json()).slice(0, 120));
+
+// The buyer side, and the masking that keeps it off a sales screen.
+const custRes = await post(A.token, `/api/customers`,
+  { name: 'PAN Buyer', pan: 'AAAPL1234C' });
+ok('a customer can be created with a PAN', custRes.status === 201, String(custRes.status));
+
+const badCust = await post(A.token, `/api/customers`,
+  { name: 'Bad PAN', pan: 'AAAPL12345' });
+ok('a malformed buyer PAN is refused', badCust.status === 400, String(badCust.status));
+
+// A finance user in the owning workspace sees the PAN in full.
+const seenByFinance = await (await get(A.token, `/api/customers`)).json();
+const panCustomer = (seenByFinance.customers ?? []).find(c => c.name === 'PAN Buyer');
+ok('manage_finance sees the PAN unmasked', panCustomer?.pan === 'AAAPL1234C', panCustomer?.pan);
+ok('and the holder type is reported', panCustomer?.panHolderType === 'Individual', panCustomer?.panHolderType);
+
+// A SALES user in the SAME workspace does not. This is the assertion that
+// matters: masking is about who is looking, not which tenant they belong to,
+// so it has to be tested inside the tenant that owns the row.
+const salesRole = (await admin.query(
+  `INSERT INTO roles (tenant_id, name, is_system) VALUES ($1,'Sales',false) RETURNING id`,
+  [A.tenantId])).rows[0];
+await admin.query(
+  `INSERT INTO role_permissions (role_id, permission_key)
+   SELECT $1, k FROM unnest($2::text[]) k ON CONFLICT DO NOTHING`,
+  [salesRole.id, ['view_leads']]);
+const salesEmail = `${MARK}-sales@ein.test`;
+await admin.query(
+  `INSERT INTO users (tenant_id, role_id, name, email, password_hash, active)
+   VALUES ($1,$2,'Sales',$3,$4,true)`,
+  [A.tenantId, salesRole.id, salesEmail, await argon2.hash(PW, { type: argon2.argon2id })]);
+const salesTok = (await (await fetch(BASE + '/api/auth/login', {
+  method: 'POST', headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ email: salesEmail, password: PW }),
+})).json()).token;
+
+const seenBySales = await (await get(salesTok, `/api/customers`)).json();
+const panAsSalesSees = (seenBySales.customers ?? []).find(c => c.name === 'PAN Buyer');
+ok('a sales user in the same workspace sees the buyer', !!panAsSalesSees);
+ok('but the PAN is masked', panAsSalesSees?.pan === '••••••1234C'.slice(-10) || /^•+/.test(panAsSalesSees?.pan ?? ''),
+  panAsSalesSees?.pan);
+ok('and it says so, so nobody reads the mask as the number',
+  panAsSalesSees?.panMasked === true, String(panAsSalesSees?.panMasked));
+
+// Recording one is a finance act, not a sales one.
+const salesTriesPan = await api(salesTok, `/api/customers/${panCustomer.id}`, {
+  method: 'PATCH', body: JSON.stringify({ pan: 'AAAPL9999C' }),
+});
+ok('and a sales user cannot set one', salesTriesPan.status === 403, String(salesTriesPan.status));
+
+// The KYC state that the schema refused until 059.
+const rejected = await api(A.token, `/api/customers/${panCustomer.id}`, {
+  method: 'PATCH', body: JSON.stringify({ kycStatus: 'rejected' }),
+});
+ok('KYC can be marked rejected, not just pending or verified',
+  rejected.status === 200, String(rejected.status));
 
 await admin.end();
 console.log(`\n===== ${pass} passed, ${fail} failed =====`);

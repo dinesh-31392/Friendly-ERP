@@ -1083,18 +1083,31 @@ export async function apiSaveMeta(entity: string, kind: string, definition: unkn
 
 // ── CRM adjacents: customers, lead activities, commissions ───────────────────
 
-export interface ApiCustomer { id: string; name: string; email?: string | null; phone: string; kycStatus: string; leadId?: string | null }
+export interface ApiCustomer {
+  id: string; name: string; email?: string | null; phone: string;
+  kycStatus: string; leadId?: string | null;
+  /** Masked unless the caller holds manage_finance — see panMasked. */
+  pan: string;
+  /** True when a PAN exists but is being shown masked. */
+  panMasked: boolean;
+  panHolderType: string;
+}
 export interface ApiLeadActivity { id: string; leadId: string; userId?: string | null; type: string; notes: string; scheduledAt?: string | null; outcome?: string | null; createdAt: string }
 export interface ApiCommission { id: string; brokerId: string; bookingId: string; amountEarned: number; amountPaid: number; status: string }
 
 export async function apiGetCustomers(): Promise<ApiCustomer[]> {
   return (await request<{ customers: ApiCustomer[] }>('/api/customers')).customers;
 }
-export async function apiCreateCustomer(input: { name: string; email?: string; phone?: string; leadId?: string; kycStatus?: string }): Promise<ApiCustomer> {
+export async function apiCreateCustomer(input: { name: string; email?: string; phone?: string; leadId?: string; kycStatus?: string; pan?: string }): Promise<ApiCustomer> {
   return (await request<{ customer: ApiCustomer }>('/api/customers', { method: 'POST', body: JSON.stringify(input) })).customer;
 }
 export async function apiUpdateCustomerKyc(id: string, kycStatus: string): Promise<ApiCustomer> {
   return (await request<{ customer: ApiCustomer }>(`/api/customers/${id}`, { method: 'PATCH', body: JSON.stringify({ kycStatus }) })).customer;
+}
+
+/** Recording a PAN needs manage_finance — it exists to be filed on Form 26QB. */
+export async function apiSetCustomerPan(id: string, pan: string): Promise<ApiCustomer> {
+  return (await request<{ customer: ApiCustomer }>(`/api/customers/${id}`, { method: 'PATCH', body: JSON.stringify({ pan }) })).customer;
 }
 export async function apiGetLeadActivities(leadId?: string, type?: string): Promise<ApiLeadActivity[]> {
   const params = new URLSearchParams();

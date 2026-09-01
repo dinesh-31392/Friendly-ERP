@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { checkPan, normalisePan, maskPan, panHolderType } from '../pan.js';
 import { withTenantContext } from '../db.js';
 import { requireAuth } from '../auth.js';
 
@@ -20,51 +21,105 @@ async function gate(db: import('pg').PoolClient, perm: string): Promise<boolean>
 
 export async function crmRoutes(app: FastifyInstance): Promise<void> {
   // ── Customers (booked buyers + KYC) ─────────────────────────────────────
-  const customerToApi = (r: Record<string, unknown>) => ({ id: r.id, name: r.name, email: r.email, phone: r.phone, kycStatus: r.kyc_status, leadId: r.lead_id });
+  /**
+   * PAN is masked by default.
+   *
+   * It identifies its holder to the tax department and is personal data under
+   * the DPDP Act, so a list of customers should not print it in full to
+   * everyone who can open the list. `canSeePan` is manage_finance — the desk
+   * that files Form 26QB — rather than the lead permissions that govern the
+   * rest of the record.
+   *
+   * The mask keeps the last four characters, which is what a person checks
+   * against the document in front of them; the first six identify the holder.
+   */
+  const customerToApi = (r: Record<string, unknown>, canSeePan = false) => ({
+    id: r.id, name: r.name, email: r.email, phone: r.phone,
+    kycStatus: r.kyc_status, leadId: r.lead_id,
+    pan: canSeePan ? (r.pan ?? '') : maskPan(String(r.pan ?? '')),
+    panMasked: !canSeePan && !!r.pan,
+    panHolderType: panHolderType(String(r.pan ?? '')),
+  });
 
   app.get('/api/customers', { preHandler: requireAuth }, async (req, reply) =>
     withTenantContext(req.ctx, async (db) => {
       if (!await gate(db, 'view_leads')) return reply.code(403).send({ error: 'Missing permission: view_leads' });
+      const canSeePan = await gate(db, 'manage_finance');
       const { rows } = await db.query('SELECT * FROM customers ORDER BY created_at DESC');
-      return { customers: rows.map(customerToApi) };
+      return { customers: rows.map(r => customerToApi(r, canSeePan)) };
     }),
   );
 
-  app.post<{ Body: { name: string; email?: string; phone?: string; leadId?: string; kycStatus?: string } }>(
+  app.post<{ Body: { name: string; email?: string; phone?: string; leadId?: string; kycStatus?: string; pan?: string } }>(
     '/api/customers',
     {
       preHandler: requireAuth,
       schema: { body: { type: 'object', required: ['name'], additionalProperties: false, properties: {
         name: { type: 'string', minLength: 1, maxLength: 160 }, email: { type: 'string', maxLength: 160 },
-        phone: { type: 'string', maxLength: 32 }, leadId: { type: 'string', pattern: UUID }, kycStatus: { type: 'string', enum: ['pending', 'verified'] },
+        phone: { type: 'string', maxLength: 32 }, leadId: { type: 'string', pattern: UUID },
+        kycStatus: { type: 'string', enum: ['pending', 'verified', 'rejected'] },
+        pan: { type: 'string', maxLength: 10 },
       } } },
     },
     async (req, reply) =>
       withTenantContext(req.ctx, async (db) => {
         if (!await gate(db, 'manage_leads')) return reply.code(403).send({ error: 'Missing permission: manage_leads' });
+        const pan = normalisePan(req.body.pan ?? '');
+        const panOk = checkPan(pan);
+        if (!panOk.ok) return reply.code(400).send({ error: panOk.reason });
+
         const { rows } = await db.query(
-          `INSERT INTO customers (tenant_id, name, email, phone, lead_id, kyc_status)
-           VALUES (app_current_tenant(), $1, $2, $3, $4, $5) RETURNING *`,
-          [req.body.name, req.body.email || null, req.body.phone || '', req.body.leadId || null, req.body.kycStatus || 'pending']);
-        reply.code(201); return { customer: customerToApi(rows[0]) };
+          `INSERT INTO customers (tenant_id, name, email, phone, lead_id, kyc_status, pan)
+           VALUES (app_current_tenant(), $1, $2, $3, $4, $5, $6) RETURNING *`,
+          [req.body.name, req.body.email || null, req.body.phone || '', req.body.leadId || null, req.body.kycStatus || 'pending', pan]);
+        reply.code(201);
+        return { customer: customerToApi(rows[0], await gate(db, 'manage_finance')) };
       }),
   );
 
-  app.patch<{ Params: { id: string }; Body: { kycStatus: string } }>(
+  app.patch<{ Params: { id: string }; Body: { kycStatus?: string; pan?: string } }>(
     '/api/customers/:id',
     {
       preHandler: requireAuth,
       schema: {
         params: { type: 'object', required: ['id'], properties: { id: { type: 'string', pattern: UUID } } },
-        body: { type: 'object', required: ['kycStatus'], additionalProperties: false, properties: { kycStatus: { type: 'string', enum: ['pending', 'verified'] } } },
+        body: {
+          type: 'object', minProperties: 1, additionalProperties: false,
+          properties: {
+            kycStatus: { type: 'string', enum: ['pending', 'verified', 'rejected'] },
+            pan: { type: 'string', maxLength: 10 },
+          },
+        },
       },
     },
     async (req, reply) =>
       withTenantContext(req.ctx, async (db) => {
         if (!await gate(db, 'manage_leads')) return reply.code(403).send({ error: 'Missing permission: manage_leads' });
-        const { rows } = await db.query('UPDATE customers SET kyc_status = $1 WHERE id = $2 RETURNING *', [req.body.kycStatus, req.params.id]);
+
+        // Recording a PAN is a finance act, not a sales one — it exists to be
+        // filed on Form 26QB. Editing the rest of the record stays with
+        // manage_leads.
+        if (req.body.pan !== undefined && !await gate(db, 'manage_finance')) {
+          return reply.code(403).send({ error: 'Missing permission: manage_finance' });
+        }
+
+        const sets: string[] = [];
+        const vals: unknown[] = [];
+        if (req.body.kycStatus !== undefined) { vals.push(req.body.kycStatus); sets.push(`kyc_status = $${vals.length}`); }
+        if (req.body.pan !== undefined) {
+          const pan = normalisePan(req.body.pan);
+          // Checked against the workspace's own GSTIN only for the SELLER; a
+          // buyer's PAN has no relationship to the builder's registration.
+          const panOk = checkPan(pan);
+          if (!panOk.ok) return reply.code(400).send({ error: panOk.reason });
+          vals.push(pan); sets.push(`pan = $${vals.length}`);
+        }
+        vals.push(req.params.id);
+
+        const { rows } = await db.query(
+          `UPDATE customers SET ${sets.join(', ')} WHERE id = $${vals.length} RETURNING *`, vals);
         if (!rows[0]) return reply.code(404).send({ error: 'Customer not found' });
-        return { customer: customerToApi(rows[0]) };
+        return { customer: customerToApi(rows[0], await gate(db, 'manage_finance')) };
       }),
   );
 

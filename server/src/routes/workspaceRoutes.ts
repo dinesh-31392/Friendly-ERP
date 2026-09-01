@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { withTenantContext } from '../db.js';
 import { requireAuth } from '../auth.js';
 import { isValidGstin, stateOfGstin } from '../gst.js';
+import { checkPan, normalisePan, panFromGstin } from '../pan.js';
 
 /**
  * The workspace editing ITSELF.
@@ -42,7 +43,7 @@ export async function workspaceRoutes(app: FastifyInstance): Promise<void> {
 
       const { rows: [t] } = await db.query(
         `SELECT id, name, company, slug, email, phone, address, rera, gst,
-                gstin, state_code, city, pincode, einvoicing_enabled,
+                gstin, state_code, city, pincode, pan, einvoicing_enabled,
                 primary_color, logo_url, brand_voice, audience, channels,
                 currency, country, plan, status
            FROM tenants WHERE id = app_current_tenant()`);
@@ -60,6 +61,7 @@ export async function workspaceRoutes(app: FastifyInstance): Promise<void> {
           stateCode: t.state_code ?? '',
           city: t.city ?? '',
           pincode: t.pincode ?? '',
+          pan: t.pan ?? '',
           einvoicingEnabled: !!t.einvoicing_enabled,
           primaryColor: t.primary_color ?? '',
           logoUrl: t.logo_url ?? '',
@@ -89,7 +91,7 @@ export async function workspaceRoutes(app: FastifyInstance): Promise<void> {
     Body: {
       company?: string; name?: string; email?: string; phone?: string;
       address?: string; rera?: string;
-      gstin?: string; stateCode?: string; city?: string; pincode?: string;
+      gstin?: string; stateCode?: string; city?: string; pincode?: string; pan?: string;
       einvoicingEnabled?: boolean;
       primaryColor?: string; logoUrl?: string; slug?: string;
       brandVoice?: string; audience?: string; channels?: string[];
@@ -109,6 +111,7 @@ export async function workspaceRoutes(app: FastifyInstance): Promise<void> {
             address: { type: 'string', maxLength: 500 },
             rera: { type: 'string', maxLength: 80 },
             gstin: { type: 'string', maxLength: 15 },
+            pan: { type: 'string', maxLength: 10 },
             stateCode: { type: 'string', pattern: STATE_CODE },
             city: { type: 'string', maxLength: 120 },
             // Empty clears it; otherwise a real Indian pincode.
@@ -159,6 +162,26 @@ export async function workspaceRoutes(app: FastifyInstance): Promise<void> {
           }
         }
 
+        if (b.pan !== undefined) {
+          // Checked against the GSTIN this request sets, or failing that the
+          // one already stored: a GSTIN embeds its holder's PAN at characters
+          // 3 to 12, so the two cannot disagree without one of them being
+          // wrong — and both are filed.
+          let against = gstin;
+          if (!against) {
+            const { rows: [cur] } = await db.query(
+              `SELECT gstin FROM tenants WHERE id = app_current_tenant()`);
+            against = (cur?.gstin as string) || undefined;
+          }
+          const panOk = checkPan(b.pan, against);
+          if (!panOk.ok) return reply.code(400).send({ error: panOk.reason });
+        }
+
+        // Setting a GSTIN with no PAN alongside it fills the PAN in, since the
+        // GSTIN already contains it. Saves a builder typing the same ten
+        // characters twice and guarantees the two agree.
+        const derivedPan = (gstin && b.pan === undefined) ? panFromGstin(gstin) : undefined;
+
         const sets: string[] = [];
         const vals: unknown[] = [];
         const put = (col: string, v: unknown) => { vals.push(v); sets.push(`${col} = $${vals.length}`); };
@@ -170,6 +193,8 @@ export async function workspaceRoutes(app: FastifyInstance): Promise<void> {
         if (b.address !== undefined) put('address', b.address);
         if (b.rera !== undefined) put('rera', b.rera);
         if (b.city !== undefined) put('city', b.city);
+        if (b.pan !== undefined) put('pan', normalisePan(b.pan));
+        else if (derivedPan) put('pan', derivedPan);
         if (b.primaryColor !== undefined) put('primary_color', b.primaryColor);
         if (b.logoUrl !== undefined) put('logo_url', b.logoUrl);
         if (b.slug !== undefined) put('slug', b.slug);

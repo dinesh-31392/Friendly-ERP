@@ -258,6 +258,40 @@ const noPerm = await workspace('c', ['view_leads']);
 const denied = await api(noPerm.token, '/api/erasure-requests');
 ok('a user without manage_settings is refused', denied.status === 403, String(denied.status));
 
+
+console.log('\n=== THE CUSTOMER RECORD, AND THE PAN IN IT ===');
+// `customers` was outside the erasure plan entirely, though it has always
+// held a name, an email and a phone — and since migration 059 it holds the
+// PAN, which identifies its holder to the tax department. The most
+// identifying field in the product, sitting in the one table a Data
+// Principal's request could not reach.
+const panEmail = `pan-${MARK}@pv.test`;
+const panLead = await person(A, { name: 'PAN Buyer', email: panEmail, phone: '+91 98200 33333', booked: false });
+await admin.query(
+  `INSERT INTO customers (tenant_id, name, email, phone, lead_id, pan)
+   VALUES ($1,$2,$3,$4,$5,$6)`,
+  [A.tenantId, 'PAN Buyer', panEmail, '+91 98200 33333', panLead, 'AAAPL1234C']);
+
+const rPan = (await (await post(A.token, '/api/erasure-requests', { subjectEmail: panEmail })).json()).request;
+const previewPan = (await (await api(A.token, `/api/erasure-requests/${rPan.id}/preview`)).json()).preview;
+ok('the plan reaches the customer record',
+  previewPan.steps.some(s => s.entity === 'customers' && s.action === 'erased'),
+  JSON.stringify(previewPan.steps.map(s => s.entity)));
+ok('and names the PAN as what goes with it',
+  previewPan.steps.some(s => s.entity === 'customers' && /PAN/.test(s.detail ?? '')));
+
+// Asserted, not assumed: without this a failed verify would leave the row in
+// place and the deletion check below would fail for the wrong reason.
+const vPan = await post(A.token, `/api/erasure-requests/${rPan.id}/verify`, { note: 'Identity confirmed for the PAN case.' });
+ok('the request verifies', vPan.status === 200,
+  `${vPan.status} ${JSON.stringify(await vPan.clone().json()).slice(0, 140)}`);
+const xPan = await post(A.token, `/api/erasure-requests/${rPan.id}/execute`, {});
+ok('and executes', xPan.status === 200,
+  `${xPan.status} ${JSON.stringify(await xPan.clone().json()).slice(0, 140)}`);
+const leftPan = Number((await admin.query(
+  'SELECT count(*)::int n FROM customers WHERE lead_id = $1', [panLead])).rows[0].n);
+ok('executing it actually removes the row', leftPan === 0, String(leftPan));
+
 for (const w of [A, B, noPerm]) await admin.query('DELETE FROM tenants WHERE id = $1', [w.tenantId]);
 await admin.end();
 console.log(`\n${pass} passed, ${fail} failed`);

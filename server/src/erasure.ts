@@ -122,6 +122,29 @@ export async function planErasure(
     });
   }
 
+  /**
+   * The customer record, which carries the PAN.
+   *
+   * This table was outside the erasure plan entirely, though it has always
+   * held a name, an email and a phone number — and since migration 059 it
+   * holds the buyer's PAN, which identifies its holder to the tax department.
+   * The most identifying field in the product sitting in the one table a Data
+   * Principal's request could not reach.
+   *
+   * It goes even for a buyer whose BOOKING must be retained. The statutory
+   * floor applies to the books of account, and the booking keeps the name it
+   * needs; the standalone contact record is held for convenience, and a PAN is
+   * not part of a voucher. Erasing it does not weaken the retained booking.
+   */
+  const customers = await countIn(
+    `SELECT count(*)::int n FROM customers WHERE lead_id = ANY($1::uuid[])`);
+  if (customers) {
+    steps.push({
+      entity: 'customers', action: 'erased', recordCount: customers, legalBasis: '',
+      detail: 'The buyer contact record, including the PAN held for Form 26QB.',
+    });
+  }
+
   if (bookedLeadIds.size) {
     const ids = [...bookedLeadIds];
     const bookings = await countIn(
@@ -184,6 +207,10 @@ export async function executeErasure(
     // conversation, and nothing requires keeping it.
     await db.query('DELETE FROM lead_activities WHERE lead_id = ANY($1::uuid[])', [plan.leadIds]);
     await db.query('DELETE FROM site_visits WHERE lead_id = ANY($1::uuid[])', [plan.leadIds]);
+    // Before the leads themselves: customers.lead_id is ON DELETE SET NULL, so
+    // deleting the lead first would orphan the customer row — and with it the
+    // PAN — beyond the reach of this or any later request.
+    await db.query('DELETE FROM customers WHERE lead_id = ANY($1::uuid[])', [plan.leadIds]);
   }
 
   if (redactedLeadIds.length) {
@@ -233,6 +260,13 @@ export async function findExpired(
                          WHERE created_at < now() - ($1 || ' days')::interval`,
       site_visits: `SELECT count(*)::int n FROM site_visits
                      WHERE created_at < now() - ($1 || ' days')::interval`,
+      // Only buyers with no booking. One with a booking is part of a record
+      // kept under the books-of-account floor, and sweeping their contact
+      // details away would leave a voucher naming somebody the system can no
+      // longer identify.
+      customers: `SELECT count(*)::int n FROM customers c
+                   WHERE c.created_at < now() - ($1 || ' days')::interval
+                     AND NOT EXISTS (SELECT 1 FROM bookings b WHERE b.customer_id = c.id)`,
     };
     const sql = SWEEPABLE[p.entity as string];
     if (!sql) continue;

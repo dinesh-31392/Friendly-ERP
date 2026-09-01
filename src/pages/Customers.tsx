@@ -3,7 +3,8 @@ import { UserCheck, Search, Plus, ShieldCheck, ShieldAlert, ShieldQuestion, Load
 import toast from 'react-hot-toast';
 import { useAuth } from '../context/AuthContext';
 import {
-  isApiEnabled, apiGetCustomers, apiCreateCustomer, apiUpdateCustomerKyc, apiGetLeads,
+  isApiEnabled, apiGetCustomers, apiCreateCustomer, apiUpdateCustomerKyc,
+  apiSetCustomerPan, apiGetLeads,
   type ApiCustomer,
 } from '../services/apiClient';
 
@@ -37,6 +38,17 @@ const KYC_ICON: Record<string, typeof ShieldCheck> = {
  *  list is: a free-text status is how "verifed" ends up in a compliance report. */
 const KYC_STATES = ['pending', 'verified', 'rejected'] as const;
 
+/**
+ * PAN — five letters, four digits, a letter.
+ *
+ * Checked here only to catch a typo before a round trip; the server validates
+ * the same shape and is the authority. Neither can do more than that: PAN's
+ * tenth character is a check character whose algorithm the Income Tax
+ * Department has never published, so nothing can prove a well-formed number
+ * was actually issued.
+ */
+const PAN_SHAPE = /^[A-Z]{3}[ABCFGHJLPT][A-Z]\d{4}[A-Z]$/;
+
 export default function Customers() {
   const { hasPermission } = useAuth();
   const canManage = hasPermission('manage_leads');
@@ -49,10 +61,12 @@ export default function Customers() {
   const [search, setSearch] = useState('');
   const [kycFilter, setKycFilter] = useState<string>('all');
   const [busyId, setBusyId] = useState<string | null>(null);
+  // Which row's PAN is being edited, and the value being typed into it.
+  const [panEdit, setPanEdit] = useState<{ id: string; value: string } | null>(null);
 
   const [showNew, setShowNew] = useState(false);
   const [leads, setLeads] = useState<Array<{ id: string; name: string }>>([]);
-  const [form, setForm] = useState({ name: '', email: '', phone: '', leadId: '' });
+  const [form, setForm] = useState({ name: '', email: '', phone: '', leadId: '', pan: '' });
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -108,6 +122,28 @@ export default function Customers() {
     }
   };
 
+  const savePan = async () => {
+    if (!panEdit) return;
+    const value = panEdit.value.trim().toUpperCase();
+    if (value && !PAN_SHAPE.test(value)) {
+      toast.error('That PAN is not the right shape — five letters, four digits, then a letter (AAAPL1234C).');
+      return;
+    }
+    setBusyId(panEdit.id);
+    try {
+      await apiSetCustomerPan(panEdit.id, value);
+      toast.success(value ? 'PAN recorded' : 'PAN cleared');
+      setPanEdit(null);
+      refresh();
+    } catch (e) {
+      // 403 when the signed-in user lacks manage_finance — recording a PAN is
+      // a finance act, not a sales one.
+      toast.error(e instanceof Error ? e.message : 'Could not save that PAN');
+    } finally {
+      setBusyId(null);
+    }
+  };
+
   const create = async (e: React.FormEvent) => {
     e.preventDefault();
     setSaving(true);
@@ -119,10 +155,11 @@ export default function Customers() {
         ...(form.email.trim() ? { email: form.email.trim() } : {}),
         ...(form.phone.trim() ? { phone: form.phone.trim() } : {}),
         ...(form.leadId ? { leadId: form.leadId } : {}),
+        ...(form.pan.trim() ? { pan: form.pan.trim() } : {}),
       });
       toast.success('Customer added');
       setShowNew(false);
-      setForm({ name: '', email: '', phone: '', leadId: '' });
+      setForm({ name: '', email: '', phone: '', leadId: '', pan: '' });
       refresh();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Could not add that customer');
@@ -218,6 +255,38 @@ export default function Customers() {
                     <p className="text-[11px] text-zinc-400">
                       {[c.phone, c.email].filter(Boolean).join(' · ') || 'No contact details'}
                     </p>
+                    {panEdit?.id === c.id ? (
+                      <div className="flex items-center gap-1.5 mt-1">
+                        <input
+                          autoFocus value={panEdit.value} maxLength={10}
+                          onChange={e => setPanEdit({ id: c.id, value: e.target.value.toUpperCase() })}
+                          onKeyDown={e => { if (e.key === 'Enter') savePan(); if (e.key === 'Escape') setPanEdit(null); }}
+                          placeholder="AAAPL1234C"
+                          className="w-36 px-2 py-1 bg-white border border-indigo-300 rounded-lg text-[11px] font-mono uppercase"
+                        />
+                        <button onClick={savePan} disabled={busyId === c.id}
+                          className="text-[11px] font-semibold text-indigo-600 hover:underline disabled:opacity-50">Save</button>
+                        <button onClick={() => setPanEdit(null)}
+                          className="text-[11px] text-zinc-400 hover:underline">Cancel</button>
+                      </div>
+                    ) : (
+                      <p className="text-[11px] text-zinc-500 mt-0.5 flex items-center gap-1.5">
+                        <span className="font-mono">{c.pan || <span className="font-sans text-zinc-400">No PAN on file</span>}</span>
+                        {c.panMasked ? (
+                          // Masked rather than hidden: a finance user needs to
+                          // know a PAN exists even from a screen that will not
+                          // show it to them in full.
+                          <span className="text-[10px] text-zinc-400">(masked)</span>
+                        ) : canManage && (
+                          <button
+                            onClick={() => setPanEdit({ id: c.id, value: c.pan ?? '' })}
+                            className="text-[10px] font-semibold text-indigo-600 hover:underline"
+                          >
+                            {c.pan ? 'edit' : 'add'}
+                          </button>
+                        )}
+                      </p>
+                    )}
                   </div>
                   <span className={`flex items-center gap-1 text-[11px] font-semibold px-2.5 py-1 rounded-full border capitalize ${
                     KYC_STYLE[kyc] ?? 'bg-zinc-100 text-zinc-600 border-zinc-200'}`}>
@@ -283,6 +352,21 @@ export default function Customers() {
                 />
               </label>
             </div>
+
+            <label className="block">
+              <span className="block text-[11px] font-semibold text-zinc-500 uppercase mb-1">
+                PAN <span className="normal-case font-normal text-zinc-400">(optional)</span>
+              </span>
+              <input
+                value={form.pan} maxLength={10}
+                onChange={e => setForm(f => ({ ...f, pan: e.target.value.toUpperCase() }))}
+                placeholder="AAAPL1234C"
+                className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm font-mono uppercase"
+              />
+              <span className="block text-[10px] text-zinc-400 mt-0.5">
+                Needed to file Form 26QB when TDS under 194-IA applies. It can be added later.
+              </span>
+            </label>
 
             <label className="block">
               <span className="block text-[11px] font-semibold text-zinc-500 uppercase mb-1">

@@ -34,6 +34,7 @@ import {
   CALL_STATUSES, type CallingMode, type CallStatus,
 } from '../services/callService';
 import toast from 'react-hot-toast';
+import { BRAND } from '../config/brand';
 
 function normalizePhone(phone: string | undefined | null): string {
   // Fed from CSV import rows as well as from leads, and a spreadsheet column
@@ -1624,7 +1625,7 @@ export default function Leads() {
 
                 <button
                   onClick={() => {
-                    const draft = `Hi ${selectedLead.name.split(' ')[0]}, this is ${user?.name || 'your advisor'} from ${tenant?.name || 'Friendly ERP'}. We loved hosting our buyers at ${selectedLead.project} recently! We've got a hot new matching ${selectedLead.configuration} unit within your ${formatCurrency(selectedLead.budget, currency)} budget limit. Would Saturday at 11am work for a call?`;
+                    const draft = `Hi ${selectedLead.name.split(' ')[0]}, this is ${user?.name || 'your advisor'} from ${tenant?.name || BRAND.name}. We loved hosting our buyers at ${selectedLead.project} recently! We've got a hot new matching ${selectedLead.configuration} unit within your ${formatCurrency(selectedLead.budget, currency)} budget limit. Would Saturday at 11am work for a call?`;
                     
                     // Add Note & Activity
                     void addLeadNote(selectedLead.id, `✨ AI Brand-Voice Draft generated: "${draft}"`);

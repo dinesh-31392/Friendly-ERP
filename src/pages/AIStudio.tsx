@@ -10,6 +10,7 @@ import { createCampaign } from '../services/campaignWrites';
 import { formatCurrency, currencySymbol, localeFor } from '../utils/format';
 import type { Lead, Project, Campaign } from '../types';
 import toast from 'react-hot-toast';
+import { BRAND } from '../config/brand';
 
 interface Message {
   id: string;
@@ -45,7 +46,8 @@ export default function AIStudio() {
   const projects = useMemo(() => getByTenant<Project>('projects', tenantId), [tenantId]);
 
   const currency = tenant?.currency || 'INR';
-  const brandName = tenant?.name || 'Friendly ERP';
+  // The workspace's own name, falling back to the product's when unset.
+  const brandName = tenant?.name || BRAND.name;
   const brandVoice = tenant?.brandVoice || 'Professional and trustworthy.';
   const channels = tenant?.channels || ['WhatsApp', 'Email'];
   const activeLeads = leads.filter(l => l.stage !== 'lost' && l.stage !== 'booked').length;

@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { Toaster } from 'react-hot-toast';
 import { AuthProvider, useAuth } from './context/AuthContext';
@@ -40,6 +41,7 @@ import Microsite from './pages/Microsite';
 import ChatbotWidget from './pages/ChatbotWidget';
 import ForcePasswordChange from './components/ForcePasswordChange';
 import ErrorBoundary from './components/ErrorBoundary';
+import { brandFullName } from './config/brand';
 
 function AuthGuard({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, isLoading, user } = useAuth();
@@ -154,6 +156,16 @@ function AppRoutes() {
 }
 
 export default function App() {
+  // The tab title comes from the brand constant rather than staying whatever
+  // index.html was built with. That file is static and cannot import anything,
+  // so its <title> is only the pre-hydration fallback — this is what a person
+  // actually sees once the app mounts, and it follows a re-brand for free.
+  //
+  // Deliberately the PRODUCT name, not the workspace's: a builder with three
+  // tabs open on three different workspaces is helped by them all saying the
+  // same thing in the tab strip and differing inside.
+  useEffect(() => { document.title = brandFullName(); }, []);
+
   return (
     <BrowserRouter>
       <AuthProvider>

@@ -27,6 +27,7 @@ import { useTenantUsers } from '../hooks/useTenantUsers';
 import type { User as UserType, Tenant, Role, AuditLog } from '../types';
 import { todayISO } from '../utils/format';
 import toast from 'react-hot-toast';
+import { BRAND, portalHost } from '../config/brand';
 
 /** `soon: true` marks a tab that is listed but has no panel behind it yet;
  *  it renders the placeholder instead. Omitting it means built. */
@@ -122,7 +123,7 @@ export default function Settings() {
     // simply type a competitor's slug and take over their portal login, public
     // microsite, and branding. exceptTenantId lets us re-save our own unchanged.
     if (isPremium(tenant) && !isSlugAvailable(slug, tenant.id)) {
-      toast.error(`"${slug}.friendlyerp.app" is already taken — pick another subdomain`);
+      toast.error(`"${portalHost(slug)}" is already taken — pick another subdomain`);
       return;
     }
     try {
@@ -664,7 +665,7 @@ export default function Settings() {
                     placeholder="your-company"
                     className="flex-1 px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 disabled:opacity-60"
                   />
-                  <span className="text-sm text-zinc-500 whitespace-nowrap">.friendlyerp.app</span>
+                  <span className="text-sm text-zinc-500 whitespace-nowrap">.{BRAND.portalDomain}</span>
                 </div>
               </div>
 
@@ -1195,7 +1196,7 @@ export default function Settings() {
             <div className="flex items-center justify-between">
               <div>
                 <h3 className="text-lg font-semibold text-zinc-900">Billing & Subscription</h3>
-                <p className="text-sm text-zinc-500 mt-0.5">Manage your Friendly ERP subscription and billing information.</p>
+                <p className="text-sm text-zinc-500 mt-0.5">Manage your {BRAND.name} subscription and billing information.</p>
               </div>
               <button 
                 onClick={() => toast.success('Billing portal coming soon!')}

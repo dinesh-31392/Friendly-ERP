@@ -3,6 +3,9 @@ import { v4 as uuid } from 'uuid';
 // has been removed, so this module is a pure storage layer again.
 import type { Tenant } from '../types';
 
+// PINNED. Not the product name — the localStorage namespace every demo
+// workspace already stores under. Renaming it to match the brand orphans
+// that data in every browser that has some. See src/config/brand.ts.
 const DB_PREFIX = 'friendly_crm_';
 
 type TableName = 'tenants' | 'users' | 'projects' | 'towers' | 'units' | 'leads' | 'notes' |

@@ -13,6 +13,7 @@ import type {
   Booking, Unit, Tower, Invoice, Document, Ticket, Lead, Commission, Broker, Project, Installment, PaymentPlan,
 } from '../types';
 import toast from 'react-hot-toast';
+import { BRAND } from '../config/brand';
 
 /** The union the page renders — either the customer half or the partner half.
  *  Demo mode builds it from the local store; API mode from the server overview. */
@@ -565,7 +566,7 @@ export default function PortalDashboard() {
         )}
 
         <p className="text-center text-[11px] text-zinc-400 pb-6">
-          Powered by Friendly ERP{tenant.slug ? ` · ${tenant.slug}.friendlyerp.app` : ''}
+          Powered by {BRAND.name}{tenant.slug ? ` · ${tenant.slug}.${BRAND.portalDomain}` : ''}
         </p>
       </main>
     </div>

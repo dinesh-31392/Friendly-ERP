@@ -28,6 +28,7 @@ import DateRangeFilter from '../components/DateRangeFilter';
 import { type DateRange, ALL_RANGE, resolveRange, inRange, rangeLabel } from '../utils/dateRange';
 import type { Lead, Task, Unit, Activity, User as UserType, Project, SiteTask, Rfi, Inspection, PurchaseOrder, VendorBill, Invoice, RaBill, Quotation, Booking, LandLead, BdLead } from '../types';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+import { BRAND } from '../config/brand';
 
 const iconMap: Record<string, React.ElementType> = {
   'users': Users, 'trending-up': TrendingUp, 'indian-rupee': IndianRupee,
@@ -632,7 +633,7 @@ export default function Dashboard() {
         <div>
           <h2 className="text-2xl font-bold text-zinc-900">Welcome back, {user?.name?.split(' ')[0] || 'User'}</h2>
           <p className="text-sm text-zinc-500 mt-0.5">
-            {isExecutive ? "Here's your personal pipeline overview." : `Here's what's happening at ${tenant?.name || 'Friendly ERP'} today.`}
+            {isExecutive ? "Here's your personal pipeline overview." : `Here's what's happening at ${tenant?.name || BRAND.name} today.`}
             {dateRange.preset !== 'all' && (
               <span className="text-indigo-600 font-medium"> · Leads scoped to {rangeLabel(dateRange).toLowerCase()}</span>
             )}

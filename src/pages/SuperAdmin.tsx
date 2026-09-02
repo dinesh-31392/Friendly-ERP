@@ -15,6 +15,7 @@ import type { TenantOverrides, Branch } from '../types';
 import type { Tenant, User as UserType, Lead, AuditLog } from '../types';
 import { todayISO } from '../utils/format';
 import toast from 'react-hot-toast';
+import { BRAND, portalHost } from '../config/brand';
 
 const tabs = [
   { id: 'overview', label: 'Platform Overview', icon: Activity },
@@ -584,7 +585,7 @@ export default function SuperAdmin() {
                         <p className="text-sm font-semibold text-zinc-900">{t.name}</p>
                         {/* the STORED slug — recomputing from the name here showed
                             a subdomain the tenant does not actually own */}
-                        <p className="text-[11px] text-zinc-500">{t.slug}.friendlyerp.app · {t.plan} plan</p>
+                        <p className="text-[11px] text-zinc-500">{portalHost(t.slug)} · {t.plan} plan</p>
                       </div>
                       <div className="text-right hidden sm:block">
                         <p className="text-sm font-semibold text-zinc-900">
@@ -631,7 +632,7 @@ export default function SuperAdmin() {
                     <div className="flex-1 min-w-0">
                       <p className="text-sm font-semibold text-zinc-900">{t.company}</p>
                       <p className="text-[11px] text-zinc-500 truncate">
-                        <span className="font-mono text-indigo-500">{t.slug}.friendlyerp.app</span> · 🏢 {branchName(t.branchId)} · since {new Date(t.createdAt).toLocaleDateString('en-IN', { month: 'short', year: 'numeric' })}
+                        <span className="font-mono text-indigo-500">{portalHost(t.slug)}</span> · 🏢 {branchName(t.branchId)} · since {new Date(t.createdAt).toLocaleDateString('en-IN', { month: 'short', year: 'numeric' })}
                       </p>
                     </div>
                     <span className="text-xs font-medium bg-zinc-100 text-zinc-600 px-3 py-1 rounded-full">{t.plan}</span>
@@ -932,7 +933,7 @@ export default function SuperAdmin() {
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
                 <label className="block text-xs font-semibold text-zinc-500 uppercase mb-1.5">SMTP Host</label>
-                <input defaultValue="smtp.friendlyerp.app" className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20" />
+                <input defaultValue={`smtp.${BRAND.portalDomain}`} className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20" />
               </div>
               <div>
                 <label className="block text-xs font-semibold text-zinc-500 uppercase mb-1.5">SMS Gateway</label>
@@ -1131,7 +1132,7 @@ export default function SuperAdmin() {
               <div>
                 <label className="block text-xs font-semibold text-zinc-500 uppercase mb-1">Company Name *</label>
                 <input name="company" required placeholder="Acme Builders Pvt Ltd" className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20" />
-                <p className="text-[10px] text-zinc-400 mt-1">Workspace: <span className="font-mono text-indigo-500">company-name.friendlyerp.app</span></p>
+                <p className="text-[10px] text-zinc-400 mt-1">Workspace: <span className="font-mono text-indigo-500">company-name.{BRAND.portalDomain}</span></p>
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>
@@ -1236,7 +1237,7 @@ export default function SuperAdmin() {
                 <div>
                   <h3 className="text-lg font-semibold text-zinc-900">{t.company}</h3>
                   <p className="text-xs text-zinc-500 mt-0.5">
-                    <span className="font-mono text-indigo-500">{t.slug}.friendlyerp.app</span> · {t.plan} plan ·{' '}
+                    <span className="font-mono text-indigo-500">{portalHost(t.slug)}</span> · {t.plan} plan ·{' '}
                     <span className="capitalize">{t.status || 'active'}</span>
                     {t.status === 'trial' && t.trialEndsAt && ` (ends ${new Date(t.trialEndsAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })})`}
                   </p>

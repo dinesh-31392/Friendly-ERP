@@ -6,6 +6,7 @@ import { COUNTRIES } from '../utils/format';
 import { getRecentAccounts, forgetRecentAccount, type RecentAccount } from '../services/authService';
 import InstallAppButton from '../components/InstallAppButton';
 import toast from 'react-hot-toast';
+import { BRAND } from '../config/brand';
 
 type LoginTab = 'platform' | 'builder' | 'portal';
 
@@ -485,7 +486,7 @@ export default function Login() {
               <Building2 className="h-6 w-6 text-white" />
             </div>
             <div>
-              <p className="text-lg font-bold text-white tracking-tight">Friendly ERP</p>
+              <p className="text-lg font-bold text-white tracking-tight">{BRAND.name}</p>
               <p className="text-sm text-indigo-200">Real Estate & Construction ERP</p>
             </div>
           </div>
@@ -559,7 +560,7 @@ export default function Login() {
             <div className="h-10 w-10 rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center">
               <Building2 className="h-5 w-5 text-white" />
             </div>
-            <p className="text-lg font-bold text-zinc-900">Friendly ERP</p>
+            <p className="text-lg font-bold text-zinc-900">{BRAND.name}</p>
           </div>
 
           <div className="bg-white rounded-2xl border border-zinc-200/60 p-6 sm:p-8 shadow-sm">
@@ -890,7 +891,7 @@ export default function Login() {
           </div>
 
           <p className="text-center text-xs text-zinc-400 mt-6">
-            By continuing, you agree to Friendly ERP's Terms of Service and Privacy Policy.
+            By continuing, you agree to {BRAND.name}&apos;s Terms of Service and Privacy Policy.
           </p>
         </div>
       </div>

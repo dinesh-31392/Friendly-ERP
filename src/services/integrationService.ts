@@ -1,4 +1,5 @@
 import { v4 as uuid } from 'uuid';
+import { BRAND } from '../config/brand';
 import { getByTenant, getByField, create, update, remove, logAudit } from './db';
 import type { Lead, Project, User, LeadQualification } from '../types';
 
@@ -431,7 +432,7 @@ export function syncLeadsFromProvider(
 export function getChatbotSnippet(slug: string, opts: { primaryColor?: string; brandName?: string } = {}): string {
   const color = opts.primaryColor || '#6366f1';
   const label = opts.brandName ? `Chat with ${opts.brandName}` : 'Chat with us';
-  return `<!-- Friendly ERP Chatbot -->
+  return `<!-- ${BRAND.name} Chatbot -->
 <script>
 (function () {
   var ORIGIN = ${JSON.stringify(deploymentOrigin())};
@@ -518,7 +519,7 @@ export function getWebsiteFormSnippet(slug: string): string {
   // a native submit sends url-encoded fields, and the route accepts JSON with
   // additionalProperties:false. It would also navigate the visitor away from
   // the builder's page. So the snippet submits with fetch and stays put.
-  return `<!-- Friendly ERP — website enquiry form -->
+  return `<!-- ${BRAND.name} — website enquiry form -->
 <form id="friendly-erp-enquiry">
   <input name="name" placeholder="Your name" required />
   <input name="phone" placeholder="Phone number" required />

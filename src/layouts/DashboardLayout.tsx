@@ -16,6 +16,7 @@ import { filingsDueSoon } from '../services/complianceService';
 import InstallAppButton from '../components/InstallAppButton';
 import ErrorBoundary from '../components/ErrorBoundary';
 import type { Lead, Task, Ticket, SiteTask, PurchaseOrder, Vendor, Material, Employee } from '../types';
+import { BRAND } from '../config/brand';
 
 // ── Navigation model ─────────────────────────────────────────────────────────
 // The ERP outgrew a flat list (20+ destinations). Items are now grouped into
@@ -548,8 +549,8 @@ export default function DashboardLayout() {
           )}
           {!sidebarCollapsed && (
             <div className="min-w-0 flex-1">
-              <p className="text-sm font-semibold text-zinc-900 leading-tight truncate">{tenant?.name || 'Friendly ERP'}</p>
-              <p className="text-[11px] text-zinc-500">Friendly ERP</p>
+              <p className="text-sm font-semibold text-zinc-900 leading-tight truncate">{tenant?.name || BRAND.name}</p>
+              <p className="text-[11px] text-zinc-500">{BRAND.name}</p>
             </div>
           )}
         </div>

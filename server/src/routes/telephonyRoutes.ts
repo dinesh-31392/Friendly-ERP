@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { withTenantContext, platformPool } from '../db.js';
 import { requireAuth } from '../auth.js';
+import { env } from '../env.js';
 import {
   telephonyConfig, placeCall, mintCallbackSecret, secretMatches,
   mapExotelStatus, readCallEvent, dialable,
@@ -173,7 +174,11 @@ export async function telephonyRoutes(app: FastifyInstance): Promise<void> {
         return reply.code(409).send({ error: 'That lead has no number that can be dialled.' });
       }
 
-      const base = (process.env.PUBLIC_BASE_URL ?? '').replace(/\/$/, '');
+      // env.publicBaseUrl accepts PUBLIC_URL as well as PUBLIC_BASE_URL. This
+      // used to read only the latter, which the production compose file never
+      // sets — so every deployed call went out with no callback URL and the
+      // status never came back.
+      const base = env.publicBaseUrl;
       let placed;
       try {
         placed = await placeCall(cfg, {

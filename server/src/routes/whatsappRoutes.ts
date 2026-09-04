@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { randomBytes } from 'node:crypto';
 import { withTenantContext, platformPool } from '../db.js';
 import { requireAuth } from '../auth.js';
+import { env } from '../env.js';
 import { enqueueAutoReply, drainOutbox } from '../autoReply.js';
 import { resolveGateway, ensureInstance, requestQr, connectionStatus, logoutInstance, sendWhatsAppMessage, sendWhatsAppMedia, type MediaKind } from '../evolution.js';
 
@@ -325,10 +326,9 @@ export async function whatsappRoutes(app: FastifyInstance): Promise<void> {
       // never received an inbound message. Refuse up front and say which
       // variable is missing, rather than half-connecting.
       //
-      // PUBLIC_BASE_URL is accepted too: it means the same thing for telephony
-      // callbacks, and having two names for one host is how a deployment sets
-      // one and quietly breaks the other.
-      const publicUrl = (process.env.PUBLIC_URL || process.env.PUBLIC_BASE_URL || '').replace(/\/+$/, '');
+      // Both spellings resolve in env.ts now, so this route and telephony
+      // cannot disagree about which one the deployment set.
+      const publicUrl = env.publicBaseUrl;
       if (!/^https?:\/\//i.test(publicUrl)) {
         return reply.code(503).send({
           error: 'This server has no public URL configured, so WhatsApp could not call back. Set PUBLIC_URL to the address this API is reachable at.',

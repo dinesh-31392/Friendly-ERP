@@ -55,7 +55,8 @@
     "verify:payrollcalc": "node scripts/verify-payroll-calc.mjs",
     "verify:adminscope": "node scripts/verify-admin-scope.mjs",
     "verify:tenantdelete": "node scripts/verify-tenant-deletion.mjs",
-    "verify:confidentiality": "node scripts/verify-confidentiality.mjs"
+    "verify:confidentiality": "node scripts/verify-confidentiality.mjs",
+    "preflight": "node scripts/preflight.mjs"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",

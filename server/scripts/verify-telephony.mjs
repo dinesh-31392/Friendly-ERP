@@ -276,6 +276,47 @@ ok('a user without manage_settings cannot configure telephony',
 ok('but can read the settings',
    (await api(readOnly.token, '/api/telephony/settings')).status === 200);
 
+// ── The callback host, and the two names it used to have ───────────────────
+//
+// The call above is written straight into call_logs so the webhook path can be
+// tested without a provider — which means nothing here ever observed the
+// OUTBOUND request, and so nothing noticed that its callback URL was empty in
+// every real deployment.
+//
+// This route read PUBLIC_BASE_URL; WhatsApp read `PUBLIC_URL || PUBLIC_BASE_URL`;
+// deploy/docker-compose.prod.yml sets only PUBLIC_URL. So calls connected and
+// their status, duration and recording never came back, silently, because the
+// route treats an empty base as "this deployment does not know its own address"
+// and omits the callback rather than sending a broken one.
+//
+// Both spellings now resolve in env.ts. Asserted in a subprocess because the
+// value is computed once at import, so each case needs its own environment.
+console.log('\n=== THE CALLBACK HOST RESOLVES UNDER EITHER NAME ===');
+const { execFileSync } = await import('node:child_process');
+const resolveWith = (extra) => {
+  const out = execFileSync(process.execPath, [
+    '-e', 'import("../src/env.ts").then(m => console.log(JSON.stringify(m.env.publicBaseUrl)))',
+  ], {
+    cwd: new URL('.', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'),
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      PUBLIC_URL: '', PUBLIC_BASE_URL: '',
+      ...extra,
+    },
+  });
+  return JSON.parse(out.trim());
+};
+
+ok('PUBLIC_URL alone resolves — the spelling production actually sets',
+  resolveWith({ PUBLIC_URL: 'https://erp.example.com' }) === 'https://erp.example.com');
+ok('PUBLIC_BASE_URL alone resolves — the spelling this route used to require',
+  resolveWith({ PUBLIC_BASE_URL: 'https://erp.example.com' }) === 'https://erp.example.com');
+ok('a trailing slash is trimmed, so the callback is not //api/webhooks',
+  resolveWith({ PUBLIC_URL: 'https://erp.example.com/' }) === 'https://erp.example.com');
+ok('neither set resolves empty, which is what suppresses the callback',
+  resolveWith({}) === '');
+
 for (const w of [A, B, noAgent, readOnly]) await admin.query('DELETE FROM tenants WHERE id = $1', [w.tenantId]);
 await admin.end();
 console.log(`\n${pass} passed, ${fail} failed`);

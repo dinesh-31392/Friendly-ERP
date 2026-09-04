@@ -258,6 +258,10 @@ jobs:
         run: node scripts/verify-tenant-deletion.mjs
         working-directory: server
 
+      - name: Confidentiality — what each role must NOT be able to see
+        run: node scripts/verify-confidentiality.mjs
+        working-directory: server
+
       - name: Click-to-call — the rep number never reaches the customer
         run: node scripts/verify-telephony.mjs
         working-directory: server

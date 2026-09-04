@@ -201,7 +201,34 @@ export async function crmRoutes(app: FastifyInstance): Promise<void> {
       withTenantContext(req.ctx, async (db) => {
         // Logging an activity is a own-lead action, so either permission suffices.
         if (!await gate(db, 'manage_leads') && !await gate(db, 'manage_own_leads')) return reply.code(403).send({ error: 'Missing permission: manage_own_leads' });
-        const { rows: lead } = await db.query('SELECT id FROM leads WHERE id = $1', [req.body.leadId]);
+
+        /**
+         * WHICH lead, not just whether one exists.
+         *
+         * The READ above scopes activities by the lead's assignee — a rep
+         * holding only manage_own_leads sees notes on their own leads and no
+         * others. This write checked that the lead EXISTED and stopped there,
+         * so the same rep could post a note onto any lead in the workspace by
+         * id: into a colleague's call history, attributed to themselves, and
+         * then be unable to read it back because the read is scoped. A note
+         * you can plant but not see is the shape this defect took.
+         *
+         * `own_only` is derived exactly as it is for the read — from HOLDING
+         * manage_own_leads, never from lacking the broader keys, so an auditor
+         * is not caught by it.
+         *
+         * A foreign lead answers 404, the same as one that does not exist:
+         * a 403 here would confirm the id is real to somebody who may not
+         * know that.
+         */
+        const { rows: [{ own_only }] } = await db.query(
+          `SELECT has_permission('manage_own_leads')
+              AND NOT has_permission('manage_leads')
+              AND NOT has_permission('assign_leads') AS own_only`);
+        const { rows: lead } = await db.query(
+          `SELECT id FROM leads
+            WHERE id = $1 AND ($2::uuid IS NULL OR assigned_to = $2::uuid)`,
+          [req.body.leadId, own_only ? (req.ctx.userId ?? null) : null]);
         if (!lead[0]) return reply.code(404).send({ error: 'Lead not found' });
         const { rows } = await db.query(
           `INSERT INTO lead_activities (tenant_id, lead_id, user_id, type, notes, scheduled_at, outcome)

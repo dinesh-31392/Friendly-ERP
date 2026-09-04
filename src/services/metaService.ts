@@ -1,5 +1,6 @@
 import { LEAD_STAGES } from '../types';
 import type { LeadStage } from '../types';
+import { isApiEnabled, apiGetMeta } from './apiClient';
 
 /**
  * Metadata-driven core — the SPA counterpart of the `schema_definitions`
@@ -80,6 +81,56 @@ export function saveTenantMeta(tenantId: string, meta: TenantMeta): void {
   window.dispatchEvent(new Event('friendly_crm_meta_changed'));
 }
 
+/**
+ * Load the tenant's OWN pipeline from the server.
+ *
+ * Until this existed, `apiGetMeta` had no callers anywhere and every screen
+ * read the hardcoded LEAD_STAGES default. A workspace whose pipeline used
+ * `site_visit` — which the provisioning endpoint's own DEFAULT_PIPELINE does —
+ * got a UI listing `visit_scheduled` instead. The database happily stored
+ * leads at `site_visit` (validate_lead_stage checks against the SERVER
+ * pipeline, so they are perfectly valid rows), and the SPA then had no column,
+ * no filter entry and no count for any of them. They were not wrong, they were
+ * invisible.
+ *
+ * Merges rather than replaces: the server owns the pipeline, while sources and
+ * configurations stay whatever the tenant has set locally.
+ *
+ * Returns true when the stored pipeline actually changed, so a caller can
+ * re-render without a blanket refresh on every mount.
+ */
+export async function syncPipelineFromServer(tenantId: string): Promise<boolean> {
+  if (!isApiEnabled() || !tenantId) return false;
+  let stages: StageDef[];
+  try {
+    const meta = await apiGetMeta('lead');
+    const raw = (meta?.pipeline as { stages?: unknown[] } | undefined)?.stages;
+    if (!Array.isArray(raw) || raw.length === 0) return false;
+    stages = raw
+      .map(s => s as Record<string, unknown>)
+      // The server writes both `key` and `id` (the trigger matches on key, the
+      // SPA reads id); accept either so one missing field is not a blank board.
+      .map(s => ({
+        id: String(s.id ?? s.key ?? '') as LeadStage,
+        label: String(s.label ?? s.id ?? s.key ?? ''),
+        color: typeof s.color === 'string' ? s.color : 'bg-zinc-500',
+        core: CORE_STAGE_IDS.includes(String(s.id ?? s.key) as LeadStage),
+      }))
+      .filter(s => s.id);
+    if (!stages.length) return false;
+  } catch {
+    // Offline, or a role the route refuses — keep whatever is cached rather
+    // than emptying the board.
+    return false;
+  }
+  const current = getTenantMeta(tenantId);
+  const same = current.stages.length === stages.length
+    && current.stages.every((s, i) => s.id === stages[i].id && s.label === stages[i].label);
+  if (same) return false;
+  saveTenantMeta(tenantId, { ...current, stages });
+  return true;
+}
+
 export function resetTenantMeta(tenantId: string): TenantMeta {
   localStorage.removeItem(META_KEY(tenantId));
   window.dispatchEvent(new Event('friendly_crm_meta_changed'));
@@ -90,6 +141,30 @@ export function resetTenantMeta(tenantId: string): TenantMeta {
  *  defaults so every legacy caller keeps working. */
 export function getLeadStages(tenantId: string): StageDef[] {
   return getTenantMeta(tenantId).stages;
+}
+
+/**
+ * The tenant's site-visit stage id, whatever they call it.
+ *
+ * Two provisioning paths ship two different keys — seed.ts writes
+ * `visit_scheduled`, the tenant-provisioning endpoint writes `site_visit` —
+ * and a builder may rename or add stages on top of either. Code that hardcoded
+ * one spelling silently did nothing for every workspace using the other: the
+ * Calendar's site-visit list came back empty, and the "schedule a visit" button
+ * moved the lead to a stage the database rejects (validate_lead_stage checks
+ * against the tenant's own pipeline, so the write failed the CHECK).
+ *
+ * Matched on the key CONTAINING "visit", then on the label, so a renamed
+ * "Site Revisit" or "Visit Booked" still resolves. Returns undefined when the
+ * pipeline genuinely has no visit stage — callers must handle that rather than
+ * write a key the database will refuse.
+ */
+export function getVisitStageId(tenantId: string): string | undefined {
+  const stages = getLeadStages(tenantId);
+  return (
+    stages.find(s => /visit/i.test(s.id)) ??
+    stages.find(s => /visit/i.test(s.label))
+  )?.id;
 }
 
 export function getLeadSources(tenantId: string): string[] {

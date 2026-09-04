@@ -1,4 +1,5 @@
 import { v4 as uuid } from 'uuid';
+import { BRAND } from '../config/brand';
 import { getByTenant, getByField, create, update, remove, logAudit } from './db';
 import type { Lead, Project, User, LeadQualification } from '../types';
 
@@ -28,6 +29,20 @@ export interface IntegrationProviderDef {
 }
 
 export const INTEGRATION_PROVIDERS: IntegrationProviderDef[] = [
+  // The three portals, the website form and Razorpay used to be listed here as
+  // SIMULATED cards — "these simulated integrations never call a real API", as
+  // the note further down still says of the rest. They now have real
+  // implementations, each with its own credential and its own panel: lead
+  // sources in migration 055, the gateway in gatewayRoutes. Leaving the
+  // simulated ones in place put two MagicBricks controls on one screen, one of
+  // which did nothing, with no way for a user to tell them apart.
+  // The portals, the website form and Razorpay used to appear here as
+  // SIMULATED cards — "these simulated integrations never call a real API",
+  // as the note below says. They now have real implementations (lead sources
+  // in migration 055, the gateway in gatewayRoutes), each with its own
+  // credential and its own panel. Leaving the simulated ones would put two
+  // MagicBricks controls on one screen, one of which does nothing, and no user
+  // can tell which. Everything still listed here is genuinely a placeholder.
   {
     id: 'facebook_lead_ads', name: 'Facebook Lead Ads', category: 'lead_source', icon: '📘',
     description: 'Auto-capture leads from Facebook & Instagram lead forms.',
@@ -46,15 +61,7 @@ export const INTEGRATION_PROVIDERS: IntegrationProviderDef[] = [
       { key: 'developerToken', label: 'Developer Token', placeholder: 'Your API token', type: 'password' },
     ],
   },
-  {
-    id: 'website_forms', name: 'Website Forms', category: 'lead_source', icon: '🌐',
-    description: 'Capture enquiries from your website contact & project forms.',
-    leadSource: 'Website',
-    configFields: [
-      { key: 'siteUrl', label: 'Website URL', placeholder: 'https://www.yourcompany.com', type: 'url' },
-    ],
-  },
-  {
+    {
     id: 'whatsapp_business', name: 'WhatsApp Business API', category: 'lead_source', icon: '💬',
     description: 'Official Meta Cloud API — enables automated & bulk WhatsApp (drip sequences, templates) + enquiry capture. Optional: without it, agents already chat interested leads 1-to-1 from their own WhatsApp for free (Click to Chat).',
     leadSource: 'WhatsApp',
@@ -63,25 +70,7 @@ export const INTEGRATION_PROVIDERS: IntegrationProviderDef[] = [
       { key: 'apiToken', label: 'API Token', placeholder: 'Bearer token', type: 'password' },
     ],
   },
-  {
-    id: 'portal_99acres', name: '99acres', category: 'lead_source', group: 'Property Portals', icon: '🏢',
-    description: 'Sync enquiries from your 99acres listings.',
-    leadSource: '99acres',
-    configFields: [{ key: 'profileId', label: '99acres Profile ID', placeholder: 'Your builder profile ID' }],
-  },
-  {
-    id: 'portal_magicbricks', name: 'MagicBricks', category: 'lead_source', group: 'Property Portals', icon: '🏢',
-    description: 'Sync enquiries from your MagicBricks listings.',
-    leadSource: 'MagicBricks',
-    configFields: [{ key: 'profileId', label: 'MagicBricks Profile ID', placeholder: 'Your builder profile ID' }],
-  },
-  {
-    id: 'portal_housing', name: 'Housing.com', category: 'lead_source', group: 'Property Portals', icon: '🏢',
-    description: 'Sync enquiries from your Housing.com listings.',
-    leadSource: 'Housing.com',
-    configFields: [{ key: 'profileId', label: 'Housing.com Profile ID', placeholder: 'Your builder profile ID' }],
-  },
-  {
+        {
     id: 'chatbot_engine', name: 'Chatbot Engine', category: 'automation', icon: '🤖',
     description: '24/7 AI chatbot for your website & landing pages — qualifies visitors and pushes them in as leads.',
     leadSource: 'Chatbot',
@@ -109,15 +98,7 @@ export const INTEGRATION_PROVIDERS: IntegrationProviderDef[] = [
     description: 'Sync site visits and tasks with Google Calendar.',
     configFields: [{ key: 'calendarId', label: 'Calendar ID', placeholder: 'primary or your@email.com' }],
   },
-  {
-    id: 'razorpay', name: 'Razorpay', category: 'other', icon: '💳',
-    description: 'Accept online token payments and installments.',
-    configFields: [
-      { key: 'keyId', label: 'Key ID', placeholder: 'rzp_live_...' },
-      { key: 'keySecret', label: 'Key Secret', placeholder: 'Your key secret', type: 'password' },
-    ],
-  },
-];
+  ];
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Per-tenant connection state (persisted in the 'integrations' table)
@@ -451,7 +432,7 @@ export function syncLeadsFromProvider(
 export function getChatbotSnippet(slug: string, opts: { primaryColor?: string; brandName?: string } = {}): string {
   const color = opts.primaryColor || '#6366f1';
   const label = opts.brandName ? `Chat with ${opts.brandName}` : 'Chat with us';
-  return `<!-- Friendly ERP Chatbot -->
+  return `<!-- ${BRAND.name} Chatbot -->
 <script>
 (function () {
   var ORIGIN = ${JSON.stringify(deploymentOrigin())};
@@ -538,7 +519,7 @@ export function getWebsiteFormSnippet(slug: string): string {
   // a native submit sends url-encoded fields, and the route accepts JSON with
   // additionalProperties:false. It would also navigate the visitor away from
   // the builder's page. So the snippet submits with fetch and stays put.
-  return `<!-- Friendly ERP — website enquiry form -->
+  return `<!-- ${BRAND.name} — website enquiry form -->
 <form id="friendly-erp-enquiry">
   <input name="name" placeholder="Your name" required />
   <input name="phone" placeholder="Phone number" required />

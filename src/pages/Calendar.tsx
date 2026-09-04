@@ -1,4 +1,5 @@
 import { useState, useMemo, useEffect } from 'react';
+import { getVisitStageId } from '../services/metaService';
 import { ChevronLeft, ChevronRight, Plus, Clock, MapPin, Calendar as CalendarIcon, X } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { getByTenant } from '../services/db';
@@ -82,9 +83,13 @@ export default function Calendar() {
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   };
 
+  const visitStageId = getVisitStageId(tenantId);
   const visitSchedules = useMemo(() => {
     return leads
-      .filter(l => l.stage === 'visit_scheduled')
+      // Whatever THIS workspace calls its visit stage. Hardcoding
+      // 'visit_scheduled' left the calendar empty for every workspace the
+      // provisioning endpoint created, which uses 'site_visit'.
+      .filter(l => visitStageId !== undefined && l.stage === visitStageId)
       .filter(l => !isExecutive || l.assignedTo === userId)
       .map(l => ({
         id: l.id,

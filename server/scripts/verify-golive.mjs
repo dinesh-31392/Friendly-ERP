@@ -160,8 +160,22 @@ if (!plat) {
   ok('a temporary password is returned once', typeof pb?.tempPassword === 'string' && pb.tempPassword.length >= 12);
 
   const newTenant = pb?.tenant?.id;
-  const roleCount = (await admin.query(`SELECT count(*)::int n FROM roles WHERE tenant_id=$1`, [newTenant])).rows[0].n;
-  ok('the nine system roles exist', roleCount === 9, `${roleCount} roles`);
+  // Named, not counted. This read `roleCount === 9` and started failing the
+  // day hr_manager was added — a count tells you the number changed but not
+  // whether the RIGHT role appeared, and a role silently MISSING from a fresh
+  // workspace is the bug worth catching (migration 046 exists because four of
+  // them were).
+  const EXPECTED_ROLES = [
+    'accountant', 'auditor', 'bd_manager', 'builder_admin', 'hr_manager',
+    'land_manager', 'sales_executive', 'sales_manager', 'site_engineer', 'telecaller',
+  ];
+  const roleNames = (await admin.query(
+    `SELECT name FROM roles WHERE tenant_id=$1 ORDER BY name`, [newTenant])).rows.map(r => r.name);
+  const missing = EXPECTED_ROLES.filter(r => !roleNames.includes(r));
+  const extra = roleNames.filter(r => !EXPECTED_ROLES.includes(r));
+  ok('a fresh workspace has exactly the system roles',
+     missing.length === 0 && extra.length === 0,
+     `missing: [${missing}] unexpected: [${extra}]`);
   const grants = (await admin.query(
     `SELECT count(*)::int n FROM role_permissions rp JOIN roles r ON r.id=rp.role_id WHERE r.tenant_id=$1`, [newTenant])).rows[0].n;
   ok('roles carry their grants', grants > 50, `${grants} grants`);

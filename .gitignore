@@ -37,3 +37,8 @@ origincorp-revamp/
 # container refuses to start — a loud failure instead of a silent one.
 deploy/security-headers.conf
 deploy/security-headers-embed.conf
+
+# Uploaded files. The bytes belong on a mounted volume (FILE_STORAGE_DIR), never
+# in the repository — a customer's KYC scans committed by accident cannot be
+# un-published, and the default path sits inside the working tree.
+server/var/

@@ -63,7 +63,18 @@ const post = (p, tok, b) => fetch(BASE + p, { method: 'POST', headers: H(tok), b
 const { rows: [lead] } = await admin.query(
   `INSERT INTO leads (tenant_id,name,phone,source,stage,priority,last_contact_at)
    VALUES ($1,$2,'9800000051','Direct','booked','hot',now()) RETURNING id`, [t.id, `${MARK} Buyer`]);
-const { rows: [unit] } = await admin.query(`SELECT id FROM units WHERE tenant_id=$1 LIMIT 1`, [t.id]);
+// Create one rather than borrowing whatever happens to be lying around.
+// `bookings.unit_id` is NOT NULL, so on a database where the platform tenant
+// has no units this borrowed nothing and the whole suite died on the insert —
+// which is every fresh database, CI included.
+let { rows: [unit] } = await admin.query(`SELECT id FROM units WHERE tenant_id=$1 LIMIT 1`, [t.id]);
+if (!unit) {
+  const { rows: [proj] } = await admin.query(
+    `INSERT INTO projects (tenant_id, name) VALUES ($1,$2) RETURNING id`, [t.id, `${MARK} Project`]);
+  ({ rows: [unit] } = await admin.query(
+    `INSERT INTO units (tenant_id, project_id, unit_code) VALUES ($1,$2,$3) RETURNING id`,
+    [t.id, proj.id, `${MARK}-U1`]));
+}
 const { rows: [booking] } = await admin.query(
   `INSERT INTO bookings (tenant_id, lead_id, unit_id, booking_amount, total_consideration, status, delay_interest_pct)
    VALUES ($1,$2,$3,500000,7500000,'active',12) RETURNING id`, [t.id, lead.id, unit?.id ?? null]);

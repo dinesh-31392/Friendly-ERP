@@ -5,6 +5,26 @@ import { env } from './env.js';
 const { Pool } = pg;
 
 /**
+ * A DATE is a calendar day, not an instant. Keep it one.
+ *
+ * node-pg parses DATE (oid 1082) into a JS Date at LOCAL midnight, which then
+ * serialises to JSON in UTC. On a server anywhere east of Greenwich that moves
+ * the day backwards: attendance stored as 2026-08-25 left an IST API as
+ * "2026-08-24T18:30:00.000Z", and every client that took the first ten
+ * characters — which is all of them — read yesterday.
+ *
+ * That is not an HR bug. There are 44 DATE columns across 30 tables here: due
+ * dates on demand letters and payment schedules, lease periods, RERA validity,
+ * loan EMIs. Two routes had noticed and written `to_char(col, 'YYYY-MM-DD')`;
+ * the rest were quietly off by a day for the entire Indian market.
+ *
+ * Returning the raw string is what Postgres already stores and what every
+ * consumer here wants. TIMESTAMPTZ (1184) is untouched — an instant genuinely
+ * has a timezone and must keep it.
+ */
+pg.types.setTypeParser(1082, (v: string) => v);
+
+/**
  * Timeouts are the noisy-neighbour defence.
  *
  * Every tenant shares this pool, so an unbounded query is not one tenant's

@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { Toaster } from 'react-hot-toast';
 import { AuthProvider, useAuth } from './context/AuthContext';
@@ -5,6 +6,7 @@ import { isModuleEnabled } from './services/planService';
 import DashboardLayout from './layouts/DashboardLayout';
 import Dashboard from './pages/Dashboard';
 import Leads from './pages/Leads';
+import SiteVisits from './pages/SiteVisits';
 import Inventory from './pages/Inventory';
 import Projects from './pages/Projects';
 import Execution from './pages/Execution';
@@ -24,6 +26,10 @@ import Documents from './pages/Documents';
 import Billing from './pages/Billing';
 import Service from './pages/Service';
 import Bookings from './pages/Bookings';
+import CostSheets from './pages/CostSheets';
+import Customers from './pages/Customers';
+import MyHr from './pages/MyHr';
+import Possession from './pages/Possession';
 import Leasing from './pages/Leasing';
 import Brokers from './pages/Brokers';
 import SuperAdmin from './pages/SuperAdmin';
@@ -36,6 +42,7 @@ import Microsite from './pages/Microsite';
 import ChatbotWidget from './pages/ChatbotWidget';
 import ForcePasswordChange from './components/ForcePasswordChange';
 import ErrorBoundary from './components/ErrorBoundary';
+import { brandFullName } from './config/brand';
 
 function AuthGuard({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, isLoading, user } = useAuth();
@@ -110,11 +117,18 @@ function AppRoutes() {
       >
         <Route path="/" element={<PermissionGuard permission="view_dashboard"><Dashboard /></PermissionGuard>} />
         <Route path="/leads" element={<PermissionGuard permission="view_leads" module="leads"><Leads /></PermissionGuard>} />
+        {/* Gated on view_leads, the same key the routes use — a visit is an
+            event in a lead's life, not a module of its own. */}
+        <Route path="/site-visits" element={<PermissionGuard permission="view_leads" module="leads"><SiteVisits /></PermissionGuard>} />
         <Route path="/inventory" element={<PermissionGuard permission="view_inventory" module="inventory"><Inventory /></PermissionGuard>} />
         <Route path="/projects" element={<PermissionGuard permission="view_projects" module="projects"><Projects /></PermissionGuard>} />
         <Route path="/execution" element={<PermissionGuard permission="view_execution" module="execution"><Execution /></PermissionGuard>} />
         <Route path="/procurement" element={<PermissionGuard permission="view_procurement" module="procurement"><Procurement /></PermissionGuard>} />
         <Route path="/hr" element={<PermissionGuard permission="view_hr" module="hr"><HR /></PermissionGuard>} />
+        {/* Everyone signed in may read their OWN record. Gated on
+            view_dashboard, the one key every role holds, rather than an HR
+            key that six of the ten roles do not have. */}
+        <Route path="/my-hr" element={<PermissionGuard permission="view_dashboard"><MyHr /></PermissionGuard>} />
         <Route path="/accounts" element={<PermissionGuard permission="view_accounts" module="accounts"><Accounts /></PermissionGuard>} />
         <Route path="/bd" element={<PermissionGuard permission="view_bd" module="bd"><BD /></PermissionGuard>} />
         <Route path="/land" element={<PermissionGuard permission="view_land" module="land"><Land /></PermissionGuard>} />
@@ -131,6 +145,9 @@ function AppRoutes() {
         <Route path="/billing" element={<PermissionGuard permission="view_finance" module="billing"><Billing /></PermissionGuard>} />
         <Route path="/service" element={<PermissionGuard permission="view_service" module="service"><Service /></PermissionGuard>} />
         <Route path="/bookings" element={<PermissionGuard permission="view_bookings" module="bookings"><Bookings /></PermissionGuard>} />
+        <Route path="/cost-sheets" element={<PermissionGuard permission="view_bookings" module="bookings"><CostSheets /></PermissionGuard>} />
+        <Route path="/customers" element={<PermissionGuard permission="view_leads"><Customers /></PermissionGuard>} />
+        <Route path="/possession" element={<PermissionGuard permission="view_bookings" module="bookings"><Possession /></PermissionGuard>} />
         <Route path="/leasing" element={<PermissionGuard permission="view_leasing" module="leasing"><Leasing /></PermissionGuard>} />
         <Route path="/brokers" element={<PermissionGuard permission="view_brokers" module="brokers"><Brokers /></PermissionGuard>} />
         <Route path="/platform" element={<PermissionGuard permission="view_platform"><SuperAdmin /></PermissionGuard>} />
@@ -144,6 +161,16 @@ function AppRoutes() {
 }
 
 export default function App() {
+  // The tab title comes from the brand constant rather than staying whatever
+  // index.html was built with. That file is static and cannot import anything,
+  // so its <title> is only the pre-hydration fallback — this is what a person
+  // actually sees once the app mounts, and it follows a re-brand for free.
+  //
+  // Deliberately the PRODUCT name, not the workspace's: a builder with three
+  // tabs open on three different workspaces is helped by them all saying the
+  // same thing in the tab strip and differing inside.
+  useEffect(() => { document.title = brandFullName(); }, []);
+
   return (
     <BrowserRouter>
       <AuthProvider>

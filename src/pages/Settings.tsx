@@ -4,28 +4,36 @@ import {
   Settings as SettingsIcon, Users, User, Shield, Building2, Palette, Bell,
   Link2, ChevronRight, Check, CreditCard, UserPlus, Trash2, X, RefreshCw, AlertTriangle,
   ScrollText, Sparkles, Download, FileText, Search, GitMerge, Send, Plus, Clock, Database, Zap,
-  Monitor,
+  Monitor, ShieldCheck,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { isApiEnabled, apiGetNotificationPrefs } from '../services/apiClient';
+import { isApiEnabled, apiGetNotificationPrefs, apiGetWorkspace } from '../services/apiClient';
+import { createUser, patchUser, deleteUser, canHardDeleteUsers } from '../services/userWrites';
+import { saveWorkspaceProfile } from '../services/workspaceWrites';
 import * as notificationWrites from '../services/notificationWrites';
 import IntegrationsPanel from '../components/IntegrationsPanel';
 import WhatsAppStoragePanel from '../components/WhatsAppStoragePanel';
+import PrivacyPanel from '../components/PrivacyPanel';
 import WhatsAppAutoReplyPanel from '../components/WhatsAppAutoReplyPanel';
 import PipelineSettings from '../components/PipelineSettings';
+import SitePostingsPanel from '../components/SitePostingsPanel';
+import PermissionMatrixPanel from '../components/PermissionMatrixPanel';
 import { PLANS, getPlanForTenant, getEffectiveLimits, withinLimit, planPriceLabel } from '../services/planService';
 import { portalUrl, portalPath, isPremium, slugify, isSlugAvailable } from '../services/portalService';
 import { getTenantSessions, revokeDeviceSession, currentSessionToken } from '../services/authService';
 import { getApprovalRules, setApprovalThreshold } from '../services/approvalService';
 import { downloadCsv } from '../utils/csv';
-import { getByTenant, update, create, remove, clearDatabase, logAudit } from '../services/db';
+import { getByTenant, update, clearDatabase, logAudit } from '../services/db';
 import { apiGetAuditLogs } from '../services/apiClient';
 import { useTenantUsers } from '../hooks/useTenantUsers';
 import type { User as UserType, Tenant, Role, AuditLog } from '../types';
 import { todayISO } from '../utils/format';
 import toast from 'react-hot-toast';
+import { BRAND, portalHost } from '../config/brand';
 
-const settingsTabs = [
+/** `soon: true` marks a tab that is listed but has no panel behind it yet;
+ *  it renders the placeholder instead. Omitting it means built. */
+export const settingsTabs: { id: string; label: string; icon: typeof Building2; soon?: boolean }[] = [
   { id: 'profile', label: 'Builder Profile', icon: Building2 },
   { id: 'brand', label: 'Brand Voice', icon: Palette },
   { id: 'team', label: 'Team & Roles', icon: Users },
@@ -36,6 +44,9 @@ const settingsTabs = [
   { id: 'billing', label: 'Billing & Plan', icon: CreditCard },
   { id: 'autoreply', label: 'Auto-Reply', icon: Zap },
   { id: 'storage', label: 'Data Storage', icon: Database },
+  // Retention periods and erasure requests. Its own tab rather than buried in
+  // Data & Privacy: answering a DPDP request is a task, not a setting.
+  { id: 'retention', label: 'Retention & Erasure', icon: ShieldCheck },
   { id: 'audit', label: 'Audit Log', icon: ScrollText },
   { id: 'danger', label: 'Data & Privacy', icon: AlertTriangle },
 ];
@@ -50,6 +61,9 @@ export default function Settings() {
   const [refreshKey, setRefreshKey] = useState(0);
   const refresh = () => setRefreshKey(k => k + 1);
   const [showAddUser, setShowAddUser] = useState(false);
+  // The server issues a one-time password for a freshly invited member. Held
+  // in state because it comes back exactly once and cannot be fetched again.
+  const [newUserPassword, setNewUserPassword] = useState<{ name: string; email: string; password: string } | null>(null);
 
   const tenantUsers = useTenantUsers(tenant?.id || '', refreshKey);
 
@@ -80,6 +94,12 @@ export default function Settings() {
   const [contactPhone, setContactPhone] = useState(tenant?.phone || '');
   const [rera, setRera] = useState(tenant?.rera || '');
   const [gst, setGst] = useState(tenant?.gst || '');
+  // Read by GST returns and e-invoicing. Previously unreachable: the form wrote
+  // the legacy free-text field and these read a different column entirely.
+  const [stateCode, setStateCode] = useState('');
+  const [city, setCity] = useState('');
+  const [pincode, setPincode] = useState('');
+  const [einvoicingEnabled, setEinvoicingEnabled] = useState(false);
   const [address, setAddress] = useState(tenant?.address || '');
   const [brandVoice, setBrandVoice] = useState(tenant?.brandVoice || '');
   const [audience, setAudience] = useState(tenant?.audience || '');
@@ -97,7 +117,7 @@ export default function Settings() {
     reader.readAsDataURL(file);
   };
 
-  const handleSaveBranding = () => {
+  const handleSaveBranding = async () => {
     if (!tenant) return;
     const slug = slugify(slugValue);
     if (isPremium(tenant) && !slug) { toast.error('Subdomain cannot be empty'); return; }
@@ -105,14 +125,21 @@ export default function Settings() {
     // simply type a competitor's slug and take over their portal login, public
     // microsite, and branding. exceptTenantId lets us re-save our own unchanged.
     if (isPremium(tenant) && !isSlugAvailable(slug, tenant.id)) {
-      toast.error(`"${slug}.friendlyerp.app" is already taken — pick another subdomain`);
+      toast.error(`"${portalHost(slug)}" is already taken — pick another subdomain`);
       return;
     }
-    update<Tenant>('tenants', tenant.id, {
-      primaryColor,
-      logo: logoData,
-      ...(isPremium(tenant) ? { slug } : {}),
-    });
+    try {
+      // The server enforces the subdomain's uniqueness with the constraint;
+      // the client-side check above cannot see other tenants' rows under RLS.
+      await saveWorkspaceProfile(tenant.id, {
+        primaryColor,
+        logoUrl: logoData,
+        ...(isPremium(tenant) ? { slug } : {}),
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not save the branding');
+      return;
+    }
     if (user) logAudit({ tenantId: tenant.id, userId: user.id, userName: user.name, action: 'update', entity: 'tenant', entityId: tenant.id, details: 'Updated white-label branding' });
     toast.success('Branding saved — your portal and workspace now use it');
     refresh();
@@ -144,6 +171,28 @@ export default function Settings() {
   };
   const [notifications, setNotifications] = useState<Record<string, boolean>>(NOTIFICATION_DEFAULTS);
 
+  // The tax fields live on the server and are not part of the cached session,
+  // so they are fetched rather than read off `tenant`. Without this the form
+  // would show blanks over values that are actually set, and saving would
+  // clear them.
+  useEffect(() => {
+    if (!isApiEnabled()) return;
+    let cancelled = false;
+    apiGetWorkspace()
+      .then(w => {
+        if (cancelled) return;
+        setGst(w.gstin || w.gst || '');
+        setStateCode(w.stateCode || '');
+        setCity(w.city || '');
+        setPincode(w.pincode || '');
+        setEinvoicingEnabled(!!w.einvoicingEnabled);
+      })
+      // A viewer without manage_settings gets a 403 here and simply sees the
+      // fields they cannot edit anyway.
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [refreshKey]);
+
   useEffect(() => {
     if (!isApiEnabled()) return;
     apiGetNotificationPrefs()
@@ -167,47 +216,61 @@ export default function Settings() {
 
   const [savingProfile, setSavingProfile] = useState(false);
   
-  const handleSaveProfile = () => {
+  const handleSaveProfile = async () => {
     if (!tenant) return;
     if (!company.trim() || !brandName.trim()) {
       toast.error('Company name and brand name are required');
       return;
     }
     setSavingProfile(true);
-    setTimeout(() => {
-      update<Tenant>('tenants', tenant.id, { company, name: brandName, email: contactEmail, phone: contactPhone, rera, gst, address });
+    try {
+      // Through workspaceWrites: this wrote to localStorage behind a 500ms
+      // timeout that looked like a save, so in API mode the whole profile
+      // reverted at the next session refresh.
+      await saveWorkspaceProfile(tenant.id, {
+        company, name: brandName, email: contactEmail, phone: contactPhone,
+        rera, address, gstin: gst, stateCode, city, pincode, einvoicingEnabled,
+      });
       if (user) logAudit({ tenantId: tenant.id, userId: user.id, userName: user.name, action: 'update', entity: 'tenant', entityId: tenant.id, details: `Updated builder profile: ${company}` });
-      setSavingProfile(false);
       toast.success('Profile updated successfully');
       refresh();
       refreshSession();
-    }, 500);
+    } catch (err) {
+      // The server checks the GSTIN's check digit and that its first two digits
+      // agree with the state code; both refusals name the field.
+      toast.error(err instanceof Error ? err.message : 'Could not save the profile');
+    } finally {
+      setSavingProfile(false);
+    }
   };
 
   const [savingBrand, setSavingBrand] = useState(false);
   
-  const handleSaveBrand = () => {
+  const handleSaveBrand = async () => {
     if (!tenant) return;
     if (!brandVoice.trim()) {
       toast.error('Brand voice description is required');
       return;
     }
     setSavingBrand(true);
-    setTimeout(() => {
-      update<Tenant>('tenants', tenant.id, { brandVoice, audience, channels });
+    try {
+      await saveWorkspaceProfile(tenant.id, { brandVoice, audience, channels });
       if (user) logAudit({ tenantId: tenant.id, userId: user.id, userName: user.name, action: 'update', entity: 'tenant', entityId: tenant.id, details: 'Updated brand voice and AI settings' });
-      setSavingBrand(false);
       toast.success('Brand voice updated successfully');
       refresh();
       refreshSession();
-    }, 500);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not save the brand voice');
+    } finally {
+      setSavingBrand(false);
+    }
   };
 
   const toggleChannel = (ch: string) => {
     setChannels(prev => prev.includes(ch) ? prev.filter(c => c !== ch) : [...prev, ch]);
   };
 
-  const handleAddUser = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleAddUser = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (!tenant) return;
     const form = e.currentTarget;
@@ -217,8 +280,11 @@ export default function Settings() {
     const password = formData.get('password') as string;
     const role = formData.get('role') as Role;
 
-    if (!name || !email || !password) { toast.error('Please fill all fields'); return; }
-    if (password.length < 6) { toast.error('Password must be at least 6 characters'); return; }
+    // Against the API the server issues a one-time password and the field is
+    // not rendered at all; only the demo store takes one from the form.
+    const needsPassword = !isApiEnabled();
+    if (!name || !email || (needsPassword && !password)) { toast.error('Please fill all fields'); return; }
+    if (needsPassword && password.length < 6) { toast.error('Password must be at least 6 characters'); return; }
 
     // Enforce the effective team-size limit — the plan's, unless the platform
     // admin set a custom override for this workspace
@@ -235,30 +301,49 @@ export default function Settings() {
     // Project-level scoping (user_project_assignments): front-line staff can
     // be limited to specific projects at invite time
     const projectIds = (formData.getAll('projectIds') as string[]).filter(Boolean);
-    const createdUser = create<UserType>('users', {
-      id: '', tenantId: tenant.id, name, email: email.toLowerCase(), password,
-      role, avatar: '', phone: (formData.get('phone') as string) || '',
-      ...(projectIds.length > 0 ? { projectIds } : {}),
-      active: true, createdAt: new Date().toISOString(),
-    });
-    if (user) logAudit({ tenantId: tenant.id, userId: user.id, userName: user.name, action: 'create', entity: 'user', entityId: createdUser.id, details: `Added team member "${name}" as ${role.replace('_', ' ')}` });
-    setShowAddUser(false);
-    refresh();
-    toast.success('Team member added');
+    try {
+      const { user: createdUser, temporaryPassword } = await createUser({
+        tenantId: tenant.id, name, email, password, role,
+        phone: (formData.get('phone') as string) || '',
+        ...(projectIds.length > 0 ? { projectIds } : {}),
+      });
+      if (user) logAudit({ tenantId: tenant.id, userId: user.id, userName: user.name, action: 'create', entity: 'user', entityId: createdUser.id, details: `Added team member "${name}" as ${role.replace('_', ' ')}` });
+      setShowAddUser(false);
+      refresh();
+      // Shown once and never retrievable, so it gets a panel rather than a
+      // toast that scrolls away while the admin looks for somewhere to copy it.
+      if (temporaryPassword) setNewUserPassword({ name, email: email.toLowerCase(), password: temporaryPassword });
+      else toast.success('Team member added');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not add that team member');
+    }
   };
 
-  const handleToggleActive = (u: UserType) => {
+  const handleToggleActive = async (u: UserType) => {
     if (u.id === user?.id) { toast.error("You cannot deactivate yourself"); return; }
-    update<UserType>('users', u.id, { active: !u.active });
+    // Revoking access is the one write here that must not merely appear to
+    // work: this used to touch localStorage only, so the account kept letting
+    // its holder in while the row went grey and the toast said otherwise.
+    try {
+      await patchUser(u.id, { active: !u.active });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not change that account');
+      return;
+    }
     if (user && tenant) logAudit({ tenantId: tenant.id, userId: user.id, userName: user.name, action: u.active ? 'deactivate' : 'activate', entity: 'user', entityId: u.id, details: `${u.active ? 'Deactivated' : 'Activated'} team member "${u.name}"` });
     refresh();
     toast.success(u.active ? 'User deactivated' : 'User activated');
   };
 
-  const handleDeleteUser = (u: UserType) => {
+  const handleDeleteUser = async (u: UserType) => {
     if (u.id === user?.id) { toast.error("You cannot delete yourself"); return; }
     if (!confirm(`Delete ${u.name}? This cannot be undone.`)) return;
-    remove('users', u.id);
+    try {
+      await deleteUser(u.id);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not remove that team member');
+      return;
+    }
     if (user && tenant) logAudit({ tenantId: tenant.id, userId: user.id, userName: user.name, action: 'delete', entity: 'user', entityId: u.id, details: `Removed team member "${u.name}"` });
     refresh();
     toast.success('User removed');
@@ -267,6 +352,15 @@ export default function Settings() {
   const handleChangePlan = (planName: string) => {
     if (!tenant) return;
     if (tenant.plan === planName) return;
+    // A workspace does not raise its own plan. `/api/workspace` deliberately
+    // has no `plan` field — that is the platform's, and self-service billing
+    // does not exist yet — so against the API this used to write to
+    // localStorage and announce an upgrade that had not happened. Plan gates
+    // real limits, so believing it is worse than being told no.
+    if (isApiEnabled()) {
+      toast.error('Plan changes go through your account manager — this workspace cannot change its own plan.');
+      return;
+    }
     if (!confirm(`Switch to the ${planName} plan? (Demo build — no card is charged; in production this opens the payment gateway.)`)) return;
     update<Tenant>('tenants', tenant.id, { plan: planName, status: 'active', trialEndsAt: undefined });
     if (user) logAudit({ tenantId: tenant.id, userId: user.id, userName: user.name, action: 'update', entity: 'tenant', entityId: tenant.id, details: `Changed subscription plan to ${planName}` });
@@ -413,16 +507,79 @@ export default function Settings() {
                 />
               </div>
               <div>
-                <label className="block text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-1.5">GST Number</label>
+                <label className="block text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-1.5">GSTIN</label>
                 <input 
                   disabled={!canManageSettings} 
                   value={gst} 
-                  onChange={e => setGst(e.target.value)} 
-                  placeholder="Enter GST number" 
+                  onChange={e => setGst(e.target.value.toUpperCase())} 
+                  placeholder="27AAPFU0939F1ZV" maxLength={15} 
                   className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-400 disabled:opacity-60 disabled:cursor-not-allowed" 
+                />
+                <p className="text-[10px] text-zinc-400 mt-1">
+                  Checked on save. GST returns and e-invoicing both read this — until it is
+                  set, no return can be filed and no invoice can be registered.
+                </p>
+              </div>
+            </div>
+
+            {/* The seller block the IRP validates. Separate from the address
+                above because Loc and Pin are their own mandatory fields on a
+                tax document, and one free-text line cannot be split into them
+                reliably enough to put on one. */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div>
+                <label className="block text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-1.5">State code</label>
+                <input
+                  disabled={!canManageSettings}
+                  value={stateCode}
+                  maxLength={2}
+                  onChange={e => setStateCode(e.target.value.replace(/\D/g, '').slice(0, 2))}
+                  placeholder="27"
+                  className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-400 disabled:opacity-60 disabled:cursor-not-allowed font-mono tabular-nums"
+                />
+                <p className="text-[10px] text-zinc-400 mt-1">
+                  Left blank, it is taken from the GSTIN's first two digits.
+                </p>
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-1.5">City</label>
+                <input
+                  disabled={!canManageSettings}
+                  value={city}
+                  onChange={e => setCity(e.target.value)}
+                  placeholder="Mumbai"
+                  className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-400 disabled:opacity-60 disabled:cursor-not-allowed"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-1.5">Pincode</label>
+                <input
+                  disabled={!canManageSettings}
+                  value={pincode}
+                  maxLength={6}
+                  onChange={e => setPincode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                  placeholder="400020"
+                  className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-400 disabled:opacity-60 disabled:cursor-not-allowed tabular-nums"
                 />
               </div>
             </div>
+
+            <label className="flex items-start gap-2.5 p-3 bg-zinc-50 rounded-xl cursor-pointer">
+              <input
+                type="checkbox"
+                disabled={!canManageSettings}
+                checked={einvoicingEnabled}
+                onChange={e => setEinvoicingEnabled(e.target.checked)}
+                className="mt-0.5"
+              />
+              <span className="text-xs text-zinc-600">
+                <span className="font-medium text-zinc-800">E-invoicing applies to this workspace</span> —
+                turn on once aggregate turnover crosses the threshold. Invoices in scope must then
+                carry an IRN before they are issued, and Billing → E-Invoicing lists the ones that
+                still need one. Below the threshold leave it off: nothing needs registering, and the
+                warnings would be noise.
+              </span>
+            </label>
             <div>
               <label className="block text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-1.5">Company Address</label>
               <textarea 
@@ -510,7 +667,7 @@ export default function Settings() {
                     placeholder="your-company"
                     className="flex-1 px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 disabled:opacity-60"
                   />
-                  <span className="text-sm text-zinc-500 whitespace-nowrap">.friendlyerp.app</span>
+                  <span className="text-sm text-zinc-500 whitespace-nowrap">.{BRAND.portalDomain}</span>
                 </div>
               </div>
 
@@ -624,14 +781,24 @@ export default function Settings() {
                       <button onClick={() => handleToggleActive(u)} className="text-xs font-medium px-2 py-1 rounded-lg text-zinc-500 hover:bg-zinc-100 transition-colors">
                         {u.active ? 'Deactivate' : 'Activate'}
                       </button>
-                      <button onClick={() => handleDeleteUser(u)} className="p-1.5 rounded-lg hover:bg-red-50 text-zinc-400 hover:text-red-500 transition-colors">
-                        <Trash2 className="h-4 w-4" />
-                      </button>
+                      {/* The API has no delete route on purpose — a user row carries
+                          audit history and assignments. Deactivate ends access. */}
+                      {canHardDeleteUsers() && (
+                        <button onClick={() => handleDeleteUser(u)} className="p-1.5 rounded-lg hover:bg-red-50 text-zinc-400 hover:text-red-500 transition-colors">
+                          <Trash2 className="h-4 w-4" />
+                        </button>
+                      )}
                     </div>
                   )}
                 </div>
               ))}
             </div>
+
+            {/* Who covers which site. Deliberately HERE and not on the HR page:
+                a posting decides what somebody can see, so letting a site HR
+                manager edit postings would let her widen her own scope — the one
+                thing project scoping exists to prevent. Same key as roles. */}
+            <SitePostingsPanel members={tenantUsers} canManage={canManageUsers} />
 
             {/* Signed-in devices (spec §4 session management). Revoking signs
                 that browser out on its next page load. */}
@@ -814,52 +981,19 @@ export default function Settings() {
           <div className="bg-white rounded-2xl border border-zinc-200/60 p-6 space-y-4">
             <div>
               <h3 className="text-lg font-semibold text-zinc-900">Role Permissions</h3>
-              <p className="text-sm text-zinc-500 mt-0.5">Overview of what each role can access.</p>
+              <p className="text-sm text-zinc-500 mt-0.5">
+                What each role actually grants, read from the database rather than
+                described from memory.
+              </p>
             </div>
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead>
-                  <tr className="border-b border-zinc-100">
-                    <th className="text-left py-3 px-4 text-xs font-semibold text-zinc-500 uppercase">Permission</th>
-                    <th className="text-center py-3 px-4 text-xs font-semibold text-zinc-500 uppercase">Super Admin</th>
-                    <th className="text-center py-3 px-4 text-xs font-semibold text-zinc-500 uppercase">Builder Admin</th>
-                    <th className="text-center py-3 px-4 text-xs font-semibold text-zinc-500 uppercase">Sales Manager</th>
-                    <th className="text-center py-3 px-4 text-xs font-semibold text-zinc-500 uppercase">Sales Executive</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {[
-                    { label: 'View Leads', p: [1, 1, 1, 1] },
-                    { label: 'Manage All Leads', p: [1, 1, 1, 0] },
-                    { label: 'Assign Leads', p: [1, 1, 1, 0] },
-                    { label: 'View Inventory', p: [1, 1, 1, 1] },
-                    { label: 'Manage Inventory', p: [1, 1, 0, 0] },
-                    { label: 'View Bookings', p: [1, 1, 1, 1] },
-                    { label: 'Manage Bookings', p: [1, 1, 1, 0] },
-                    { label: 'Channel Partners', p: [1, 1, 1, 0] },
-                    { label: 'Manage Partners', p: [1, 1, 0, 0] },
-                    { label: 'View Reports', p: [1, 1, 1, 0] },
-                    { label: 'Manage Settings', p: [1, 1, 0, 0] },
-                    { label: 'Manage Users', p: [1, 1, 0, 0] },
-                    { label: 'Manage Campaigns', p: [1, 1, 1, 0] },
-                    { label: 'View Finance', p: [1, 1, 1, 0] },
-                    { label: 'Manage Service', p: [1, 1, 1, 0] },
-                    { label: 'Use AI Studio', p: [1, 1, 1, 1] },
-                    { label: 'Audit Log', p: [1, 1, 0, 0] },
-                    { label: 'Platform Control', p: [1, 0, 0, 0] },
-                  ].map(row => (
-                    <tr key={row.label} className="border-b border-zinc-50">
-                      <td className="py-3 px-4 text-sm text-zinc-700">{row.label}</td>
-                      {row.p.map((v, i) => (
-                        <td key={i} className="text-center py-3 px-4">
-                          {v === 1 ? <Check className="h-4 w-4 text-emerald-500 mx-auto" /> : <span className="text-zinc-300">—</span>}
-                        </td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+
+            {/* This used to be eighteen hardcoded rows across four role columns,
+                written when the product had four roles. It now has eleven and around
+                eighty permission keys, so the table had quietly become fiction — no
+                HR keys at all, nothing for execution, procurement, land, BD, leasing
+                or accounts. An administrator checks this page before deciding a role
+                is safe to hand somebody, so it has to come from role_permissions. */}
+            <PermissionMatrixPanel />
 
             {/* Configurable approval thresholds (spec: expose the approval
                 matrix as config). Amounts at/above a threshold need the
@@ -881,12 +1015,20 @@ export default function Settings() {
                       <input
                         type="number" min="0"
                         defaultValue={approvalRules[action]}
-                        onBlur={e => {
+                        onBlur={async e => {
                           const v = Number(e.target.value) || 0;
-                          if (v !== approvalRules[action]) {
-                            setApprovalThreshold(tenantId, action, v);
+                          if (v === approvalRules[action]) return;
+                          // Confirm only after the SERVER has it. This used to
+                          // report success on a write that never left the
+                          // browser, so the threshold applied on one machine
+                          // and nowhere else.
+                          try {
+                            await setApprovalThreshold(tenantId, action, v);
                             refresh();
                             toast.success(`${label} threshold updated`);
+                          } catch (err) {
+                            e.target.value = String(approvalRules[action]);
+                            toast.error(err instanceof Error ? err.message : 'Could not save the threshold');
                           }
                         }}
                         className="w-full mt-1.5 px-3 py-2 bg-zinc-50 border border-zinc-200 rounded-lg text-sm text-right font-semibold"
@@ -905,6 +1047,7 @@ export default function Settings() {
         {activeTab === 'integrations' && <IntegrationsPanel />}
         {activeTab === 'autoreply' && <WhatsAppAutoReplyPanel />}
         {activeTab === 'storage' && <WhatsAppStoragePanel />}
+        {activeTab === 'retention' && <PrivacyPanel />}
 
         {activeTab === 'notifications' && (
           <div className="bg-white rounded-2xl border border-zinc-200/60 p-6 space-y-4">
@@ -1028,7 +1171,7 @@ export default function Settings() {
             <div className="flex items-center justify-between">
               <div>
                 <h3 className="text-lg font-semibold text-zinc-900">Billing & Subscription</h3>
-                <p className="text-sm text-zinc-500 mt-0.5">Manage your Friendly ERP subscription and billing information.</p>
+                <p className="text-sm text-zinc-500 mt-0.5">Manage your {BRAND.name} subscription and billing information.</p>
               </div>
               <button 
                 onClick={() => toast.success('Billing portal coming soon!')}
@@ -1587,7 +1730,14 @@ export default function Settings() {
           </div>
         )}
 
-        {!['profile', 'team', 'brand', 'pipeline', 'permissions', 'integrations', 'autoreply', 'storage', 'notifications', 'billing', 'audit', 'danger'].includes(activeTab) && (
+        {/* Placeholder for a tab that is listed but not built yet.
+            This used to be a denylist of every implemented tab, which meant a
+            new tab was "Coming soon" until someone remembered to add it here —
+            and Retention & Erasure shipped rendering its real panel with a
+            Coming soon card underneath. The flag inverts that: a tab is built
+            unless it says otherwise, so forgetting leaves no placeholder rather
+            than a contradictory one. Nothing is marked `soon` today. */}
+        {settingsTabs.find(t => t.id === activeTab)?.soon && (
           <div className="bg-white rounded-2xl border border-zinc-200/60 p-12 text-center">
             <div className="h-16 w-16 rounded-2xl bg-zinc-100 mx-auto mb-4 flex items-center justify-center">
               <SettingsIcon className="h-7 w-7 text-zinc-300" />
@@ -1601,6 +1751,43 @@ export default function Settings() {
       </div>
 
       {/* Add User Modal */}
+      {/* The one-time password, shown once because that is all the server will
+          ever tell us. It is the invited person's only way in, so it gets a
+          panel that waits to be dismissed rather than a toast that expires. */}
+      {newUserPassword && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 space-y-4">
+            <div>
+              <h3 className="text-lg font-semibold text-zinc-900">{newUserPassword.name} can now sign in</h3>
+              <p className="text-sm text-zinc-500 mt-0.5">
+                Give them this password. It is shown once and cannot be looked up again —
+                if it is lost, reset it from this screen to issue a new one.
+              </p>
+            </div>
+            <div className="bg-zinc-50 border border-zinc-200 rounded-xl p-4 space-y-2">
+              <div>
+                <p className="text-[11px] font-semibold text-zinc-500 uppercase">Email</p>
+                <p className="text-sm text-zinc-900 font-mono break-all">{newUserPassword.email}</p>
+              </div>
+              <div>
+                <p className="text-[11px] font-semibold text-zinc-500 uppercase">Temporary password</p>
+                <p className="text-base text-zinc-900 font-mono tracking-wide break-all">{newUserPassword.password}</p>
+              </div>
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => { navigator.clipboard?.writeText(newUserPassword.password); toast.success("Password copied"); }}
+                className="px-4 py-2 border border-zinc-200 rounded-xl text-sm font-semibold text-zinc-600 hover:bg-zinc-50">
+                Copy password
+              </button>
+              <button onClick={() => setNewUserPassword(null)}
+                className="px-4 py-2 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700">
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {showAddUser && (
         <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => setShowAddUser(false)}>
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 animate-fade-in" onClick={e => e.stopPropagation()}>
@@ -1622,10 +1809,14 @@ export default function Settings() {
                 <input name="phone" placeholder="+91 98765 43210" className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20" />
               </div>
               <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-semibold text-zinc-500 uppercase mb-1">Password *</label>
-                  <input name="password" type="password" required minLength={6} placeholder="Min 6 chars" className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20" />
-                </div>
+                {/* Only the demo store takes a password from the form. The API
+                    mints a one-time password and returns it once on create. */}
+                {!isApiEnabled() && (
+                  <div>
+                    <label className="block text-xs font-semibold text-zinc-500 uppercase mb-1">Password *</label>
+                    <input name="password" type="password" required minLength={6} placeholder="Min 6 chars" className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20" />
+                  </div>
+                )}
                 <div>
                   <label className="block text-xs font-semibold text-zinc-500 uppercase mb-1">Role *</label>
                   <select name="role" required defaultValue="sales_executive" className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20">

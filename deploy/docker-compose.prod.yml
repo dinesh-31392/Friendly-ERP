@@ -54,6 +54,39 @@ services:
       EVOLUTION_API_URL: http://evolution:8080
       EVOLUTION_API_KEY: ${EVOLUTION_API_KEY:?set in .env}
       WHATSAPP_DEFAULT_CC: ${WHATSAPP_DEFAULT_CC:-91}
+
+      # Outbound mail. These were in .env.production.example and were never
+      # passed to this container, so a deployment that filled them in correctly
+      # still could not send: MFA sign-in codes and password resets fell back to
+      # "SMTP is not configured" in the log, which nobody reads until somebody
+      # cannot log in.
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      MFA_CODE_TTL_MINUTES: ${MFA_CODE_TTL_MINUTES:-10}
+
+      # Payments. Absent until the builder has live Razorpay keys; the gateway
+      # routes refuse cleanly rather than half-working when these are empty.
+      RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID:-}
+      RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET:-}
+      RAZORPAY_WEBHOOK_SECRET: ${RAZORPAY_WEBHOOK_SECRET:-}
+
+      # Click-to-call. Same story — optional, and refused clearly when unset.
+      EXOTEL_ACCOUNT_SID: ${EXOTEL_ACCOUNT_SID:-}
+      EXOTEL_API_KEY: ${EXOTEL_API_KEY:-}
+      EXOTEL_API_TOKEN: ${EXOTEL_API_TOKEN:-}
+      EXOTEL_CALLER_ID: ${EXOTEL_CALLER_ID:-}
+
+      # Per-file upload ceiling in MB (storage.ts default is 25).
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-25}
+    volumes:
+      # Uploaded documents. Without this every agreement, KYC scan and demand
+      # letter lives inside the image layer and is destroyed by the next
+      # `up --build`. The Dockerfile pre-creates /data/uploads owned by `node`
+      # so this volume is seeded node-owned and the non-root process can write.
+      - uploads:/data/uploads
     expose:
       - "4000"
 
@@ -136,6 +169,9 @@ services:
       - ./backup.sh:/usr/local/bin/backup.sh:ro
       - ./restore.sh:/usr/local/bin/restore.sh:ro
       - backups:/backups
+      # Read-only: this service archives the documents, it must never be able
+      # to alter them. tar needs nothing more than read.
+      - uploads:/data/uploads:ro
     entrypoint: >
       /bin/sh -c 'apk add --no-cache gnupg >/dev/null 2>&1;
       trap exit TERM;
@@ -147,3 +183,7 @@ volumes:
   certs:
   certbot-www:
   backups:
+  # Uploaded documents. Back this up alongside pgdata — the database stores the
+  # storage_key, not the bytes, so a restore without this volume gives you a
+  # file list where every download 404s.
+  uploads:

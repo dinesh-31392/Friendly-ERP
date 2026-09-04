@@ -1,12 +1,12 @@
 import { useState, useMemo, useEffect } from 'react';
 import {
   UserCheck, Users, MapPin, CalendarDays, Wallet, Plus, X, Trash2,
-  CheckCircle2, LogOut, Building2, AlertTriangle,
+  CheckCircle2, LogOut, LogIn, Building2, AlertTriangle, HandCoins, Pencil,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { getByTenant, logAudit } from '../services/db';
 import { todayKey, monthKey, leaveDays, buildPayrollItemsFrom } from '../services/hrService';
-import { isApiEnabled } from '../services/apiClient';
+import { isApiEnabled, apiGetHrScope, apiMarkAttendance, type ApiHrScope } from '../services/apiClient';
 import * as hrWrites from '../services/hrWrites';
 import { formatCurrency, formatCurrencyFull } from '../utils/format';
 import type {
@@ -15,13 +15,23 @@ import type {
 } from '../types';
 import { DEPARTMENTS, LEAVE_TYPES } from '../types';
 import toast from 'react-hot-toast';
+import SessionAttendancePanel from '../components/SessionAttendancePanel';
+import PayrollRunPanel from '../components/PayrollRunPanel';
+import AdvancesPanel from '../components/AdvancesPanel';
+import EmployeeEditDrawer from '../components/EmployeeEditDrawer';
 
-type Tab = 'employees' | 'attendance' | 'leave' | 'payroll';
+type Tab = 'employees' | 'attendance' | 'sessions' | 'leave' | 'advances' | 'payroll';
 
 const TABS: { id: Tab; label: string; icon: React.ElementType }[] = [
   { id: 'employees', label: 'Employees', icon: Users },
   { id: 'attendance', label: 'Attendance', icon: MapPin },
+  // Beside Attendance because that is what it feeds — and its own tab, so a
+  // derived time is never mistaken for a check-in somebody actually made.
+  { id: 'sessions', label: 'Sign-in Times', icon: LogIn },
   { id: 'leave', label: 'Leave', icon: CalendarDays },
+  // Before Payroll, because that is the order the work happens in: an advance
+  // is given during the month and recovered by the run at the end of it.
+  { id: 'advances', label: 'Advances', icon: HandCoins },
   { id: 'payroll', label: 'Payroll', icon: Wallet },
 ];
 
@@ -43,6 +53,30 @@ export default function HR() {
   const [payrollMonth, setPayrollMonth] = useState(monthKey());
   const [checkingIn, setCheckingIn] = useState<string | null>(null);
 
+  // Which sites this person's HR covers. The server decides — being
+  // company-wide depends on a permission AND on whether any posting exists,
+  // so a screen that guessed would offer a project the server then rejects.
+  const [hrScope, setHrScope] = useState<ApiHrScope | null>(null);
+  // null is the company-wide payroll run; a uuid is one site's.
+  const [payrollProject, setPayrollProject] = useState<string | null>(null);
+  // The person whose record is open for editing, if any.
+  const [editing, setEditing] = useState<Employee | null>(null);
+
+  useEffect(() => {
+    if (!isApiEnabled()) { setHrScope(null); return; }
+    let cancelled = false;
+    apiGetHrScope()
+      .then(s => {
+        if (cancelled) return;
+        setHrScope(s);
+        // A site manager has no company-wide run to look at, so the picker
+        // opens on their first site rather than on an option they cannot use.
+        if (!s.companyWide && s.projects.length > 0) setPayrollProject(s.projects[0].id);
+      })
+      .catch(() => { if (!cancelled) setHrScope(null); });
+    return () => { cancelled = true; };
+  }, [tenantId]);
+
   // API mode: the server is the source of truth for all four HR datasets;
   // localStorage stays the demo path AND the fallback if the API is down.
   const [apiData, setApiData] = useState<Awaited<ReturnType<typeof hrWrites.fetchHrData>>>(null);
@@ -61,7 +95,16 @@ export default function HR() {
     () => (apiData?.employees ?? getByTenant<Employee>('employees', tenantId)).slice().sort((a, b) => a.name.localeCompare(b.name)),
     [apiData, tenantId, refreshKey]
   );
-  const projects = useMemo(() => getByTenant<Project>('projects', tenantId), [tenantId, refreshKey]);
+  // In API mode the sites come from /api/hr/scope, which returns exactly the
+  // projects this person's HR covers. Reading them from the demo store — which
+  // is what this did — left `projects` EMPTY under the API: the SITE column
+  // showed a dash for every employee who plainly had a site, and the "Deployed
+  // At" picker offered only "Head office", which a posted manager is refused.
+  const projects = useMemo<Pick<Project, 'id' | 'name'>[]>(
+    () => (isApiEnabled()
+      ? (hrScope?.projects ?? [])
+      : getByTenant<Project>('projects', tenantId)),
+    [hrScope, tenantId, refreshKey]);
   const allAttendance = useMemo(
     () => apiData?.attendance ?? getByTenant<AttendanceRecord>('attendance', tenantId),
     [apiData, tenantId, refreshKey]
@@ -80,6 +123,14 @@ export default function HR() {
     () => new Set(leaves.filter(l => l.status === 'approved' && l.from <= attendanceDate && attendanceDate <= l.to).map(l => l.employeeId)),
     [leaves, attendanceDate]
   );
+
+  // The server redacts pay for anyone who is not manage_hr or view_audit_log —
+  // a site engineer holds view_hr only so they can mark a crew register. The
+  // screen has to SAY so: totalling a withheld payroll gives zero, and a zero
+  // on a payroll screen is a claim about what people were paid.
+  const payHidden = employees.some(e => e.payHidden);
+  const runTotal = (r: PayrollRun) => r.items.reduce((s, i) => s + i.gross, 0);
+  const runCount = (r: PayrollRun) => r.itemCount ?? r.items.length;
 
   const activeEmployees = employees.filter(e => e.active);
   const empName = (id: string) => employees.find(e => e.id === id)?.name || '—';
@@ -125,6 +176,32 @@ export default function HR() {
     setShowAddEmployee(false);
     refresh();
     toast.success('Employee added');
+  };
+
+  /**
+   * Record overtime against a day already marked.
+   *
+   * Re-posts the attendance row: the API upserts on (employee, date) and only
+   * moves `overtime_hours` when the field is present, so the check-in and
+   * check-out already on the row survive untouched.
+   */
+  const saveOvertime = async (emp: Employee, rec: AttendanceRecord, hours: number) => {
+    const current = rec.overtimeHours ?? 0;
+    if (!Number.isFinite(hours) || hours === current) return;
+    if (hours < 0 || hours > 16) { toast.error('Overtime must be between 0 and 16 hours'); return; }
+    try {
+      await apiMarkAttendance({
+        employeeId: emp.id, date: rec.date,
+        checkIn: rec.checkIn, checkOut: rec.checkOut ?? undefined,
+        projectId: rec.projectId ?? undefined, method: rec.method,
+        overtimeHours: hours,
+      });
+      audit('update', 'attendance', emp.id, `Overtime ${hours}h for ${emp.name} — ${rec.date}`);
+      refresh();
+      toast.success(hours === 0 ? 'Overtime cleared' : `${hours}h overtime recorded`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not record that overtime');
+    }
   };
 
   const toggleEmployee = async (emp: Employee) => {
@@ -264,7 +341,21 @@ export default function HR() {
   const inputCls = 'w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20';
   const labelCls = 'block text-xs font-semibold text-zinc-500 uppercase mb-1';
   const fmtDate = (d?: string) => d ? new Date(d).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) : '—';
-  const fmtTime = (iso?: string) => iso ? new Date(iso).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }) : '';
+  /**
+   * check_in is a TEXT column and legitimately holds two shapes: a full ISO
+   * timestamp when the app stamps a check-in, and a bare "09:15" when somebody
+   * typed the time or a seeder wrote it. Passing the second to `new Date()`
+   * gives Invalid Date, which is what the register was printing next to every
+   * person who had been marked present by hand.
+   */
+  const fmtTime = (raw?: string) => {
+    if (!raw) return '';
+    if (/^\d{1,2}:\d{2}/.test(raw)) return raw.slice(0, 5);
+    const d = new Date(raw);
+    return Number.isNaN(d.getTime())
+      ? raw
+      : d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
+  };
 
   return (
     <div className="space-y-6 max-w-[1400px]">
@@ -308,9 +399,16 @@ export default function HR() {
             <span className="text-xs font-medium text-zinc-500">Last Payroll</span>
           </div>
           <p className="text-2xl font-bold text-zinc-900">
-            {payrollRuns[0] ? formatCurrency(payrollRuns[0].items.reduce((s, i) => s + i.gross, 0), currency) : '—'}
+            {!payrollRuns[0] ? '—'
+              : payrollRuns[0].itemsHidden ? <span className="text-base font-semibold text-zinc-400">Not shown</span>
+              : formatCurrency(runTotal(payrollRuns[0]), currency)}
           </p>
-          <p className="text-xs text-zinc-500 mt-1">{payrollRuns[0] ? `${payrollRuns[0].month} · ${payrollRuns[0].status}` : 'no runs yet'}</p>
+          <p className="text-xs text-zinc-500 mt-1">
+            {payrollRuns[0]
+              ? `${payrollRuns[0].month} · ${payrollRuns[0].status}${
+                  payrollRuns[0].itemsHidden ? ` · ${runCount(payrollRuns[0])} people` : ''}`
+              : 'no runs yet'}
+          </p>
         </div>
       </div>
 
@@ -342,6 +440,16 @@ export default function HR() {
               </button>
             )}
           </div>
+          {payHidden && (
+            // Said once at the top rather than left for the reader to infer from
+            // a column of "Not shown" — it is a rule about their role, not a
+            // gap in the data.
+            <p className="px-5 py-2.5 bg-zinc-50/60 border-b border-zinc-100 text-[11px] text-zinc-500 flex items-center gap-1.5">
+              <AlertTriangle className="h-3 w-3 shrink-0" />
+              Pay figures are not shown to your role. You can mark attendance and see who is
+              on leave; salaries and payroll amounts are visible to HR and to an auditor.
+            </p>
+          )}
           {employees.length === 0 ? (
             <div className="py-16 text-center">
               <Users className="h-10 w-10 text-zinc-300 mx-auto mb-2" />
@@ -375,9 +483,11 @@ export default function HR() {
                       <td className="px-4 py-3 text-sm text-zinc-600 hidden md:table-cell">{emp.department}</td>
                       <td className="px-4 py-3 text-sm text-zinc-600 hidden sm:table-cell">{emp.projectId ? projectName(emp.projectId) : 'Head office'}</td>
                       <td className="px-4 py-3 text-sm font-semibold text-zinc-900 text-right">
-                        {emp.type === 'staff'
-                          ? (emp.monthlySalary ? `${formatCurrency(emp.monthlySalary, currency)}/mo` : '—')
-                          : (emp.dailyWage ? `${formatCurrencyFull(emp.dailyWage, currency)}/day` : '—')}
+                        {emp.payHidden
+                          ? <span className="text-xs font-medium text-zinc-400">Not shown</span>
+                          : emp.type === 'staff'
+                            ? (emp.monthlySalary ? `${formatCurrency(emp.monthlySalary, currency)}/mo` : '—')
+                            : (emp.dailyWage ? `${formatCurrencyFull(emp.dailyWage, currency)}/day` : '—')}
                       </td>
                       <td className="px-4 py-3 text-center">
                         <button
@@ -386,9 +496,20 @@ export default function HR() {
                           className={`text-[11px] font-semibold px-2.5 py-1 rounded-full transition-colors ${emp.active ? 'bg-emerald-50 text-emerald-700' : 'bg-zinc-100 text-zinc-500'} ${canManage ? 'cursor-pointer hover:opacity-80' : ''}`}
                         >{emp.active ? 'active' : 'inactive'}</button>
                       </td>
-                      <td className="px-4 py-3 text-right">
+                      <td className="px-4 py-3 text-right whitespace-nowrap">
+                        {canManage && isApiEnabled() && (
+                          // A raise, a corrected designation, a bank account.
+                          // Until this button existed the page could hire and
+                          // fire and do nothing in between.
+                          <button
+                            onClick={() => setEditing(emp)} title={`Edit ${emp.name}`}
+                            className="p-1.5 rounded-lg hover:bg-indigo-50 text-zinc-400 hover:text-indigo-600 transition-colors"
+                          >
+                            <Pencil className="h-4 w-4" />
+                          </button>
+                        )}
                         {canManage && (
-                          <button onClick={() => deleteEmployee(emp)} className="p-1.5 rounded-lg hover:bg-red-50 text-zinc-400 hover:text-red-500 transition-colors">
+                          <button onClick={() => deleteEmployee(emp)} title={`Remove ${emp.name}`} className="p-1.5 rounded-lg hover:bg-red-50 text-zinc-400 hover:text-red-500 transition-colors">
                             <Trash2 className="h-4 w-4" />
                           </button>
                         )}
@@ -403,6 +524,8 @@ export default function HR() {
       )}
 
       {/* ── Attendance ── */}
+      {tab === 'sessions' && <SessionAttendancePanel canManage={canMark} />}
+
       {tab === 'attendance' && (
         <div className="bg-white rounded-2xl border border-zinc-200/60 overflow-hidden">
           <div className="px-5 py-4 border-b border-zinc-100 flex items-center gap-3 flex-wrap">
@@ -454,6 +577,23 @@ export default function HR() {
                           {checkingIn === emp.id ? 'Locating…' : 'Check In'}
                         </button>
                       )}
+                      {canMark && rec && isApiEnabled() && (
+                        // Overtime is paid at twice the ordinary hourly rate,
+                        // and payroll already computes it — there was simply
+                        // nowhere to record the hours. Entered against the day
+                        // they were worked, not the month they are paid in.
+                        <label className="flex items-center gap-1.5 text-[11px] text-zinc-500">
+                          OT
+                          <input
+                            type="number" min="0" max="16" step="0.5"
+                            defaultValue={rec.overtimeHours ?? 0}
+                            onBlur={ev => saveOvertime(emp, rec, Number(ev.target.value))}
+                            className="w-14 px-2 py-1 bg-zinc-50 border border-zinc-200 rounded-lg text-xs tabular-nums"
+                            aria-label={`Overtime hours for ${emp.name}`}
+                          />
+                          h
+                        </label>
+                      )}
                       {canMark && rec && !rec.checkOut && (
                         <button onClick={() => checkOut(emp)} className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-zinc-100 text-zinc-700 hover:bg-zinc-200 transition-colors inline-flex items-center gap-1">
                           <LogOut className="h-3 w-3" /> Check Out
@@ -502,7 +642,9 @@ export default function HR() {
                     <p className="text-sm font-medium text-zinc-900">{empName(req.employeeId)}</p>
                     <p className="text-[11px] text-zinc-500">
                       {LEAVE_TYPES.find(t => t.id === req.type)?.label} · {fmtDate(req.from)}{req.to !== req.from ? ` → ${fmtDate(req.to)}` : ''} · {req.days}d
-                      {req.reason ? ` · ${req.reason}` : ''}
+                      {req.reasonHidden
+                        ? <span className="italic text-zinc-400"> · reason not shown</span>
+                        : req.reason ? ` · ${req.reason}` : ''}
                     </p>
                   </div>
                   {req.status === 'pending' && canManage ? (
@@ -523,8 +665,61 @@ export default function HR() {
         </div>
       )}
 
-      {/* ── Payroll ── */}
-      {tab === 'payroll' && (
+      {/* ── Advances ── */}
+      {tab === 'advances' && (
+        <AdvancesPanel employees={employees} currency={currency} canManage={canManage} />
+      )}
+
+      {/* ── Payroll ──
+          In API mode the server computes the run: gross, PF, ESI, professional
+          tax and advance recovery, using the statutory rates in force for the
+          month being paid. The demo path below keeps the old gross-only
+          arithmetic, because localStorage holds none of what the rest needs. */}
+      {tab === 'payroll' && isApiEnabled() && (
+        <div className="space-y-4">
+          <div className="bg-white rounded-2xl border border-zinc-200/60 px-5 py-3 flex items-center gap-3 flex-wrap">
+            <span className="text-xs font-semibold text-zinc-500 uppercase">Run for</span>
+            <select
+              value={payrollProject ?? ''}
+              onChange={e => setPayrollProject(e.target.value || null)}
+              className="px-3 py-1.5 bg-zinc-50 border border-zinc-200 rounded-lg text-xs"
+              aria-label="Project"
+            >
+              {/* Offered only to company-wide HR. A site manager has no
+                  company-wide run to prepare and the server would refuse. */}
+              {hrScope?.companyWide && <option value="">Whole company</option>}
+              {(hrScope?.projects ?? []).map(p => (
+                <option key={p.id} value={p.id}>{p.name}</option>
+              ))}
+            </select>
+            <input
+              type="month" value={payrollMonth} max={monthKey()}
+              onChange={e => setPayrollMonth(e.target.value)}
+              className="px-3 py-1.5 bg-zinc-50 border border-zinc-200 rounded-lg text-xs"
+              aria-label="Month"
+            />
+            <div className="flex-1" />
+            {hrScope && !hrScope.companyWide && (
+              <span className="text-[11px] text-zinc-500">
+                You run payroll for {hrScope.projects.length === 1 ? 'one site' : `${hrScope.projects.length} sites`}
+              </span>
+            )}
+          </div>
+
+          <PayrollRunPanel
+            month={payrollMonth}
+            projectId={payrollProject}
+            projectName={payrollProject
+              ? (hrScope?.projects.find(p => p.id === payrollProject)?.name ?? 'Project')
+              : 'Whole company'}
+            currency={currency}
+            canManage={canManage}
+            onProcessed={refresh}
+          />
+        </div>
+      )}
+
+      {tab === 'payroll' && !isApiEnabled() && (
         <div className="space-y-4">
           <div className="bg-white rounded-2xl border border-zinc-200/60 overflow-hidden">
             <div className="px-5 py-4 border-b border-zinc-100 flex items-center gap-3 flex-wrap">
@@ -546,6 +741,19 @@ export default function HR() {
               <div className="py-14 text-center">
                 <Wallet className="h-10 w-10 text-zinc-300 mx-auto mb-2" />
                 <p className="text-sm text-zinc-500">No run for {payrollMonth} yet. Staff get their monthly salary; contract workers get daily wage × days present.</p>
+              </div>
+            ) : currentRun.itemsHidden ? (
+              // Not an empty run — a withheld one. Rendering the table anyway
+              // would print "Total (0 people) ₹0" over a real payroll.
+              <div className="py-14 text-center px-6">
+                <Wallet className="h-10 w-10 text-zinc-300 mx-auto mb-2" />
+                <p className="text-sm font-medium text-zinc-700">
+                  {runCount(currentRun)} {runCount(currentRun) === 1 ? 'person' : 'people'} in the {currentRun.month} run
+                </p>
+                <p className="text-xs text-zinc-500 mt-1 max-w-md mx-auto">
+                  The amounts are not shown to your role. Payroll figures are visible to
+                  HR and to an auditor; marking attendance does not require seeing them.
+                </p>
               </div>
             ) : (
               <>
@@ -600,8 +808,12 @@ export default function HR() {
               <div className="divide-y divide-zinc-50">
                 {payrollRuns.filter(r => r.month !== payrollMonth).map(run => (
                   <button key={run.id} onClick={() => setPayrollMonth(run.month)} className="w-full flex items-center justify-between px-5 py-2.5 hover:bg-zinc-50/50 text-left">
-                    <span className="text-sm text-zinc-700">{run.month} · {run.items.length} people</span>
-                    <span className="text-sm font-semibold text-zinc-900">{formatCurrency(run.items.reduce((s, i) => s + i.gross, 0), currency)}</span>
+                    <span className="text-sm text-zinc-700">{run.month} · {runCount(run)} people</span>
+                    <span className="text-sm font-semibold text-zinc-900">
+                      {run.itemsHidden
+                        ? <span className="text-xs font-medium text-zinc-400">Not shown</span>
+                        : formatCurrency(runTotal(run), currency)}
+                    </span>
                   </button>
                 ))}
               </div>
@@ -651,8 +863,13 @@ export default function HR() {
                 </div>
                 <div>
                   <label className={labelCls}>Deployed At</label>
-                  <select name="projectId" className={inputCls}>
-                    <option value="">Head office</option>
+                  <select
+                    name="projectId" className={inputCls}
+                    defaultValue={hrScope && !hrScope.companyWide ? (hrScope.projects[0]?.id ?? '') : ''}
+                  >
+                    {/* Head office needs company-wide HR — a manager posted to
+                        a site would be refused, so it is not offered to them. */}
+                    {(!hrScope || hrScope.companyWide) && <option value="">Head office</option>}
                     {projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
                   </select>
                 </div>
@@ -717,6 +934,20 @@ export default function HR() {
             </form>
           </div>
         </div>
+      )}
+
+      {editing && (
+        <EmployeeEditDrawer
+          employee={editing}
+          currency={currency}
+          projects={projects}
+          // Moving somebody between sites is a one-way door for a posted
+          // manager — after the write they could not read the row back. The
+          // server refuses it; the drawer says so rather than offering it.
+          canMoveSite={hrScope?.companyWide !== false}
+          onClose={() => setEditing(null)}
+          onSaved={refresh}
+        />
       )}
     </div>
   );

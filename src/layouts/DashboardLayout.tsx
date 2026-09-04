@@ -3,8 +3,8 @@ import {
   LayoutDashboard, Users, Building2, Brain, BarChart3, TrendingUp,
   Settings, Calendar, ChevronDown, Bell, Search, Megaphone,
   MessageSquare, FileText, CreditCard, Wrench, Shield, LogOut,
-  X, AlertCircle, CheckCircle2, Clock, Menu, BookOpenCheck, Handshake, Globe,
-  HardHat, Truck, Package, UserCheck, Scale, Map, KeyRound,
+  X, AlertCircle, CheckCircle2, Clock, Menu, BookOpenCheck, FileSpreadsheet, Handshake, Globe,
+  HardHat, Truck, Package, UserCheck, Scale, Map, KeyRound, MapPin,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useState, useEffect, useMemo, useRef } from 'react';
@@ -16,6 +16,7 @@ import { filingsDueSoon } from '../services/complianceService';
 import InstallAppButton from '../components/InstallAppButton';
 import ErrorBoundary from '../components/ErrorBoundary';
 import type { Lead, Task, Ticket, SiteTask, PurchaseOrder, Vendor, Material, Employee } from '../types';
+import { BRAND } from '../config/brand';
 
 // ── Navigation model ─────────────────────────────────────────────────────────
 // The ERP outgrew a flat list (20+ destinations). Items are now grouped into
@@ -40,7 +41,21 @@ const NAV_GROUPS: NavGroupDef[] = [
   {
     id: 'sales', label: 'Sales & CRM', icon: Users, children: [
       { to: '/leads', icon: Users, label: 'Leads', permission: 'view_leads' },
+      // Same key as Leads: the routes gate on view_leads because a visit is an
+      // event in a lead's life. A key of its own would have left the module
+      // unreachable until a migration granted it to somebody.
+      { to: '/site-visits', icon: MapPin, label: 'Site Visits', permission: 'view_leads' },
       { to: '/bookings', icon: BookOpenCheck, label: 'Bookings', permission: 'view_bookings' },
+      // Buyers, not enquiries: customers is its own table with its own KYC
+      // state. Gated on view_leads because the API is — a customer is where a
+      // lead ends up, and the same desk works both.
+      { to: '/customers', icon: UserCheck, label: 'Customers', permission: 'view_leads' },
+      // Sits beside Bookings because it is the step before one: a buyer is
+      // priced, then booked, and the accepted sheet is what the booking cites.
+      { to: '/cost-sheets', icon: FileSpreadsheet, label: 'Cost Sheets', permission: 'view_bookings' },
+      // The other end of the same lifecycle: priced, booked, and eventually
+      // handed over. Same permission, because it is the same desk.
+      { to: '/possession', icon: KeyRound, label: 'Possession', permission: 'view_bookings' },
       // The rental portfolio sits with sales: the desk that fills a unit papers it.
       { to: '/leasing', icon: KeyRound, label: 'Leasing', permission: 'view_leasing' },
       { to: '/sales-performance', icon: TrendingUp, label: 'Sales Performance', permission: 'view_sales_performance' },
@@ -65,6 +80,10 @@ const NAV_GROUPS: NavGroupDef[] = [
   {
     id: 'workforce', label: 'Workforce', icon: UserCheck, children: [
       { to: '/hr', icon: UserCheck, label: 'HR & Workforce', permission: 'view_hr' },
+      // Their own record, not the desk that manages everyone else. Gated on
+      // view_dashboard because every role holds it — an HR key would have kept
+      // six roles out of their own attendance and payslips.
+      { to: '/my-hr', icon: Calendar, label: 'My Attendance', permission: 'view_dashboard' },
     ],
   },
   {
@@ -534,8 +553,8 @@ export default function DashboardLayout() {
           )}
           {!sidebarCollapsed && (
             <div className="min-w-0 flex-1">
-              <p className="text-sm font-semibold text-zinc-900 leading-tight truncate">{tenant?.name || 'Friendly ERP'}</p>
-              <p className="text-[11px] text-zinc-500">Friendly ERP</p>
+              <p className="text-sm font-semibold text-zinc-900 leading-tight truncate">{tenant?.name || BRAND.name}</p>
+              <p className="text-[11px] text-zinc-500">{BRAND.name}</p>
             </div>
           )}
         </div>

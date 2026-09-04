@@ -421,7 +421,11 @@ export function hasPermission(user: User, action: string): boolean {
       'view_brokers', 'manage_brokers',
       'view_execution', 'manage_execution', 'approve_change_orders',
       'view_procurement', 'manage_procurement', 'approve_purchase_orders',
-      'view_hr', 'manage_hr', 'manage_attendance',
+      // manage_hr_all: HR across every project rather than only the sites this
+      // person is posted to. The admin always holds it; an hr_manager
+      // deliberately does not, because a manager posted to a site IS the
+      // per-project case (server: app_hr_all, migration 061).
+      'view_hr', 'manage_hr', 'manage_attendance', 'manage_hr_all',
       'view_accounts', 'manage_accounts', 'approve_vendor_bills', 'signoff_ra_bills',
       'create_quotations', 'approve_discounts', 'manage_approval_rules',
       // Land acquisition: admin holds every gate (maker + both checkers)

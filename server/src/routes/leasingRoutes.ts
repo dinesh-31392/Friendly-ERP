@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { withTenantContext } from '../db.js';
 import { requireAuth } from '../auth.js';
+import { PAGE_QUERY, readPage, keysetWhere, takePage } from '../pagination.js';
 
 /**
  * Leasing: occupants, lease agreements, rent invoicing, receipts, CAM bills
@@ -631,12 +632,13 @@ export async function leasingRoutes(app: FastifyInstance): Promise<void> {
 
   // ── Receipts ───────────────────────────────────────────────────────────────
 
-  app.get<{ Querystring: { leaseInvoiceId?: string } }>(
+  app.get<{ Querystring: { leaseInvoiceId?: string; limit?: number; cursor?: string } }>(
     '/api/lease-receipts',
     {
       preHandler: requireAuth,
       schema: { querystring: { type: 'object', additionalProperties: false, properties: {
         leaseInvoiceId: { type: 'string', pattern: UUID },
+        ...PAGE_QUERY,
       } } },
     },
     async (req, reply) =>
@@ -644,11 +646,25 @@ export async function leasingRoutes(app: FastifyInstance): Promise<void> {
         if (!await gate(db, 'view_leasing')) {
           return reply.code(403).send({ error: 'Missing permission: view_leasing' });
         }
-        const { rows } = req.query.leaseInvoiceId
-          ? await db.query(`SELECT * FROM lease_receipts WHERE lease_invoice_id = $1 ORDER BY payment_date DESC`,
-              [req.query.leaseInvoiceId])
-          : await db.query(`SELECT * FROM lease_receipts ORDER BY payment_date DESC, created_at DESC`);
-        return { leaseReceipts: rows.map(toApiReceipt) };
+        // Scoped by invoice, this is a handful of rows and pages would be
+        // noise. Unscoped, it is every receipt the portfolio has ever taken —
+        // so only that branch pages.
+        if (req.query.leaseInvoiceId) {
+          const { rows } = await db.query(
+            `SELECT * FROM lease_receipts WHERE lease_invoice_id = $1 ORDER BY payment_date DESC`,
+            [req.query.leaseInvoiceId]);
+          return { leaseReceipts: rows.map(toApiReceipt), nextCursor: null };
+        }
+        const page = readPage(req.query);
+        const ks = keysetWhere(page, 'created_at', 'id', 1);
+        const { rows } = await db.query(
+          `SELECT * FROM lease_receipts
+            ${ks.sql ? `WHERE ${ks.sql}` : ''}
+            ORDER BY created_at DESC, id DESC
+            LIMIT ${page.limit + 1}`,
+          ks.params);
+        const out = takePage(rows, page, 'created_at');
+        return { leaseReceipts: out.rows.map(toApiReceipt), nextCursor: out.nextCursor };
       }),
   );
 

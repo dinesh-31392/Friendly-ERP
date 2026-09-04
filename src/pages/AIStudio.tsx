@@ -5,10 +5,12 @@ import {
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { getByTenant, create, logAudit } from '../services/db';
+import { getByTenant, logAudit } from '../services/db';
+import { createCampaign } from '../services/campaignWrites';
 import { formatCurrency, currencySymbol, localeFor } from '../utils/format';
 import type { Lead, Project, Campaign } from '../types';
 import toast from 'react-hot-toast';
+import { BRAND } from '../config/brand';
 
 interface Message {
   id: string;
@@ -44,7 +46,8 @@ export default function AIStudio() {
   const projects = useMemo(() => getByTenant<Project>('projects', tenantId), [tenantId]);
 
   const currency = tenant?.currency || 'INR';
-  const brandName = tenant?.name || 'Friendly ERP';
+  // The workspace's own name, falling back to the product's when unset.
+  const brandName = tenant?.name || BRAND.name;
   const brandVoice = tenant?.brandVoice || 'Professional and trustworthy.';
   const channels = tenant?.channels || ['WhatsApp', 'Email'];
   const activeLeads = leads.filter(l => l.stage !== 'lost' && l.stage !== 'booked').length;
@@ -136,14 +139,23 @@ export default function AIStudio() {
     toast.success('Copied to clipboard');
   };
 
-  const handleSaveCampaign = (content: string) => {
+  const handleSaveCampaign = async (content: string) => {
     if (!tenant) return;
-    const created = create<Campaign>('campaigns', {
-      id: '', tenantId, name: `AI Draft ${new Date().toLocaleTimeString(appLocale, { hour: '2-digit', minute: '2-digit' })}`,
-      type: 'AI Generated', status: 'draft',
-      audience: 'To be selected', channel: channels[0] || 'WhatsApp',
-      content, createdAt: new Date().toISOString(),
-    });
+    // Through campaignWrites: saving a draft wrote to localStorage in both
+    // modes, so against the API the draft vanished at the next campaigns
+    // refetch — after the toast had already said it was saved.
+    let created: Campaign;
+    try {
+      created = await createCampaign({
+        tenantId, name: `AI Draft ${new Date().toLocaleTimeString(appLocale, { hour: '2-digit', minute: '2-digit' })}`,
+        type: 'AI Generated', status: 'draft',
+        audience: 'To be selected', channel: channels[0] || 'WhatsApp',
+        content, createdAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not save that draft');
+      return;
+    }
     if (user) logAudit({ tenantId, userId: user.id, userName: user.name, action: 'create', entity: 'campaign', entityId: created.id, details: 'Saved AI-generated draft as campaign' });
     toast.custom(() => (
       <div className="bg-zinc-900 text-white rounded-xl px-4 py-3 shadow-lg flex items-center gap-3 text-sm">

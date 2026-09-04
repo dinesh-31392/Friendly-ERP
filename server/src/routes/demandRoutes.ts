@@ -2,6 +2,8 @@ import type { FastifyInstance } from 'fastify';
 import { withTenantContext } from '../db.js';
 import { requireAuth } from '../auth.js';
 import { emit } from '../notify.js';
+import { renderLetter, pdfMoney, pdfDate } from '../pdf.js';
+import { contentDisposition, NOSNIFF } from '../storage.js';
 
 /**
  * Demand letters (migration 041) — the collections desk.
@@ -277,5 +279,107 @@ export async function demandRoutes(app: FastifyInstance): Promise<void> {
         reply.code(200);
         return { demandLetter: toApi(rows[0]) };
       }),
+  );
+/**
+   * GET /api/demand-letters/:id/pdf — the artefact the buyer actually receives.
+   *
+   * The letter existed as a row and a table cell; this is the first time the
+   * product can produce the document it computed. Rendered on demand rather
+   * than stored at issue, because a stored PDF and a live row drift the moment
+   * anything is corrected, and the row is the record.
+   *
+   * view_finance, not manage_finance: reading a letter that was already sent is
+   * not the same act as raising one.
+   */
+  app.get<{ Params: { id: string } }>(
+    '/api/demand-letters/:id/pdf',
+    {
+      preHandler: requireAuth,
+      schema: { params: { type: 'object', required: ['id'], properties: { id: { type: 'string', pattern: UUID } } } },
+    },
+    async (req, reply) => {
+      const data = await withTenantContext(req.ctx, async (db) => {
+        if (!await gate(db, 'view_finance')) return { forbidden: true } as const;
+        const { rows } = await db.query(`
+          SELECT d.*, s.milestone_name,
+                 l.name AS customer_name, l.email AS customer_email, l.phone AS customer_phone,
+                 p.name AS project_name,
+                 u.unit_code,
+                 t.name AS tenant_name, t.company AS tenant_company, t.address AS tenant_address,
+                 t.email AS tenant_email, t.phone AS tenant_phone, t.currency AS tenant_currency
+            FROM demand_letters d
+            JOIN payment_schedules s ON s.id = d.payment_schedule_id
+            JOIN bookings b          ON b.id = d.booking_id
+            JOIN tenants t           ON t.id = d.tenant_id
+            LEFT JOIN leads l        ON l.id = b.lead_id
+            LEFT JOIN units u        ON u.id = b.unit_id
+            LEFT JOIN projects p     ON p.id = u.project_id
+           WHERE d.id = $1`, [req.params.id]);
+        return rows[0] ?? null;
+      });
+
+      if (data && 'forbidden' in data) return reply.code(403).send({ error: 'Missing permission: view_finance' });
+      if (!data) return reply.code(404).send({ error: 'Demand letter not found' });
+
+      const ccy = (data.tenant_currency as string) || 'INR';
+      // Indian grouping for INR (12,34,567), Western elsewhere. On a number
+      // someone is being asked to pay, the wrong grouping reads as a typo.
+      const locale = ccy === 'INR' ? 'en-IN' : 'en-US';
+      const money = (n: unknown) => pdfMoney(Number(n ?? 0), ccy, locale);
+      const date = (v: unknown) => pdfDate(v as string, locale);
+
+      const unit = [data.project_name, data.unit_code].filter(Boolean).join(' — ');
+      const interest = Number(data.interest_amount ?? 0);
+
+      const rows: { label: string; value: string; strong?: boolean }[] = [
+        { label: `Milestone: ${data.milestone_name ?? 'Instalment'}`, value: money(data.principal_amount) },
+      ];
+      // Only shown when it applies. A line reading "Interest INR 0.00" invites
+      // a phone call about a charge that was never made.
+      if (interest > 0) {
+        rows.push({
+          label: `Delay interest @ ${Number(data.interest_pct ?? 0)}% p.a. for ${data.days_overdue} day(s)`,
+          value: money(interest),
+        });
+      }
+      rows.push({ label: 'Total amount payable', value: money(data.total_amount), strong: true });
+
+      const pdf = await renderLetter({
+        from: {
+          name: (data.tenant_company as string) || (data.tenant_name as string) || 'Builder',
+          address: (data.tenant_address as string) || undefined,
+          email: (data.tenant_email as string) || undefined,
+          phone: (data.tenant_phone as string) || undefined,
+        },
+        title: 'Demand Letter',
+        reference: `Letter No. ${data.letter_no}  ·  Issued ${date(data.issued_on)}`,
+        to: {
+          name: (data.customer_name as string) || 'Allottee',
+          lines: [unit, (data.customer_email as string) || '', (data.customer_phone as string) || ''].filter(Boolean) as string[],
+        },
+        intro: [
+          `With reference to your booking${unit ? ` for ${unit}` : ''}, this is to inform you that the payment milestone noted below has fallen due under the agreed payment plan.`,
+          'You are requested to remit the amount shown against this milestone on or before the due date stated below.',
+        ],
+        rows,
+        outro: [
+          `Due date for payment: ${date(data.due_on)}.`,
+          interest > 0
+            ? `Delay interest at ${Number(data.interest_pct ?? 0)}% per annum has been computed to the date of this letter and will continue to accrue until payment is received in full.`
+            : `Delay interest at ${Number(data.interest_pct ?? 0)}% per annum will be applicable on any amount remaining unpaid after the due date.`,
+          'Please quote the letter number above with your remittance so that it can be applied to the correct milestone. If payment has already been made, kindly share the transaction reference and treat this letter as closed.',
+        ],
+        footer: "This is a computer-generated demand letter issued from the builder's records. "
+              + 'Figures are as at the date of issue shown above.',
+      });
+
+      reply
+        .header('Content-Type', 'application/pdf')
+        .header('Content-Length', String(pdf.length))
+        .header('Content-Disposition', contentDisposition(`Demand-Letter-${data.letter_no}.pdf`, true))
+        .headers(NOSNIFF)
+        .header('Cache-Control', 'private, no-store');
+      return reply.send(pdf);
+    },
   );
 }

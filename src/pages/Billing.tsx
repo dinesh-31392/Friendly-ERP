@@ -1,11 +1,22 @@
 import { useState, useMemo, useEffect } from 'react';
 import {
   IndianRupee, Download, Filter, Search, CheckCircle, Clock, AlertTriangle,
-  Plus, X, Trash2, Receipt, Landmark, PiggyBank, ArrowUpRight, ShieldCheck,
+  Plus, X, Trash2, Receipt, Landmark, PiggyBank, ArrowUpRight, ShieldCheck, Send, Bell, Scale,
+  FileText, Loader2, Undo2,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { getByTenant, logAudit } from '../services/db';
-import { isApiEnabled, apiGetInvoices, apiCreateInvoice, apiUpdateInvoice, apiDeleteInvoice } from '../services/apiClient';
+import {
+  isApiEnabled, apiGetInvoices, apiCreateInvoice, apiUpdateInvoice, apiDeleteInvoice,
+  apiGetDemandLetters, apiGetDemandsDue, apiIssueDemandLetter, apiSettleDemandLetter, apiRemindDemandLetter,
+  apiDemandLetterPdf,
+  apiGetCancellations, apiSetCancellationStatus, apiCancellationPdf, type ApiCancellation,
+  apiGetReraPosition, apiAllocateEscrow,
+  type ApiDemandLetter, type ApiDemandDue, type ApiReraPosition,
+} from '../services/apiClient';
+import GstReturnsPanel from '../components/GstReturnsPanel';
+import ReceiptsPanel from '../components/ReceiptsPanel';
+import EinvoicePanel from '../components/EinvoicePanel';
 import { isBillOverdue, projectActuals, formatPoNumber } from '../services/procurementService';
 import { isFilingOverdue, markFiled, nextDueDate } from '../services/complianceService';
 import { needsApproval } from '../services/approvalService';
@@ -32,7 +43,7 @@ const billStatusColors: Record<VendorBillStatus, string> = {
 
 const invoiceTypes = ['Booking Token', '1st Installment', '2nd Installment', '3rd Installment', 'Final Payment', 'Quotation', 'Refund'];
 
-type Tab = 'receivables' | 'payables' | 'budgets' | 'compliance';
+type Tab = 'receivables' | 'receipts' | 'payables' | 'budgets' | 'compliance' | 'demands' | 'rera' | 'refunds' | 'gst' | 'einvoice';
 
 export default function Billing() {
   const { user, tenant, hasPermission } = useAuth();
@@ -45,12 +56,21 @@ export default function Billing() {
   // API mode: hydrate the server ledger into the read-cache on mount, then
   // refresh so the ledger-derived figures (statutory liability, postings) reflect
   // server-authoritative data on a direct reload. No-op in demo mode.
+  //
+  // Only for roles that may read the ledger. Billing is behind view_finance and
+  // the ledger is behind view_accounts — a sales_manager holds the first and not
+  // the second, so asking for the chart of accounts on their behalf is a
+  // guaranteed 403. It used to be swallowed by the .catch(), which also skipped
+  // the refresh() in the .then() — the page opened, quietly missing a beat.
+  // Not requesting it at all is both correct and one round-trip cheaper.
+  const canReadLedger = hasPermission('view_accounts');
   useEffect(() => {
     if (!isApiEnabled() || !tenantId) return;
+    if (!canReadLedger) { refresh(); return; }
     let cancelled = false;
     hydrateLedger(tenantId).then(() => { if (!cancelled) refresh(); }).catch(() => {});
     return () => { cancelled = true; };
-  }, [tenantId]);
+  }, [tenantId, canReadLedger]);
 
   const [tab, setTab] = useState<Tab>('receivables');
   const [search, setSearch] = useState('');
@@ -69,13 +89,13 @@ export default function Billing() {
   useEffect(() => {
     if (!isApiEnabled()) { setApiData(null); return; }
     let cancelled = false;
-    billingWrites.fetchBillingData(tenantId)
+    billingWrites.fetchBillingData(tenantId, { compliance: canReadLedger })
       .then(d => { if (!cancelled) setApiData(d); })
       .catch(() => {
         if (!cancelled) { setApiData(null); toast.error('API unreachable — showing local data', { id: 'api-fallback' }); }
       });
     return () => { cancelled = true; };
-  }, [tenantId, refreshKey]);
+  }, [tenantId, refreshKey, canReadLedger]);
 
   // Server-side; the route already returns newest-first.
   const [invoices, setInvoices] = useState<Invoice[]>([]);
@@ -86,6 +106,56 @@ export default function Billing() {
       .catch(err => toast.error(err instanceof Error ? err.message : 'Could not load invoices'));
     return () => { cancelled = true; };
   }, [tenantId, refreshKey]);
+  /**
+   * Demand letters and the RERA position.
+   *
+   * Both have been live and under test on the server (27 and 24 assertions)
+   * with no page at all — no route, no nav entry, no client function. They sit
+   * here rather than on pages of their own because both are finance concerns
+   * and this is where an accountant already works; a nav item each would have
+   * been two more places to look for the same job.
+   *
+   * Fetched independently, and each degrades to empty on refusal. Reads need
+   * view_finance (which this page already requires) and writes manage_finance,
+   * so a role that can open Billing can always at least read these.
+   */
+  const [demands, setDemands] = useState<ApiDemandLetter[]>([]);
+  const [pdfBusy, setPdfBusy] = useState<string | null>(null);
+
+  /**
+   * Open a demand letter as the document it becomes once it leaves here.
+   *
+   * A new tab rather than a download: collections reads the letter before
+   * sending it, and a file that lands in Downloads unread is a file that gets
+   * sent unread. The object URL is revoked on a timer — revoking immediately
+   * closes the tab that was just opened.
+   */
+  const openLetterPdf = async (id: string) => {
+    setPdfBusy(id);
+    try {
+      const { url } = await apiDemandLetterPdf(id);
+      window.open(url, '_blank', 'noopener,noreferrer');
+      window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Could not generate the letter');
+    } finally {
+      setPdfBusy(null);
+    }
+  };
+  const [demandsDue, setDemandsDue] = useState<ApiDemandDue[]>([]);
+  const [reraPosition, setReraPosition] = useState<ApiReraPosition[]>([]);
+  const [refunds, setRefunds] = useState<ApiCancellation[]>([]);
+  useEffect(() => {
+    if (!isApiEnabled()) return;
+    let cancelled = false;
+    const set = <T,>(fn: (v: T[]) => void) => (rows: T[]) => { if (!cancelled) fn(rows); };
+    apiGetDemandLetters().then(set(setDemands)).catch(() => {});
+    apiGetDemandsDue().then(set(setDemandsDue)).catch(() => {});
+    apiGetReraPosition().then(set(setReraPosition)).catch(() => {});
+    apiGetCancellations().then(set(setRefunds)).catch(() => {});
+    return () => { cancelled = true; };
+  }, [tenantId, refreshKey]);
+
   const leads = useMemo(() => getByTenant<Lead>('leads', tenantId), [tenantId, refreshKey]);
   const vendors = useMemo(() => getByTenant<Vendor>('vendors', tenantId), [tenantId, refreshKey]);
   const bills = useMemo(
@@ -469,11 +539,28 @@ export default function Billing() {
   const inputCls = 'w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20';
   const labelCls = 'block text-xs font-semibold text-zinc-500 uppercase mb-1';
 
+  // Compliance is served by complianceRoutes, which gates on view_accounts —
+  // the same key as the ledger, not the view_finance key that opens this page.
+  // Without it the tab can only ever render "No filings tracked yet", which
+  // reads as "your company has none" rather than "this is not yours to see",
+  // and its Add button would 403. Offering it at all is the misleading part.
   const TAB_DEFS: { id: Tab; label: string; icon: React.ElementType }[] = [
     { id: 'receivables', label: 'Receivables', icon: Receipt },
     { id: 'payables', label: 'Payables', icon: Landmark },
     { id: 'budgets', label: 'Budget vs Actual', icon: PiggyBank },
-    { id: 'compliance', label: 'Compliance', icon: ShieldCheck },
+    ...(canReadLedger ? [{ id: 'compliance' as Tab, label: 'Compliance', icon: ShieldCheck }] : []),
+    // Both read on view_finance, which this page already requires — so unlike
+    // Compliance they need no extra gate here.
+    { id: 'demands' as Tab, label: 'Demands', icon: Send },
+    { id: 'rera' as Tab, label: 'RERA & Escrow', icon: Scale },
+    // Approving and paying a refund is a finance act; RAISING the cancellation
+    // is a sales one and lives on the booking. Deliberately different hands.
+    { id: 'refunds' as Tab, label: 'Refunds', icon: Undo2 },
+    // Return preparation sits beside Compliance rather than inside it: one
+    // tracks deadlines, the other produces the thing you file.
+    { id: 'receipts' as Tab, label: 'Receipts', icon: FileText },
+    { id: 'gst' as Tab, label: 'GST Returns', icon: FileText },
+    { id: 'einvoice' as Tab, label: 'E-Invoicing', icon: FileText },
   ];
   const filingsDue = filings.filter(f => f.status === 'pending' && new Date(f.dueDate).getTime() <= Date.now() + 14 * 86400000).length;
 
@@ -865,6 +952,311 @@ export default function Billing() {
                   </div>
                 );
               })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Demands ──
+          Dunning. The top half is what COULD be demanded, with the figure the
+          demand would be worth today, so the decision is made with the number
+          visible rather than after the letter exists. The bottom half is what
+          has been issued. Amounts are frozen by the server at issue — nothing
+          here recomputes them, because a letter quoting a different figure to
+          the one the customer received is worse than no letter. */}
+      {tab === 'demands' && (
+        <div className="space-y-4">
+          <div className="bg-white rounded-2xl border border-zinc-200/60 overflow-hidden">
+            <div className="px-5 py-4 border-b border-zinc-100">
+              <h3 className="font-semibold text-zinc-900">Overdue — not yet demanded</h3>
+              <p className="text-xs text-zinc-500 mt-0.5">
+                Milestones past their due date with money still owing and no live letter against them.
+              </p>
+            </div>
+            {demandsDue.length === 0 ? (
+              <div className="py-12 text-center">
+                <CheckCircle className="h-10 w-10 text-emerald-200 mx-auto mb-2" />
+                <p className="text-sm text-zinc-400">Nothing overdue. Every milestone is either paid or not yet due.</p>
+              </div>
+            ) : (
+              <div className="divide-y divide-zinc-50">
+                {demandsDue.map(d => (
+                  <div key={d.paymentScheduleId} className="flex items-center gap-3 px-5 py-3 flex-wrap">
+                    <div className="flex-1 min-w-[200px]">
+                      <p className="text-sm font-medium text-zinc-900">{d.customerName ?? 'Customer'} · {d.milestoneName}</p>
+                      <p className="text-[11px] text-red-500">
+                        {d.daysOverdue} day{d.daysOverdue === 1 ? '' : 's'} overdue · interest at {d.interestPct}% p.a.
+                      </p>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-sm font-semibold text-zinc-900">{formatCurrency(d.total, currency)}</p>
+                      <p className="text-[11px] text-zinc-400">
+                        {formatCurrency(d.outstanding, currency)} + {formatCurrency(d.interest, currency)} interest
+                      </p>
+                    </div>
+                    {canManage && (
+                      <button
+                        onClick={async () => {
+                          try {
+                            const letter = await apiIssueDemandLetter(d.paymentScheduleId);
+                            toast.success(`Demand ${letter.letterNo} raised`);
+                            refresh();
+                          } catch (e) {
+                            toast.error(e instanceof Error ? e.message : 'Could not raise the demand');
+                          }
+                        }}
+                        className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 text-white rounded-lg text-xs font-semibold hover:bg-indigo-700"
+                      ><Send className="h-3.5 w-3.5" /> Raise demand</button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="bg-white rounded-2xl border border-zinc-200/60 overflow-hidden">
+            <div className="px-5 py-4 border-b border-zinc-100">
+              <h3 className="font-semibold text-zinc-900">Letters issued</h3>
+            </div>
+            {demands.length === 0 ? (
+              <div className="py-12 text-center text-sm text-zinc-400">No demand letters raised yet.</div>
+            ) : (
+              <div className="divide-y divide-zinc-50">
+                {demands.map(l => (
+                  <div key={l.id} className="flex items-center gap-3 px-5 py-3 flex-wrap">
+                    <div className="flex-1 min-w-[200px]">
+                      <p className="text-sm font-medium text-zinc-900">
+                        {l.letterNo} · {l.customerName ?? 'Customer'}
+                        <span className={`ml-2 text-[10px] font-semibold px-2 py-0.5 rounded-full capitalize ${
+                          l.status === 'paid' ? 'bg-emerald-50 text-emerald-700'
+                          : l.status === 'cancelled' ? 'bg-zinc-100 text-zinc-500'
+                          : 'bg-amber-50 text-amber-700'}`}>{l.status}</span>
+                      </p>
+                      <p className="text-[11px] text-zinc-400">
+                        {l.milestoneName} · due {String(l.dueOn).slice(0, 10)}
+                        {l.reminderCount > 0 ? ` · ${l.reminderCount} reminder${l.reminderCount === 1 ? '' : 's'}` : ''}
+                      </p>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-sm font-semibold text-zinc-900">{formatCurrency(l.totalAmount, currency)}</p>
+                      <p className="text-[11px] text-zinc-400">incl. {formatCurrency(l.interestAmount, currency)} interest</p>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      {/* Outside the manage/issued gate on purpose: a settled
+                          letter still has to be produced for a dispute, and
+                          reading one is not the same act as raising it. */}
+                      <button
+                        onClick={() => openLetterPdf(l.id)}
+                        disabled={pdfBusy === l.id}
+                        className="flex items-center gap-1 px-2.5 py-1.5 border border-zinc-200 rounded-lg text-[11px] font-semibold text-zinc-600 hover:bg-zinc-50 disabled:opacity-50"
+                        title="Open the letter as a PDF"
+                      >
+                        {pdfBusy === l.id
+                          ? <Loader2 className="h-3 w-3 animate-spin" />
+                          : <FileText className="h-3 w-3" />} PDF
+                      </button>
+                    </div>
+                    {canManage && l.status === 'issued' && (
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          onClick={async () => {
+                            try { await apiRemindDemandLetter(l.id); toast.success('Reminder recorded'); refresh(); }
+                            catch (e) { toast.error(e instanceof Error ? e.message : 'Could not send the reminder'); }
+                          }}
+                          className="flex items-center gap-1 px-2.5 py-1.5 border border-zinc-200 rounded-lg text-[11px] font-semibold text-zinc-600 hover:bg-zinc-50"
+                        ><Bell className="h-3 w-3" /> Remind</button>
+                        <button
+                          onClick={async () => {
+                            try { await apiSettleDemandLetter(l.id, 'paid'); toast.success('Marked paid'); refresh(); }
+                            catch (e) { toast.error(e instanceof Error ? e.message : 'Could not settle'); }
+                          }}
+                          className="px-2.5 py-1.5 bg-emerald-600 text-white rounded-lg text-[11px] font-semibold hover:bg-emerald-700"
+                        >Mark paid</button>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ── RERA & Escrow ──
+          The number an auditor asks for. This MEASURES the seventy per cent
+          obligation; it does not sweep cash and posts no journals. `In account`
+          is the honest half and the fragile one — it is only as good as the
+          bank transactions entered, so a project whose designated account has
+          never been reconciled shows its whole obligation as a shortfall,
+          which is the correct thing to show. */}
+      {tab === 'receipts' && <ReceiptsPanel currency={currency} />}
+      {tab === 'gst' && <GstReturnsPanel currency={currency} />}
+      {tab === 'einvoice' && <EinvoicePanel currency={currency} />}
+
+      {tab === 'refunds' && (
+        <div className="bg-white rounded-2xl border border-zinc-200/60 overflow-hidden">
+          <div className="px-5 py-4 border-b border-zinc-100">
+            <h3 className="font-semibold text-zinc-900">Cancellations &amp; refunds</h3>
+            <p className="text-xs text-zinc-500 mt-0.5">
+              Raised on the booking by sales; approved and paid here. A negative figure means the
+              forfeiture exceeded what the buyer had paid — the balance is owed TO the developer.
+            </p>
+          </div>
+          {refunds.length === 0 ? (
+            <div className="py-14 text-center">
+              <Undo2 className="h-10 w-10 text-zinc-200 mx-auto mb-2" />
+              <p className="text-sm font-medium text-zinc-600">No cancellations</p>
+              <p className="text-xs text-zinc-400 mt-0.5">Cancel a booking to raise one.</p>
+            </div>
+          ) : (
+            <div className="divide-y divide-zinc-50">
+              {refunds.map(c => (
+                <div key={c.id} className="px-5 py-3 flex items-center gap-4 flex-wrap">
+                  <div className="flex-1 min-w-[180px]">
+                    <p className="text-sm font-medium text-zinc-900">{c.customerName ?? 'Purchaser'}</p>
+                    <p className="text-[11px] text-zinc-400">
+                      {[c.projectName, c.unitCode].filter(Boolean).join(' — ') || '—'}
+                      {' · '}forfeited {c.forfeiturePct}% of {formatCurrency(c.consideration, currency)}
+                      {!c.gstRefundable && c.gstRemitted > 0 && ` · GST ${formatCurrency(c.gstRemitted, currency)} withheld`}
+                    </p>
+                  </div>
+                  <div className="text-right">
+                    {/* The sign is the point. A refund and a shortfall must not
+                        look the same on a screen someone approves from. */}
+                    <p className={`text-sm font-semibold ${c.buyerOwes ? 'text-red-600' : 'text-zinc-900'}`}>
+                      {formatCurrency(Math.abs(c.refundAmount), currency)}
+                    </p>
+                    <p className="text-[11px] text-zinc-400">
+                      {c.buyerOwes ? 'owed BY the buyer' : 'refundable'} · received {formatCurrency(c.totalReceived, currency)}
+                    </p>
+                  </div>
+                  <span className={`text-[11px] font-semibold px-2.5 py-1 rounded-full capitalize ${
+                    c.status === 'refunded' ? 'bg-emerald-50 text-emerald-700'
+                    : c.status === 'approved' ? 'bg-blue-50 text-blue-700'
+                    : c.status === 'rejected' ? 'bg-red-50 text-red-600'
+                    : 'bg-amber-50 text-amber-700'}`}>{c.status}</span>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      onClick={async () => {
+                        setPdfBusy(c.id);
+                        try {
+                          const { url } = await apiCancellationPdf(c.id);
+                          window.open(url, '_blank', 'noopener,noreferrer');
+                          window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+                        } catch (e) { toast.error(e instanceof Error ? e.message : 'Could not render the statement'); }
+                        finally { setPdfBusy(null); }
+                      }}
+                      disabled={pdfBusy === c.id}
+                      className="flex items-center gap-1 px-2.5 py-1.5 border border-zinc-200 rounded-lg text-[11px] font-semibold text-zinc-600 hover:bg-zinc-50 disabled:opacity-50"
+                    >
+                      {pdfBusy === c.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <FileText className="h-3 w-3" />} Statement
+                    </button>
+                    {canManage && c.status === 'requested' && (
+                      <>
+                        <button
+                          onClick={async () => {
+                            try { await apiSetCancellationStatus(c.id, 'approved'); toast.success('Approved'); refresh(); }
+                            catch (e) { toast.error(e instanceof Error ? e.message : 'Could not approve'); }
+                          }}
+                          className="px-2.5 py-1.5 bg-indigo-600 text-white rounded-lg text-[11px] font-semibold hover:bg-indigo-700"
+                        >Approve</button>
+                        <button
+                          onClick={async () => {
+                            try { await apiSetCancellationStatus(c.id, 'rejected'); toast.success('Rejected'); refresh(); }
+                            catch (e) { toast.error(e instanceof Error ? e.message : 'Could not reject'); }
+                          }}
+                          className="px-2.5 py-1.5 border border-zinc-200 rounded-lg text-[11px] font-semibold text-zinc-600 hover:bg-zinc-50"
+                        >Reject</button>
+                      </>
+                    )}
+                    {canManage && c.status === 'approved' && (
+                      <button
+                        onClick={async () => {
+                          // The reference is what makes the payout traceable in
+                          // a bank statement; the server refuses a payout without one.
+                          const ref = prompt('Payment reference (UTR, cheque number, or transaction id):')?.trim();
+                          if (!ref) return;
+                          try { await apiSetCancellationStatus(c.id, 'refunded', ref); toast.success('Refund recorded'); refresh(); }
+                          catch (e) { toast.error(e instanceof Error ? e.message : 'Could not record the refund'); }
+                        }}
+                        className="px-2.5 py-1.5 bg-emerald-600 text-white rounded-lg text-[11px] font-semibold hover:bg-emerald-700"
+                      >Record payout</button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {tab === 'rera' && (
+        <div className="bg-white rounded-2xl border border-zinc-200/60 overflow-hidden">
+          <div className="px-5 py-4 border-b border-zinc-100 flex items-center justify-between gap-3 flex-wrap">
+            <div>
+              <h3 className="font-semibold text-zinc-900">Designated-account position</h3>
+              <p className="text-xs text-zinc-500 mt-0.5">
+                Seventy per cent of everything realised from allottees must sit in the designated account.
+              </p>
+            </div>
+            {canManage && (
+              <button
+                onClick={async () => {
+                  try {
+                    const n = await apiAllocateEscrow();
+                    toast.success(n ? `${n} receipt${n === 1 ? '' : 's'} allocated` : 'Already up to date');
+                    refresh();
+                  } catch (e) {
+                    toast.error(e instanceof Error ? e.message : 'Could not allocate');
+                  }
+                }}
+                title="Idempotent — running it twice cannot double the obligation"
+                className="px-3 py-2 bg-indigo-600 text-white rounded-xl text-xs font-semibold hover:bg-indigo-700"
+              >Allocate receipts</button>
+            )}
+          </div>
+          {reraPosition.length === 0 ? (
+            <div className="py-14 text-center">
+              <Scale className="h-10 w-10 text-zinc-300 mx-auto mb-2" />
+              <p className="text-sm text-zinc-500">No project is registered under RERA yet.</p>
+              <p className="text-[11px] text-zinc-400 mt-1">Register one to start tracking its designated account.</p>
+            </div>
+          ) : (
+            <div className="divide-y divide-zinc-50">
+              {reraPosition.map(p => (
+                <div key={p.projectId} className="px-5 py-4">
+                  <div className="flex items-center gap-3 flex-wrap mb-2">
+                    <p className="text-sm font-semibold text-zinc-900 flex-1 min-w-[180px]">
+                      {p.projectName}
+                      {p.registrationNo && <span className="ml-2 text-[11px] font-normal text-zinc-400">{p.registrationNo}</span>}
+                    </p>
+                    <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700">
+                      {p.escrowPct}% ring-fenced
+                    </span>
+                    {/* Without a designated account there is nothing to compare
+                        the obligation against, so say so rather than reporting
+                        the whole amount as missing. */}
+                    {!p.hasDesignatedAccount && (
+                      <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-amber-50 text-amber-700">
+                        no designated account linked
+                      </span>
+                    )}
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                    {[
+                      ['Collected', p.collected, 'text-zinc-900'],
+                      ['Required in account', p.required, 'text-zinc-900'],
+                      ['In account', p.inAccount, 'text-zinc-900'],
+                      ['Shortfall', p.shortfall, p.shortfall > 0 ? 'text-red-600' : 'text-emerald-600'],
+                    ].map(([label, value, tone]) => (
+                      <div key={String(label)}>
+                        <p className="text-[10px] text-zinc-400 uppercase tracking-wider">{label}</p>
+                        <p className={`text-sm font-semibold mt-0.5 ${tone}`}>{formatCurrency(Number(value), currency)}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
             </div>
           )}
         </div>

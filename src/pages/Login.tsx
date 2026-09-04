@@ -1,11 +1,12 @@
-import { useState } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { Building2, Mail, Lock, User, Phone, ArrowRight, Eye, EyeOff, Shield, Globe, Home, KeyRound, CheckCircle2, X, Clock, AlertCircle, Hash } from 'lucide-react';
+import { Building2, Mail, Lock, User, Phone, ArrowRight, Eye, EyeOff, Shield, Globe, Home, KeyRound, CheckCircle2, X, Clock, AlertCircle, Hash, Check, ChevronDown } from 'lucide-react';
 import { COUNTRIES } from '../utils/format';
 import { getRecentAccounts, forgetRecentAccount, type RecentAccount } from '../services/authService';
 import InstallAppButton from '../components/InstallAppButton';
 import toast from 'react-hot-toast';
+import { BRAND } from '../config/brand';
 
 type LoginTab = 'platform' | 'builder' | 'portal';
 
@@ -29,41 +30,253 @@ interface RoleOption {
   label: string;
   realm: LoginTab;
   hint: string;
+  /**
+   * The modules this role actually opens, in the order their nav shows them.
+   *
+   * Hand-written rather than derived from the permission map, deliberately.
+   * This is marketing copy on a public page: it must stay readable and it must
+   * never become a live inventory of a workspace's modules to anyone who has
+   * not signed in yet. It is checked against the real grants by
+   * server/scripts/verify-role-logins.mjs, which signs in as each role and
+   * asserts what it reaches — so a claim made here that stops being true is a
+   * failing test rather than a page nobody re-read.
+   */
+  modules: string[];
 }
 
 const ROLE_GROUPS: { group: string; options: RoleOption[] }[] = [
   {
     group: 'Platform team',
     options: [
-      { id: 'super_admin', label: 'Super Admin', realm: 'platform', hint: 'Full control of every workspace on the platform.' },
-      { id: 'tech_team', label: 'Branch Team', realm: 'platform', hint: 'Onboard and support builders in your branch.' },
+      { id: 'super_admin', label: 'Super Admin', realm: 'platform', hint: 'Full control of every workspace on the platform.',
+        modules: ['Platform Control', 'Workspaces', 'Branches', 'Billing & Plans'] },
+      { id: 'tech_team', label: 'Branch Team', realm: 'platform', hint: 'Onboard and support builders in your branch.',
+        modules: ['Platform Control', 'Workspaces', 'Onboarding'] },
     ],
   },
   {
     group: 'Your workspace',
     options: [
-      { id: 'builder_admin', label: 'Builder Admin', realm: 'builder', hint: 'Own the whole workspace — sales, finance, sites and people.' },
-      { id: 'sales_manager', label: 'Sales Manager', realm: 'builder', hint: 'Run the pipeline, approve discounts, close bookings.' },
-      { id: 'sales_executive', label: 'Sales Executive', realm: 'builder', hint: 'Work your leads, book site visits, raise quotations.' },
-      { id: 'accountant', label: 'Accountant', realm: 'builder', hint: 'Post to the ledger, raise demands, reconcile collections.' },
-      { id: 'site_engineer', label: 'Site Engineer', realm: 'builder', hint: 'Log progress, raise RFIs, issue stock, sign off RA bills.' },
-      { id: 'hr_manager', label: 'HR Manager', realm: 'builder', hint: 'Employees, attendance, leave and payroll runs.' },
-      { id: 'telecaller', label: 'Telecaller', realm: 'builder', hint: 'Call your leads and book site visits.' },
-      { id: 'land_manager', label: 'Land Manager', realm: 'builder', hint: 'Land acquisition, feasibility and title documents.' },
-      { id: 'bd_manager', label: 'BD Manager', realm: 'builder', hint: 'Business development and qualifying land opportunities.' },
-      { id: 'auditor', label: 'Auditor', realm: 'builder', hint: 'Read every module. Change nothing.' },
+      { id: 'builder_admin', label: 'Builder Admin', realm: 'builder', hint: 'Own the whole workspace — sales, finance, sites and people.',
+        modules: ['Every module', 'Approvals', 'Users & Roles', 'Settings'] },
+      { id: 'sales_manager', label: 'Sales Manager', realm: 'builder', hint: 'Run the pipeline, approve discounts, close bookings.',
+        modules: ['Leads', 'Bookings', 'Inventory', 'Campaigns', 'Sales Performance'] },
+      { id: 'sales_executive', label: 'Sales Executive', realm: 'builder', hint: 'Work your leads, book site visits, raise quotations.',
+        modules: ['My Leads', 'Inventory', 'Bookings', 'Calendar', 'AI Studio'] },
+      { id: 'accountant', label: 'Accountant', realm: 'builder', hint: 'Post to the ledger, raise demands, reconcile collections.',
+        modules: ['Accounts & Ledger', 'Billing & Payments', 'Invoices', 'RERA & Escrow'] },
+      { id: 'site_engineer', label: 'Site Engineer', realm: 'builder', hint: 'Log progress, raise RFIs, issue stock, sign off RA bills.',
+        modules: ['Site Execution', 'Procurement', 'Projects', 'Attendance'] },
+      { id: 'hr_manager', label: 'HR Manager', realm: 'builder', hint: 'Employees, attendance, leave and payroll runs.',
+        modules: ['HR & Workforce', 'Attendance', 'Leave', 'Payroll'] },
+      { id: 'telecaller', label: 'Telecaller', realm: 'builder', hint: 'Call your leads and book site visits.',
+        modules: ['My Leads', 'Calendar', 'WhatsApp'] },
+      { id: 'land_manager', label: 'Land Manager', realm: 'builder', hint: 'Land acquisition, feasibility and title documents.',
+        modules: ['Land Acquisition', 'Documents', 'Projects'] },
+      { id: 'bd_manager', label: 'BD Manager', realm: 'builder', hint: 'Business development and qualifying land opportunities.',
+        modules: ['Business Dev', 'Land Acquisition', 'Reports'] },
+      { id: 'auditor', label: 'Auditor', realm: 'builder', hint: 'Read every module. Change nothing.',
+        modules: ['Read-only everywhere', 'Audit Log', 'Reports'] },
     ],
   },
   {
     group: 'Customers & partners',
     options: [
-      { id: 'customer', label: 'Customer', realm: 'portal', hint: 'Track your booking, payments and documents.' },
-      { id: 'partner', label: 'Channel Partner', realm: 'portal', hint: 'Track your referrals and commission statements.' },
+      { id: 'customer', label: 'Customer', realm: 'portal', hint: 'Track your booking, payments and documents.',
+        modules: ['My Booking', 'Payment Schedule', 'Documents', 'Raise a Ticket'] },
+      { id: 'partner', label: 'Channel Partner', realm: 'portal', hint: 'Track your referrals and commission statements.',
+        modules: ['My Referrals', 'Commission Statement', 'Inventory'] },
     ],
   },
 ];
 
 const ALL_ROLE_OPTIONS = ROLE_GROUPS.flatMap(g => g.options);
+
+/** The realm's mark. Three destinations, three shapes, one glance. */
+const realmIcon = (realm: LoginTab) =>
+  realm === 'platform' ? Globe : realm === 'portal' ? Home : Building2;
+
+/** Named for the person signing in, not for the auth path they travel. */
+const realmLabel = (realm: LoginTab) =>
+  realm === 'platform' ? 'Platform team' : realm === 'portal' ? 'Customer & partner portal' : 'Builder workspace';
+
+/**
+ * The role picker.
+ *
+ * A listbox rather than a native <select>, because the native control cannot
+ * show the one thing that makes this useful: what each role opens. On Windows
+ * it also renders in OS chrome that ignores the rest of the page.
+ *
+ * The keyboard contract is the native one, and it is not optional — this is
+ * the first control on the sign-in page, so anybody who navigates by keyboard
+ * meets it before anything else. Up/Down move, Home/End jump, Enter or Space
+ * selects, Escape closes and returns focus to the trigger. Typing a letter
+ * jumps to the next role starting with it, the behaviour people carry over
+ * from the native control without being told it exists.
+ */
+function RolePicker({
+  value, groups, onChange,
+}: {
+  value: RoleOption;
+  groups: { group: string; options: RoleOption[] }[];
+  onChange: (id: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [active, setActive] = useState(value.id);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLUListElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  // Which input device moved the highlight last. Only the keyboard may scroll
+  // the list: hovering a half-visible row would otherwise scroll it out from
+  // under the pointer, so the click that follows lands on whatever slid into
+  // its place. That is not a subtle mis-selection — it silently picks the
+  // wrong role, and on this page the role decides which sign-in form you get.
+  const byKeyboard = useRef(false);
+  const flat = groups.flatMap(g => g.options);
+  const TriggerIcon = realmIcon(value.realm);
+
+  const close = useCallback((refocus = true) => {
+    setOpen(false);
+    if (refocus) triggerRef.current?.focus();
+  }, []);
+
+  // Closing on an outside press is what makes this feel like a menu rather
+  // than a panel that has to be dismissed deliberately.
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [open]);
+
+  const reveal = (id: string) =>
+    listRef.current
+      ?.querySelector<HTMLElement>(`[data-role-id="${id}"]`)
+      ?.scrollIntoView({ block: 'nearest' });
+
+  // On open, always show the current selection — with fourteen roles it is
+  // often below the fold, and a list that opens somewhere else looks like it
+  // has forgotten what you picked.
+  useEffect(() => { if (open) reveal(value.id); }, [open, value.id]);
+
+  // After that, only the keyboard scrolls. See byKeyboard.
+  useEffect(() => { if (open && byKeyboard.current) reveal(active); }, [open, active]);
+
+  const commit = (id: string) => { onChange(id); close(); };
+
+  const step = (delta: number) => {
+    const i = flat.findIndex(o => o.id === active);
+    const next = flat[Math.min(flat.length - 1, Math.max(0, (i < 0 ? 0 : i) + delta))];
+    if (next) setActive(next.id);
+  };
+
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    byKeyboard.current = true;
+    if (!open) {
+      if (['Enter', ' ', 'ArrowDown', 'ArrowUp'].includes(e.key)) {
+        e.preventDefault(); setActive(value.id); setOpen(true);
+      }
+      return;
+    }
+    switch (e.key) {
+      case 'Escape':    e.preventDefault(); close(); break;
+      case 'ArrowDown': e.preventDefault(); step(1); break;
+      case 'ArrowUp':   e.preventDefault(); step(-1); break;
+      case 'Home':      e.preventDefault(); setActive(flat[0].id); break;
+      case 'End':       e.preventDefault(); setActive(flat[flat.length - 1].id); break;
+      case 'Tab':       close(false); break;
+      case 'Enter':
+      case ' ':         e.preventDefault(); commit(active); break;
+      default:
+        if (e.key.length === 1 && /\S/.test(e.key)) {
+          const k = e.key.toLowerCase();
+          const from = flat.findIndex(o => o.id === active);
+          // Search past the current row first so repeated presses cycle.
+          const order = [...flat.slice(from + 1), ...flat.slice(0, from + 1)];
+          const hit = order.find(o => o.label.toLowerCase().startsWith(k));
+          if (hit) { e.preventDefault(); setActive(hit.id); }
+        }
+    }
+  };
+
+  return (
+    <div className="relative" ref={rootRef}>
+      <button
+        ref={triggerRef}
+        type="button"
+        id="role-picker"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-labelledby="role-picker-label role-picker"
+        onClick={() => { byKeyboard.current = false; setActive(value.id); setOpen(o => !o); }}
+        onKeyDown={onKeyDown}
+        className={`group w-full flex items-center gap-3 pl-3 pr-3 py-2.5 bg-white border rounded-xl text-left shadow-sm transition-all
+          ${open ? 'border-indigo-400 ring-2 ring-indigo-500/20' : 'border-zinc-200 hover:border-zinc-300'}`}
+      >
+        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-indigo-500 to-violet-600 shadow-sm">
+          <TriggerIcon className="h-4 w-4 text-white" />
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="block text-sm font-semibold text-zinc-900 truncate">{value.label}</span>
+          <span className="block text-[11px] text-zinc-500 truncate">{value.hint}</span>
+        </span>
+        <ChevronDown className={`h-4 w-4 shrink-0 text-zinc-400 transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+
+      {open && (
+        <ul
+          ref={listRef}
+          role="listbox"
+          aria-labelledby="role-picker-label"
+          aria-activedescendant={`role-opt-${active}`}
+          tabIndex={-1}
+          onKeyDown={onKeyDown}
+          // Absolute rather than a portal: the card has no overflow clip, and a
+          // portal would need its own focus trap for no gain here.
+          className="absolute z-30 mt-2 w-full max-h-[19rem] overflow-y-auto rounded-xl border border-zinc-200 bg-white p-1.5 shadow-xl shadow-zinc-900/10 animate-[fadeIn_120ms_ease-out]"
+        >
+          {groups.map(g => (
+            <li key={g.group} role="presentation">
+              <p className="px-2.5 pt-2 pb-1 text-[10px] font-bold uppercase tracking-wider text-zinc-400">{g.group}</p>
+              <ul role="presentation">
+                {g.options.map(o => {
+                  const Icon = realmIcon(o.realm);
+                  const isActive = o.id === active;
+                  const isChosen = o.id === value.id;
+                  return (
+                    <li
+                      key={o.id}
+                      id={`role-opt-${o.id}`}
+                      role="option"
+                      aria-selected={isChosen}
+                      data-role-id={o.id}
+                      // The mouse moves the highlight too, so pointer and
+                      // keyboard never disagree about which row is current —
+                      // but it does not scroll the list (see byKeyboard).
+                      onMouseEnter={() => { byKeyboard.current = false; setActive(o.id); }}
+                      onClick={() => commit(o.id)}
+                      className={`flex cursor-pointer items-start gap-2.5 rounded-lg px-2.5 py-2 transition-colors
+                        ${isActive ? 'bg-indigo-50' : ''}`}
+                    >
+                      <Icon className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${isActive ? 'text-indigo-600' : 'text-zinc-400'}`} />
+                      <span className="min-w-0 flex-1">
+                        <span className={`block text-sm font-semibold ${isActive ? 'text-indigo-900' : 'text-zinc-800'}`}>{o.label}</span>
+                        <span className="block text-[11px] leading-snug text-zinc-500">{o.hint}</span>
+                      </span>
+                      {isChosen && <Check className="mt-0.5 h-4 w-4 shrink-0 text-indigo-600" />}
+                    </li>
+                  );
+                })}
+              </ul>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
 
 export default function Login() {
   const { login, verifyLoginCode, register, resetPassword } = useAuth();
@@ -181,6 +394,7 @@ export default function Login() {
   };
 
   const selectedRole = ALL_ROLE_OPTIONS.find(r => r.id === roleId) ?? ALL_ROLE_OPTIONS[2];
+  const SelectedRoleIcon = realmIcon(selectedRole.realm);
 
   const pickRole = (id: string) => {
     const next = ALL_ROLE_OPTIONS.find(r => r.id === id);
@@ -272,7 +486,7 @@ export default function Login() {
               <Building2 className="h-6 w-6 text-white" />
             </div>
             <div>
-              <p className="text-lg font-bold text-white tracking-tight">Friendly ERP</p>
+              <p className="text-lg font-bold text-white tracking-tight">{BRAND.name}</p>
               <p className="text-sm text-indigo-200">Real Estate & Construction ERP</p>
             </div>
           </div>
@@ -289,19 +503,44 @@ export default function Login() {
               </p>
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
-              {[
-                { label: 'Lead Management', desc: 'Kanban boards & follow-ups' },
-                { label: 'Inventory Matrix', desc: 'Visual stacking plans' },
-                { label: 'AI Studio', desc: 'Brand-aware content gen' },
-                { label: 'Analytics', desc: 'Real-time dashboards' },
-              ].map(f => (
-                <div key={f.label} className="bg-white/10 backdrop-blur rounded-xl p-3">
-                  <p className="text-sm font-semibold text-white">{f.label}</p>
-                  <p className="text-xs text-indigo-200 mt-0.5">{f.desc}</p>
+            {/* Follows the picker. A generic feature grid was the same on
+                every visit; showing the chosen role's own modules answers the
+                question somebody actually has at a sign-in page — "is this the
+                right door for me?" — before they spend a password finding out. */}
+            {isRegistering ? (
+              <div className="grid grid-cols-2 gap-4">
+                {[
+                  { label: 'Lead Management', desc: 'Kanban boards & follow-ups' },
+                  { label: 'Inventory Matrix', desc: 'Visual stacking plans' },
+                  { label: 'AI Studio', desc: 'Brand-aware content gen' },
+                  { label: 'Analytics', desc: 'Real-time dashboards' },
+                ].map(f => (
+                  <div key={f.label} className="bg-white/10 backdrop-blur rounded-xl p-3">
+                    <p className="text-sm font-semibold text-white">{f.label}</p>
+                    <p className="text-xs text-indigo-200 mt-0.5">{f.desc}</p>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div key={selectedRole.id} className="rounded-2xl bg-white/10 backdrop-blur p-5 animate-[fadeIn_200ms_ease-out]">
+                <div className="flex items-center gap-2.5 mb-3">
+                  <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-white/20">
+                    <SelectedRoleIcon className="h-4 w-4 text-white" />
+                  </span>
+                  <div className="min-w-0">
+                    <p className="text-sm font-bold text-white truncate">{selectedRole.label}</p>
+                    <p className="text-[11px] text-indigo-200">{realmLabel(selectedRole.realm)}</p>
+                  </div>
                 </div>
-              ))}
-            </div>
+                <p className="text-xs text-indigo-100/90 leading-relaxed mb-4">{selectedRole.hint}</p>
+                <p className="text-[10px] font-bold uppercase tracking-wider text-indigo-300 mb-2">What you'll see</p>
+                <ul className="flex flex-wrap gap-1.5">
+                  {selectedRole.modules.map(m => (
+                    <li key={m} className="rounded-lg bg-white/10 px-2.5 py-1 text-[11px] font-medium text-white">{m}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </div>
         </div>
 
@@ -321,7 +560,7 @@ export default function Login() {
             <div className="h-10 w-10 rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center">
               <Building2 className="h-5 w-5 text-white" />
             </div>
-            <p className="text-lg font-bold text-zinc-900">Friendly ERP</p>
+            <p className="text-lg font-bold text-zinc-900">{BRAND.name}</p>
           </div>
 
           <div className="bg-white rounded-2xl border border-zinc-200/60 p-6 sm:p-8 shadow-sm">
@@ -382,41 +621,10 @@ export default function Login() {
                 which of them appear. */}
             {!isRegistering && (
               <div className="mb-6">
-                <label htmlFor="role-select" className="block text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-1.5">
+                <label id="role-picker-label" className="block text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-1.5">
                   I'm signing in as
                 </label>
-                <div className="relative">
-                  <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 flex h-6 w-6 items-center justify-center rounded-md bg-indigo-50">
-                    {selectedRole.realm === 'platform'
-                      ? <Globe className="h-3.5 w-3.5 text-indigo-600" />
-                      : selectedRole.realm === 'portal'
-                        ? <Home className="h-3.5 w-3.5 text-indigo-600" />
-                        : <Building2 className="h-3.5 w-3.5 text-indigo-600" />}
-                  </span>
-                  <select
-                    id="role-select"
-                    value={roleId}
-                    onChange={e => pickRole(e.target.value)}
-                    className="w-full appearance-none pl-12 pr-10 py-3 bg-white border border-zinc-200 rounded-xl text-sm font-semibold text-zinc-800 shadow-sm cursor-pointer focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-400 hover:border-zinc-300 transition-all"
-                  >
-                    {ROLE_GROUPS.map(g => (
-                      <optgroup key={g.group} label={g.group}>
-                        {g.options.map(o => (
-                          <option key={o.id} value={o.id}>{o.label}</option>
-                        ))}
-                      </optgroup>
-                    ))}
-                  </select>
-                  <svg
-                    aria-hidden="true"
-                    className="pointer-events-none absolute right-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-zinc-400"
-                    viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8"
-                    strokeLinecap="round" strokeLinejoin="round"
-                  >
-                    <path d="M6 8l4 4 4-4" />
-                  </svg>
-                </div>
-                <p className="text-[11px] text-zinc-400 mt-1.5 leading-relaxed">{selectedRole.hint}</p>
+                <RolePicker value={selectedRole} groups={ROLE_GROUPS} onChange={pickRole} />
               </div>
             )}
 
@@ -683,7 +891,7 @@ export default function Login() {
           </div>
 
           <p className="text-center text-xs text-zinc-400 mt-6">
-            By continuing, you agree to Friendly ERP's Terms of Service and Privacy Policy.
+            By continuing, you agree to {BRAND.name}&apos;s Terms of Service and Privacy Policy.
           </p>
         </div>
       </div>

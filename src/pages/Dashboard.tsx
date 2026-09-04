@@ -5,9 +5,12 @@ import {
   ArrowUpRight, ArrowDownRight, Clock, Phone, MessageCircle, Calendar,
   AlertTriangle, Eye, MoreHorizontal, HardHat, Flag, FileQuestion, Package,
   ShoppingCart, CalendarClock, Landmark, ClipboardCheck, CalendarDays, ShieldCheck, Map as MapIcon, Handshake,
+  UserCheck, Wallet, PhoneCall, CalendarCheck,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { getByTenant, update, logAudit } from '../services/db';
+import { getByTenant, logAudit } from '../services/db';
+import { patchLead } from '../services/leadWrites';
+import toast from 'react-hot-toast';
 import { apiGetLeads, apiGetUnits, apiGetProjects, apiGetTasks, apiGetLeadActivities } from '../services/apiClient';
 import { toActivity } from '../services/leadActivityWrites';
 import { useTenantUsers } from '../hooks/useTenantUsers';
@@ -15,7 +18,9 @@ import { getLeadStages } from '../services/metaService';
 import { isModuleEnabled } from '../services/planService';
 import { projectProgress, projectHealth, nextMilestone, HEALTH_META } from '../services/executionService';
 import { lowStockMaterials, machinesDueForService, isBillOverdue } from '../services/procurementService';
-import { pendingLeaves } from '../services/hrService';
+import { pendingLeaves, todayKey } from '../services/hrService';
+import { fetchHrData } from '../services/hrWrites';
+import { hydrateLandBd } from '../services/landBdWrites';
 import { filingsDueSoon, isFilingOverdue } from '../services/complianceService';
 import { loansDueSoon } from '../services/accountsService';
 import { formatCurrency } from '../utils/format';
@@ -23,12 +28,24 @@ import DateRangeFilter from '../components/DateRangeFilter';
 import { type DateRange, ALL_RANGE, resolveRange, inRange, rangeLabel } from '../utils/dateRange';
 import type { Lead, Task, Unit, Activity, User as UserType, Project, SiteTask, Rfi, Inspection, PurchaseOrder, VendorBill, Invoice, RaBill, Quotation, Booking, LandLead, BdLead } from '../types';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+import { BRAND } from '../config/brand';
 
 const iconMap: Record<string, React.ElementType> = {
   'users': Users, 'trending-up': TrendingUp, 'indian-rupee': IndianRupee,
   'building': Building2, 'check-circle': CheckCircle, 'bar-chart': BarChart3,
   'hard-hat': HardHat, 'alert': AlertTriangle,
+  'user-check': UserCheck, 'calendar-check': CalendarCheck, 'clock': Clock,
+  'wallet': Wallet, 'map': MapIcon, 'handshake': Handshake, 'phone-call': PhoneCall,
+  'clipboard-check': ClipboardCheck,
 };
+
+/** "2026-08" → "Aug 2026". Payroll months are stored as YYYY-MM. */
+function monthLabel(month: string | undefined): string {
+  if (!month) return '—';
+  const [y, m] = month.split('-').map(Number);
+  if (!y || !m) return month;
+  return new Date(y, m - 1, 1).toLocaleDateString('en-IN', { month: 'short', year: 'numeric' });
+}
 
 export default function Dashboard() {
   const { user, tenant, hasPermission } = useAuth();
@@ -50,12 +67,20 @@ export default function Dashboard() {
     const set = <T,>(fn: (v: T[]) => void) => (rows: T[]) => { if (!cancelled) fn(rows); };
     // Each settles on its own: one slow or forbidden endpoint must not blank
     // the whole dashboard, so every failure degrades to an empty section.
-    apiGetLeads().then(set(setAllLeads)).catch(() => {});
-    apiGetTasks().then(set(setAllTasks)).catch(() => {});
-    apiGetUnits().then(set(setUnits)).catch(() => {});
-    apiGetProjects().then(set(setProjects)).catch(() => {});
-    apiGetLeadActivities().then(rows => { if (!cancelled) setActivities(rows.map(toActivity)); }).catch(() => {});
+    //
+    // And each is asked for only by a role entitled to it. An HR manager, a
+    // land manager and an accountant hold none of view_leads / view_inventory,
+    // so three of these five were a guaranteed 403 on every dashboard load —
+    // caught and discarded, invisible except as red in the console.
+    if (hasPermission('view_leads')) {
+      apiGetLeads().then(set(setAllLeads)).catch(() => {});
+      apiGetLeadActivities().then(rows => { if (!cancelled) setActivities(rows.map(toActivity)); }).catch(() => {});
+    }
+    if (hasPermission('view_calendar')) apiGetTasks().then(set(setAllTasks)).catch(() => {});
+    if (hasPermission('view_inventory')) apiGetUnits().then(set(setUnits)).catch(() => {});
+    if (hasPermission('view_projects')) apiGetProjects().then(set(setProjects)).catch(() => {});
     return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tenantId, refreshKey]);
   const users = useTenantUsers(tenantId, refreshKey);
 
@@ -64,6 +89,42 @@ export default function Dashboard() {
   const showExecution = hasPermission('view_execution') && moduleOn('execution');
   const showProcurement = hasPermission('view_procurement') && moduleOn('procurement');
   const showFinance = hasPermission('view_finance') && moduleOn('billing');
+  const showHr = hasPermission('view_hr') && moduleOn('hr');
+  const showLand = hasPermission('view_land') && moduleOn('land');
+  const showBd = hasPermission('view_bd') && moduleOn('bd');
+
+  /**
+   * HR figures, from the server.
+   *
+   * The dashboard's HR section has always read the LOCAL store, which nothing
+   * populates in API mode — so the leave-approval alert was empty for every
+   * role on every real deployment, including the builder_admin it was written
+   * for. fetchHrData is the same call the HR page makes.
+   */
+  const [hrData, setHrData] = useState<Awaited<ReturnType<typeof fetchHrData>>>(null);
+  useEffect(() => {
+    if (!showHr || !tenantId) { setHrData(null); return; }
+    let cancelled = false;
+    fetchHrData(tenantId).then(d => { if (!cancelled) setHrData(d); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [tenantId, refreshKey, showHr]);
+
+  /**
+   * Land + BD are read through the local cache by the approval queues below,
+   * and only the Land and BD PAGES ever filled it. A BD manager who landed on
+   * the dashboard first saw no parcels awaiting qualification until they
+   * happened to open /land — the queue was empty, not quiet.
+   *
+   * hydrateLandBd settles each of its five fetches separately, so a role with
+   * land but not BD (or the reverse) still gets the half it may read.
+   */
+  const [landBdVersion, setLandBdVersion] = useState(0);
+  useEffect(() => {
+    if (!(showLand || showBd) || !tenantId) return;
+    let cancelled = false;
+    hydrateLandBd(tenantId).then(() => { if (!cancelled) setLandBdVersion(v => v + 1); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [tenantId, refreshKey, showLand, showBd]);
 
   const siteTasks = useMemo(
     () => showExecution ? getByTenant<SiteTask>('siteTasks', tenantId) : [],
@@ -108,11 +169,15 @@ export default function Dashboard() {
     () => showFinance ? getByTenant<VendorBill>('vendorBills', tenantId).filter(isBillOverdue) : [],
     [tenantId, refreshKey, showFinance]
   );
-  // Leave approvals go to whoever can decide them; filings to finance eyes
+  // Leave approvals go to whoever can decide them; filings to finance eyes.
+  // Server data when we have it, local store as the demo-mode path.
   const leaveQueue = useMemo(
-    () => hasPermission('manage_hr') && moduleOn('hr') ? pendingLeaves(tenantId) : [],
+    () => {
+      if (!(hasPermission('manage_hr') && moduleOn('hr'))) return [];
+      return hrData ? hrData.leaves.filter(l => l.status === 'pending') : pendingLeaves(tenantId);
+    },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [tenantId, refreshKey, tenant]
+    [tenantId, refreshKey, tenant, hrData]
   );
   const dueFilings = useMemo(
     () => showFinance ? filingsDueSoon(tenantId) : [],
@@ -157,20 +222,59 @@ export default function Dashboard() {
           (l.latestScore ?? 0) > 0 && !l.isEncumbered && l.litigationStatus !== 'pending')
       : [],
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [tenantId, refreshKey, tenant]
+    [tenantId, refreshKey, tenant, landBdVersion]
   );
   const landToConvert = useMemo(
     () => hasPermission('approve_land_convert') && moduleOn('land')
       ? getByTenant<LandLead>('landLeads', tenantId).filter(l => l.status === 'qualified') : [],
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [tenantId, refreshKey, tenant]
+    [tenantId, refreshKey, tenant, landBdVersion]
   );
   const bdToHandOff = useMemo(
     () => hasPermission('approve_bd_handoff') && moduleOn('bd')
       ? getByTenant<BdLead>('bdLeads', tenantId).filter(d => d.stage === 'terms_negotiation') : [],
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [tenantId, refreshKey, tenant]
+    [tenantId, refreshKey, tenant, landBdVersion]
   );
+
+  // ── The figures behind the role-specific tiles ────────────────────────────
+  const hrStats = useMemo(() => {
+    const headcount = (hrData?.employees ?? []).filter(e => e.active).length;
+    const today = todayKey();
+    // Distinct employees, not rows: a check-out written as a second record
+    // would otherwise count somebody twice and report more people present than
+    // the company employs.
+    const presentToday = new Set(
+      (hrData?.attendance ?? []).filter(a => a.date === today).map(a => a.employeeId)
+    ).size;
+    const pendingLeave = (hrData?.leaves ?? []).filter(l => l.status === 'pending').length;
+    const lastRun = (hrData?.payrollRuns ?? [])
+      .slice().sort((a, b) => b.month.localeCompare(a.month))[0];
+    return { headcount, presentToday, pendingLeave, lastRun };
+  }, [hrData]);
+
+  const landStats = useMemo(() => {
+    if (!showLand) return { active: 0, inDiligence: 0 };
+    const parcels = getByTenant<LandLead>('landLeads', tenantId);
+    return {
+      // Converted and rejected parcels are finished business, not pipeline.
+      active: parcels.filter(l => l.status !== 'converted_to_project' && l.status !== 'rejected').length,
+      inDiligence: parcels.filter(l => l.status === 'feasibility_working').length,
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tenantId, refreshKey, showLand, landBdVersion]);
+
+  const bdStats = useMemo(() => {
+    if (!showBd) return { active: 0, negotiating: 0 };
+    const deals = getByTenant<BdLead>('bdLeads', tenantId);
+    return {
+      // handed_to_land is a WIN, not an open deal — counting it as pipeline
+      // would make the number grow every time BD succeeds.
+      active: deals.filter(d => d.stage !== 'handed_to_land' && d.stage !== 'closed_lost').length,
+      negotiating: deals.filter(d => d.stage === 'terms_negotiation').length,
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tenantId, refreshKey, showBd, landBdVersion]);
   // Collections this month + overdue receivables — the CFO half of the KPI spec
   const invoices = useMemo(
     () => showFinance ? getByTenant<Invoice>('invoices', tenantId) : [],
@@ -270,16 +374,54 @@ export default function Dashboard() {
   const canSeeLeadDerived = hasPermission('view_leads');
   const canSeeUnits = hasPermission('view_inventory');
 
+  /**
+   * Roles scoped to the leads assigned to them. Derived from permissions, not
+   * from a role name, so telecaller gets the same "My …" labels that
+   * sales_executive already had rather than being told these are the company's
+   * totals when they are its own list.
+   */
+  const ownLeadsOnly = hasPermission('manage_own_leads')
+    && !hasPermission('manage_leads') && !hasPermission('assign_leads');
+
+  /**
+   * The caller's lens.
+   *
+   * A telecaller works leads and hands them over before anybody books, so
+   * Revenue, Bookings and Avg Deal are all structurally zero for them — three
+   * tiles reporting nothing, which reads as failure rather than as "not your
+   * job". What they actually own is: how many leads, how many have been
+   * reached, and what is due today. That is what this shows instead.
+   *
+   * Keyed on create_bookings: the permission that says whether closing is part
+   * of the role at all.
+   */
+  const callerLens = ownLeadsOnly && !hasPermission('create_bookings');
+  const contactedLeads = rangedLeads.filter(l => l.stage !== 'new' && l.stage !== 'lost').length;
+  const today = todayKey();
+  // A task with NO due date is not overdue — it is undated. crm_tasks.due_date
+  // is nullable (its own query orders NULLS LAST) while the Task type declares
+  // it required, so this sliced undefined and took the dashboard down for any
+  // workspace holding one.
+  const followUpsDue = tasks.filter(
+    t => t.status !== 'completed' && !!t.dueDate && t.dueDate.slice(0, 10) <= today).length;
+  const visitsBooked = tasks.filter(t => t.status !== 'completed' && t.category === 'visit').length;
+
   const kpiData: { label: string; value: string | number; change: number | null; icon: string }[] = [
-    ...(canSeeLeadDerived ? [
-      { label: isExecutive ? 'My Leads' : 'Total Leads', value: totalLeads, change: leadsChange, icon: 'users' },
+    ...(canSeeLeadDerived && callerLens ? [
+      { label: 'My Leads', value: totalLeads, change: leadsChange, icon: 'users' },
+      { label: 'Contacted', value: `${contactedLeads}/${totalLeads}`, change: null, icon: 'phone-call' },
+      { label: 'Follow-ups Due', value: followUpsDue, change: null, icon: 'clock' },
+      { label: 'Visits Booked', value: visitsBooked, change: null, icon: 'calendar-check' },
+    ] : []),
+    ...(canSeeLeadDerived && !callerLens ? [
+      { label: ownLeadsOnly ? 'My Leads' : 'Total Leads', value: totalLeads, change: leadsChange, icon: 'users' },
       { label: 'Conversion Rate', value: `${conversionRate}%`, change: null, icon: 'trending-up' },
-      { label: isExecutive ? 'My Revenue' : 'Revenue', value: formatCurrency(totalRevenue, currency), change: revenueChange, icon: 'indian-rupee' },
+      { label: ownLeadsOnly ? 'My Revenue' : 'Revenue', value: formatCurrency(totalRevenue, currency), change: revenueChange, icon: 'indian-rupee' },
     ] : []),
     ...(canSeeUnits ? [
       { label: 'Available Units', value: availableUnits, change: null, icon: 'building' },
     ] : []),
-    ...(canSeeLeadDerived ? [
+    ...(canSeeLeadDerived && !callerLens ? [
       { label: 'Bookings', value: bookedLeads, change: bookingsChange, icon: 'check-circle' },
       { label: 'Avg Deal', value: formatCurrency(avgDealSize, currency), change: null, icon: 'bar-chart' },
     ] : []),
@@ -291,6 +433,31 @@ export default function Dashboard() {
     ...(showFinance ? [
       { label: 'Collections (Month)', value: formatCurrency(collectionsThisMonth, currency), change: null, icon: 'indian-rupee' },
       { label: 'Overdue Receivables', value: formatCurrency(overdueReceivables, currency), change: null, icon: 'alert' },
+    ] : []),
+    // People. An HR manager holds none of the keys above, so without these
+    // their dashboard was a page with nothing on it.
+    ...(showHr ? [
+      { label: 'Headcount', value: hrStats.headcount, change: null, icon: 'user-check' },
+      { label: 'Present Today', value: `${hrStats.presentToday}/${hrStats.headcount}`, change: null, icon: 'calendar-check' },
+      { label: 'Pending Leave', value: hrStats.pendingLeave, change: null, icon: 'clock' },
+      {
+        label: 'Last Payroll',
+        // "Not run" is a real answer and a useful one — it is the state at the
+        // start of every month.
+        value: hrStats.lastRun
+          ? `${monthLabel(hrStats.lastRun.month)}${hrStats.lastRun.status === 'draft' ? ' (draft)' : ''}`
+          : 'Not run',
+        change: null, icon: 'wallet',
+      },
+    ] : []),
+    // Land acquisition — the same gap, for a land manager.
+    ...(showLand ? [
+      { label: 'Land Parcels', value: landStats.active, change: null, icon: 'map' },
+      { label: 'In Diligence', value: landStats.inDiligence, change: null, icon: 'clipboard-check' },
+    ] : []),
+    ...(showBd ? [
+      { label: 'BD Opportunities', value: bdStats.active, change: null, icon: 'handshake' },
+      { label: 'In Negotiation', value: bdStats.negotiating, change: null, icon: 'trending-up' },
     ] : []),
   ];
 
@@ -351,9 +518,18 @@ export default function Dashboard() {
 
   const staleHours = (l: Lead) => Math.floor((Date.now() - new Date(l.lastContact).getTime()) / 3600000);
 
-  const handleReassignAtRisk = (lead: Lead) => {
+  const handleReassignAtRisk = async (lead: Lead) => {
     if (!topPerformer || !user) return;
-    update<Lead>('leads', lead.id, { assignedTo: topPerformer.id, lastContact: new Date().toISOString() });
+    // Through leadWrites, not `update` directly: this wrote to localStorage in
+    // both modes, so against the API the reassignment survived until the next
+    // refetch of /api/leads put the old owner back — silently, and only for
+    // the manager who did it.
+    try {
+      await patchLead(lead.id, { assignedTo: topPerformer.id, lastContact: new Date().toISOString() });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not reassign that lead');
+      return;
+    }
     logAudit({
       tenantId, userId: user.id, userName: user.name, action: 'reassign',
       entity: 'lead', entityId: lead.id,
@@ -457,7 +633,7 @@ export default function Dashboard() {
         <div>
           <h2 className="text-2xl font-bold text-zinc-900">Welcome back, {user?.name?.split(' ')[0] || 'User'}</h2>
           <p className="text-sm text-zinc-500 mt-0.5">
-            {isExecutive ? "Here's your personal pipeline overview." : `Here's what's happening at ${tenant?.name || 'Friendly ERP'} today.`}
+            {isExecutive ? "Here's your personal pipeline overview." : `Here's what's happening at ${tenant?.name || BRAND.name} today.`}
             {dateRange.preset !== 'all' && (
               <span className="text-indigo-600 font-medium"> · Leads scoped to {rangeLabel(dateRange).toLowerCase()}</span>
             )}

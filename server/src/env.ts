@@ -55,4 +55,23 @@ export const env = {
    * nothing to do with what it tests. CI raises this; nothing else should.
    */
   authRateLimitMax: Number(process.env.AUTH_RATE_LIMIT_MAX) || 5,
+
+  /**
+   * The address this API is reachable at from the outside world, with no
+   * trailing slash. Empty when the deployment has not been told.
+   *
+   * TWO NAMES, ONE MEANING, AND THE BUG THAT CAUSED.
+   *
+   * WhatsApp read `PUBLIC_URL || PUBLIC_BASE_URL`; telephony read only
+   * `PUBLIC_BASE_URL`. deploy/docker-compose.prod.yml sets only `PUBLIC_URL`.
+   * So a correct production deploy gave WhatsApp its webhook host and left
+   * click-to-call with an empty string — and click-to-call treats empty as
+   * "this deployment does not know its own address" and places the call with
+   * NO callback URL. The call connects; the status, duration and recording
+   * never come back; nothing errors. A silent half-working feature.
+   *
+   * Resolved once, here, so a third caller cannot invent a third spelling.
+   */
+  publicBaseUrl: (process.env.PUBLIC_URL || process.env.PUBLIC_BASE_URL || '')
+    .trim().replace(/\/+$/, ''),
 };

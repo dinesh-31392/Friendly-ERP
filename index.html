@@ -5,6 +5,10 @@
     <!-- viewport-fit=cover lets the standalone window paint under the iOS notch
          / home indicator instead of letterboxing. -->
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <!-- Pre-hydration fallback only. App.tsx sets document.title from
+         src/config/brand.ts once mounted, so a re-brand does not need this
+         file edited — but a static file cannot import, so it is spelled out
+         here for the split second before React runs, and for crawlers. -->
     <title>Friendly ERP - Real Estate & Construction ERP</title>
     <meta name="description" content="Manage leads, projects, site execution, procurement and payments for your real estate business." />
 

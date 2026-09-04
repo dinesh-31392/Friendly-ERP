@@ -452,6 +452,66 @@ export async function apiDeleteDocument(id: string): Promise<void> {
   await request<void>(`/api/documents/${id}`, { method: 'DELETE' });
 }
 
+/**
+ * Upload a real file into the register.
+ *
+ * Not routed through `request()`: that helper sets `Content-Type:
+ * application/json`, and a multipart body needs the browser to set the header
+ * itself so it can append the boundary. Setting it by hand produces a body the
+ * server cannot parse.
+ *
+ * Metadata fields are appended BEFORE the file on purpose. The server reads the
+ * file as a stream and only sees the fields that arrived ahead of it; a field
+ * appended afterwards is silently absent, which would show up as every upload
+ * landing with a blank project.
+ */
+export async function apiUploadDocument(
+  file: File,
+  meta: { name?: string; type?: string; project?: string; date?: string; status?: string } = {},
+): Promise<Document> {
+  const form = new FormData();
+  for (const [k, v] of Object.entries(meta)) if (v) form.append(k, v);
+  form.append('file', file, file.name);
+
+  const res = await fetch(`${getApiUrl()}/api/documents/upload`, {
+    method: 'POST',
+    headers: { ...(getApiToken() ? { Authorization: `Bearer ${getApiToken()}` } : {}) },
+    body: form,
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Upload failed (${res.status})`);
+  }
+  return (await res.json()).document;
+}
+
+/**
+ * Fetch a stored file and hand back an object URL.
+ *
+ * A plain `<a href>` cannot be used: the session is a Bearer token in a header,
+ * not a cookie, so a browser-initiated navigation to the download URL arrives
+ * unauthenticated and 401s. The file has to be fetched with the header attached
+ * and then handed to the browser as a blob.
+ *
+ * The caller MUST revokeObjectURL when done — each one pins the whole file in
+ * memory until the tab closes, and a user who previews twenty drawings would
+ * otherwise hold twenty of them.
+ */
+export async function apiDownloadDocument(id: string): Promise<{ url: string; filename: string }> {
+  const res = await fetch(`${getApiUrl()}/api/documents/${id}/file`, {
+    headers: { ...(getApiToken() ? { Authorization: `Bearer ${getApiToken()}` } : {}) },
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Download failed (${res.status})`);
+  }
+  const disposition = res.headers.get('Content-Disposition') ?? '';
+  const utf8 = /filename\*=UTF-8''([^;]+)/i.exec(disposition);
+  const plain = /filename="([^"]+)"/i.exec(disposition);
+  const filename = utf8 ? decodeURIComponent(utf8[1]) : plain?.[1] ?? 'download';
+  return { url: URL.createObjectURL(await res.blob()), filename };
+}
+
 // ── Campaigns + templates (server-backed module) ─────────────────────────────
 
 export async function apiGetCampaigns(): Promise<Campaign[]> {
@@ -642,9 +702,38 @@ export async function apiUpdateAccount(id: string, patch: { name?: string; activ
   return res.account;
 }
 
+/**
+ * Follow a paginated endpoint's cursor until it runs out.
+ *
+ * The server bounds every growing list now, which is what stops one customer's
+ * ledger arriving as a single enormous response. The pages that consume these
+ * lists still filter and total client-side, so they need all of it — and
+ * silently handing them the first 200 rows would look exactly like data loss.
+ * This walks the cursor instead.
+ *
+ * The cap is a guard, not a limit anyone should reach: 200 a page over 50
+ * pages is 10,000 records. A workspace past that needs the LIST UI to page,
+ * not a bigger number here — so it stops and says so rather than looping.
+ */
+async function fetchAllPages<T>(
+  path: string, key: string, pageSize = 200, maxPages = 50,
+): Promise<T[]> {
+  const all: T[] = [];
+  let cursor: string | null = null;
+  for (let i = 0; i < maxPages; i++) {
+    const q = new URLSearchParams({ limit: String(pageSize) });
+    if (cursor) q.set('cursor', cursor);
+    const res = await request<Record<string, unknown>>(`${path}?${q}`);
+    all.push(...((res[key] as T[]) ?? []));
+    cursor = (res.nextCursor as string | null) ?? null;
+    if (!cursor) return all;
+  }
+  console.warn(`${path}: stopped after ${maxPages} pages — this list needs paging in the UI`);
+  return all;
+}
+
 export async function apiGetJournalEntries(): Promise<JournalEntry[]> {
-  const res = await request<{ entries: JournalEntry[] }>('/api/journal-entries');
-  return res.entries;
+  return fetchAllPages<JournalEntry>('/api/journal-entries', 'entries');
 }
 
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
@@ -978,7 +1067,10 @@ export interface ApiApprovalWorkflow { id: string; actionType: string; threshold
 export async function apiGetApprovalWorkflows(): Promise<ApiApprovalWorkflow[]> {
   return (await request<{ workflows: ApiApprovalWorkflow[] }>('/api/approval-workflows')).workflows;
 }
-export async function apiSaveApprovalWorkflow(input: { actionType: string; thresholdAmount?: number | null; approverRoleId: string }): Promise<ApiApprovalWorkflow> {
+/** approverRoleId is optional: omitted, the server keeps the approver already
+ *  on the rule, or defaults a new one to builder_admin. Setting a threshold and
+ *  choosing who signs off are two separate decisions. */
+export async function apiSaveApprovalWorkflow(input: { actionType: string; thresholdAmount?: number | null; approverRoleId?: string }): Promise<ApiApprovalWorkflow> {
   return (await request<{ workflow: ApiApprovalWorkflow }>('/api/approval-workflows', { method: 'PUT', body: JSON.stringify(input) })).workflow;
 }
 export async function apiDeleteApprovalWorkflow(actionType: string): Promise<void> {
@@ -991,18 +1083,31 @@ export async function apiSaveMeta(entity: string, kind: string, definition: unkn
 
 // ── CRM adjacents: customers, lead activities, commissions ───────────────────
 
-export interface ApiCustomer { id: string; name: string; email?: string | null; phone: string; kycStatus: string; leadId?: string | null }
+export interface ApiCustomer {
+  id: string; name: string; email?: string | null; phone: string;
+  kycStatus: string; leadId?: string | null;
+  /** Masked unless the caller holds manage_finance — see panMasked. */
+  pan: string;
+  /** True when a PAN exists but is being shown masked. */
+  panMasked: boolean;
+  panHolderType: string;
+}
 export interface ApiLeadActivity { id: string; leadId: string; userId?: string | null; type: string; notes: string; scheduledAt?: string | null; outcome?: string | null; createdAt: string }
 export interface ApiCommission { id: string; brokerId: string; bookingId: string; amountEarned: number; amountPaid: number; status: string }
 
 export async function apiGetCustomers(): Promise<ApiCustomer[]> {
   return (await request<{ customers: ApiCustomer[] }>('/api/customers')).customers;
 }
-export async function apiCreateCustomer(input: { name: string; email?: string; phone?: string; leadId?: string; kycStatus?: string }): Promise<ApiCustomer> {
+export async function apiCreateCustomer(input: { name: string; email?: string; phone?: string; leadId?: string; kycStatus?: string; pan?: string }): Promise<ApiCustomer> {
   return (await request<{ customer: ApiCustomer }>('/api/customers', { method: 'POST', body: JSON.stringify(input) })).customer;
 }
 export async function apiUpdateCustomerKyc(id: string, kycStatus: string): Promise<ApiCustomer> {
   return (await request<{ customer: ApiCustomer }>(`/api/customers/${id}`, { method: 'PATCH', body: JSON.stringify({ kycStatus }) })).customer;
+}
+
+/** Recording a PAN needs manage_finance — it exists to be filed on Form 26QB. */
+export async function apiSetCustomerPan(id: string, pan: string): Promise<ApiCustomer> {
+  return (await request<{ customer: ApiCustomer }>(`/api/customers/${id}`, { method: 'PATCH', body: JSON.stringify({ pan }) })).customer;
 }
 export async function apiGetLeadActivities(leadId?: string, type?: string): Promise<ApiLeadActivity[]> {
   const params = new URLSearchParams();
@@ -1055,10 +1160,24 @@ export async function apiCreateBudget(input: { projectId: string; category: stri
 
 // ── HR & workforce ───────────────────────────────────────────────────────────
 
-export interface ApiEmployee { id: string; name: string; phone: string; email?: string | null; designation: string; department: string; type: string; projectId?: string | null; monthlySalary?: number | null; dailyWage?: number | null; joinDate: string; active: boolean; userId?: string | null }
-export interface ApiAttendance { id: string; employeeId: string; date: string; checkIn: string; checkOut?: string | null; projectId?: string | null; lat?: number | null; lng?: number | null; method: string }
-export interface ApiLeaveRequest { id: string; employeeId: string; type: string; from: string; to: string; days: number; reason?: string | null; status: string; decidedBy?: string | null; decidedAt?: string | null }
-export interface ApiPayrollRun { id: string; month: string; status: string; items: unknown[]; processedBy?: string | null; processedAt?: string | null }
+// The three `*Hidden` flags below are the server saying "withheld from you",
+// which is not the same statement as "absent". Pay is readable by manage_hr and
+// view_audit_log only; view_hr on its own gets the roster and the dates. See
+// maySeePay in server/src/routes/hrRoutes.ts.
+export interface ApiEmployee { id: string; name: string; phone: string; email?: string | null; designation: string; department: string; type: string; projectId?: string | null; monthlySalary?: number | null; dailyWage?: number | null; joinDate: string; active: boolean; userId?: string | null; payHidden?: boolean;
+  // Statutory identity (migration 062), behind the same gate as pay: a UAN and
+  // a bank account are HOW somebody is paid. Aadhaar is four digits, never more.
+  uan?: string; esicNumber?: string; pan?: string; aadhaarLast4?: string;
+  bankAccount?: string; bankIfsc?: string; pfOpted?: boolean; ptMonthly?: number | null }
+export interface ApiAttendance { id: string; employeeId: string; date: string; checkIn: string; checkOut?: string | null; projectId?: string | null; lat?: number | null; lng?: number | null; method: string;
+  /** Hours beyond the shift, paid at the statutory multiple (migration 062). */
+  overtimeHours?: number }
+export interface ApiLeaveRequest { id: string; employeeId: string; type: string; from: string; to: string; days: number; reason?: string | null; status: string; decidedBy?: string | null; decidedAt?: string | null; reasonHidden?: boolean }
+export interface ApiPayrollRun { id: string; month: string; status: string; items: unknown[]; processedBy?: string | null; processedAt?: string | null; itemsHidden?: boolean; itemCount?: number;
+  /** The site this run pays. null is the company-wide run (migration 061). */
+  projectId?: string | null;
+  /** Stored header totals. Money, so redacted alongside `items`. */
+  grossTotal?: number | null; deductionTotal?: number | null; netTotal?: number | null; employerCost?: number | null }
 
 export async function apiGetEmployees(): Promise<ApiEmployee[]> {
   return (await request<{ employees: ApiEmployee[] }>('/api/employees')).employees;
@@ -1066,7 +1185,15 @@ export async function apiGetEmployees(): Promise<ApiEmployee[]> {
 export async function apiCreateEmployee(input: Partial<ApiEmployee> & { name: string }): Promise<ApiEmployee> {
   return (await request<{ employee: ApiEmployee }>('/api/employees', { method: 'POST', body: JSON.stringify(input) })).employee;
 }
-export async function apiUpdateEmployee(id: string, patch: { active?: boolean; monthlySalary?: number; dailyWage?: number; designation?: string; department?: string }): Promise<ApiEmployee> {
+/** The patch mirrors what the route accepts — including the site and the
+ *  statutory identity, which had been on the server since migration 062 with
+ *  no way to send them. */
+export async function apiUpdateEmployee(id: string, patch: {
+  active?: boolean; monthlySalary?: number; dailyWage?: number;
+  designation?: string; department?: string; projectId?: string;
+  uan?: string; esicNumber?: string; pan?: string; aadhaarLast4?: string;
+  bankAccount?: string; bankIfsc?: string; pfOpted?: boolean; ptMonthly?: number;
+}): Promise<ApiEmployee> {
   return (await request<{ employee: ApiEmployee }>(`/api/employees/${id}`, { method: 'PATCH', body: JSON.stringify(patch) })).employee;
 }
 export async function apiDeleteEmployee(id: string): Promise<void> {
@@ -1079,7 +1206,7 @@ export async function apiGetAttendance(date?: string): Promise<ApiAttendance[]> 
   const q = date ? `?date=${encodeURIComponent(date)}` : '';
   return (await request<{ attendance: ApiAttendance[] }>(`/api/attendance${q}`)).attendance;
 }
-export async function apiMarkAttendance(input: { employeeId: string; date?: string; checkIn?: string; checkOut?: string; projectId?: string; lat?: number; lng?: number; method?: string }): Promise<ApiAttendance> {
+export async function apiMarkAttendance(input: { employeeId: string; date?: string; checkIn?: string; checkOut?: string; projectId?: string; lat?: number; lng?: number; method?: string; overtimeHours?: number }): Promise<ApiAttendance> {
   return (await request<{ attendance: ApiAttendance }>('/api/attendance', { method: 'POST', body: JSON.stringify(input) })).attendance;
 }
 export async function apiGetLeaveRequests(): Promise<ApiLeaveRequest[]> {
@@ -1094,8 +1221,8 @@ export async function apiDecideLeaveRequest(id: string, status: string): Promise
 export async function apiGetPayrollRuns(): Promise<ApiPayrollRun[]> {
   return (await request<{ payrollRuns: ApiPayrollRun[] }>('/api/payroll-runs')).payrollRuns;
 }
-export async function apiCreatePayrollRun(month: string, items: unknown[]): Promise<ApiPayrollRun> {
-  return (await request<{ payrollRun: ApiPayrollRun }>('/api/payroll-runs', { method: 'POST', body: JSON.stringify({ month, items }) })).payrollRun;
+export async function apiCreatePayrollRun(month: string, items: unknown[], projectId?: string | null): Promise<ApiPayrollRun> {
+  return (await request<{ payrollRun: ApiPayrollRun }>('/api/payroll-runs', { method: 'POST', body: JSON.stringify({ month, items, projectId: projectId ?? null }) })).payrollRun;
 }
 export async function apiProcessPayrollRun(id: string): Promise<ApiPayrollRun> {
   return (await request<{ payrollRun: ApiPayrollRun }>(`/api/payroll-runs/${id}`, { method: 'PATCH', body: JSON.stringify({ status: 'processed' }) })).payrollRun;
@@ -1319,7 +1446,7 @@ export interface ApiPortalOverview {
   profile: { name: string; email: string };
   // customer
   lead?: { id: string; name: string; project: string; stage: string } | null;
-  bookings?: { id: string; unitId?: string | null; bookingAmount: number; totalConsideration: number; status: string; stage?: string }[];
+  bookings?: { id: string; unitId?: string | null; bookingAmount: number; totalConsideration: number; status: string; stage?: string; paymentPlan?: string | null }[];
   schedule?: { id: string; bookingId: string; milestoneName: string; sequence: number; amount: number; dueDate: string; status: string }[];
   receipts?: { id: string; scheduleId: string; amount: number; date: string; mode: string }[];
   units?: { id: string; towerId?: string | null; projectId?: string | null; unitCode: string; configuration: string; floor: number; areaSqft: number; status: string }[];
@@ -1327,8 +1454,21 @@ export interface ApiPortalOverview {
   tickets?: { id: string; title: string; category: string; priority: string; status: string; project: string; createdAt: string }[];
   documents?: { id: string; name: string; type: string; project: string; docDate: string; size: string; status: string; url?: string | null }[];
   // partner
-  broker?: { id: string; name: string; phone: string; email: string } | null;
-  commissions?: { id: string; bookingId?: string | null; amountEarned: number; amountPaid: number; status: string }[];
+  broker?: {
+    id: string; name: string; phone: string; email: string;
+    agencyName?: string | null;
+    // null when the deal is not a percentage one — there is no single rate to
+    // quote for a flat or slab arrangement.
+    commissionRate?: number | null;
+    leadsReferred?: number; bookingsClosed?: number;
+  } | null;
+  commissions?: {
+    id: string; bookingId?: string | null; amountEarned: number; amountPaid: number; status: string;
+    // What earned the line. Null when the booking behind it no longer exists —
+    // the money is still owed, so the row is still returned.
+    leadName?: string | null; project?: string | null;
+    bookingValue?: number; rate?: number | null;
+  }[];
   referredLeads?: { id: string; name: string; phone: string; project: string; stage: string; budget: number; createdAt: string }[];
   projects?: { id: string; name: string; location: string }[];
 }
@@ -1411,8 +1551,7 @@ export async function apiSaveChatbotConfig(cfg: Partial<ApiChatbotConfig>): Prom
 // the localStorage-only tables.
 
 export async function apiGetInvoices(): Promise<Invoice[]> {
-  const res = await request<{ invoices: Invoice[] }>('/api/invoices');
-  return res.invoices;
+  return fetchAllPages<Invoice>('/api/invoices', 'invoices');
 }
 
 export async function apiCreateInvoice(input: Partial<Invoice>): Promise<Invoice> {
@@ -1449,8 +1588,7 @@ function invoiceBody(i: Partial<Invoice>): Record<string, unknown> {
 }
 
 export async function apiGetTasks(): Promise<Task[]> {
-  const res = await request<{ tasks: Task[] }>('/api/crm-tasks');
-  return res.tasks;
+  return fetchAllPages<Task>('/api/crm-tasks', 'tasks');
 }
 
 export async function apiCreateTask(input: Partial<Task>): Promise<Task> {
@@ -1705,4 +1843,1244 @@ export async function apiCloseSiteVisit(
     method: 'PATCH', body: JSON.stringify({ status, outcome, feedback }),
   });
   return res.siteVisit;
+}
+
+// ── Demand letters (migration 041) ───────────────────────────────────────────
+//
+// Dunning: the letter that turns an overdue milestone into a demand carrying
+// delay interest. Amounts are FROZEN by the server when the letter is issued —
+// the client never recomputes them, because a letter that quotes a different
+// figure to the one the customer received is worse than no letter.
+
+export interface ApiDemandLetter {
+  id: string;
+  bookingId: string;
+  paymentScheduleId: string;
+  letterNo: string;
+  issuedOn: string;
+  dueOn: string;
+  principalAmount: number;
+  interestAmount: number;
+  totalAmount: number;
+  interestPct: number;
+  daysOverdue: number;
+  status: 'issued' | 'paid' | 'cancelled';
+  reminderCount: number;
+  lastReminderAt?: string | null;
+  milestoneName?: string;
+  customerName?: string;
+}
+
+/** A milestone that COULD be demanded, with what the demand would be worth
+ *  today — so the decision is made with the number visible. */
+export interface ApiDemandDue {
+  paymentScheduleId: string;
+  bookingId: string;
+  milestoneName: string;
+  dueDate: string;
+  customerName?: string;
+  daysOverdue: number;
+  outstanding: number;
+  interest: number;
+  interestPct: number;
+  total: number;
+}
+
+export async function apiGetDemandLetters(status?: string): Promise<ApiDemandLetter[]> {
+  const q = status ? `?status=${encodeURIComponent(status)}` : '';
+  const res = await request<{ demandLetters: ApiDemandLetter[] }>(`/api/demand-letters${q}`);
+  return res.demandLetters;
+}
+
+export async function apiGetDemandsDue(): Promise<ApiDemandDue[]> {
+  const res = await request<{ due: ApiDemandDue[] }>('/api/demand-letters/due');
+  return res.due;
+}
+
+export async function apiIssueDemandLetter(paymentScheduleId: string, dueInDays?: number): Promise<ApiDemandLetter> {
+  const res = await request<{ demandLetter: ApiDemandLetter }>('/api/demand-letters', {
+    method: 'POST', body: JSON.stringify({ paymentScheduleId, ...(dueInDays ? { dueInDays } : {}) }),
+  });
+  return res.demandLetter;
+}
+
+export async function apiSettleDemandLetter(id: string, status: 'paid' | 'cancelled'): Promise<ApiDemandLetter> {
+  const res = await request<{ demandLetter: ApiDemandLetter }>(`/api/demand-letters/${id}`, {
+    method: 'PATCH', body: JSON.stringify({ status }),
+  });
+  return res.demandLetter;
+}
+
+export async function apiRemindDemandLetter(id: string): Promise<ApiDemandLetter> {
+  const res = await request<{ demandLetter: ApiDemandLetter }>(`/api/demand-letters/${id}/remind`, { method: 'POST' });
+  return res.demandLetter;
+}
+
+/**
+ * The demand letter as the document the buyer receives.
+ *
+ * Fetched rather than linked, for the same reason as document downloads: the
+ * session is a Bearer token, and a browser-initiated navigation carries no
+ * Authorization header. Returns an object URL the caller must revoke.
+ */
+export async function apiDemandLetterPdf(id: string): Promise<{ url: string; filename: string }> {
+  const res = await fetch(`${getApiUrl()}/api/demand-letters/${id}/pdf`, {
+    headers: { ...(getApiToken() ? { Authorization: `Bearer ${getApiToken()}` } : {}) },
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Could not generate the letter (${res.status})`);
+  }
+  const match = /filename="([^"]+)"/i.exec(res.headers.get('Content-Disposition') ?? '');
+  return { url: URL.createObjectURL(await res.blob()), filename: match?.[1] ?? 'demand-letter.pdf' };
+}
+
+// ── GST returns (migration 056) ──────────────────────────────────────────────
+//
+// Nothing here computes tax. The intra/inter-state split, the GSTIN check digit
+// and the three outward tables all live on the server — a second implementation
+// in a browser is a second chance to put the money in the wrong exchequer.
+
+export type GstForm = 'GSTR1' | 'GSTR3B';
+
+export interface ApiGstReturn {
+  id: string;
+  form: GstForm;
+  period: string;          // MMYYYY
+  status: 'prepared' | 'filed';
+  taxableValue: number;
+  cgst: number;
+  sgst: number;
+  igst: number;
+  invoiceCount: number;
+  preparedAt: string;
+  filedAt: string | null;
+  arn: string;
+  payload?: Record<string, unknown>;
+}
+
+export interface ApiGstPreview {
+  form: GstForm;
+  period: string;
+  from: string;
+  to: string;
+  payload: Record<string, unknown>;
+  /** Invoices in the period with no tax recorded. Named so they can be fixed
+   *  before the deadline rather than silently reported as exempt. */
+  untaxed: Array<{ id: string; invoiceNo: string | null; leadName: string; amount: number; issueDate: string }>;
+  ready: boolean;
+  gstinConfigured: boolean;
+}
+
+export async function apiGetGstReturns(): Promise<ApiGstReturn[]> {
+  const res = await request<{ returns: ApiGstReturn[] }>('/api/gst/returns');
+  return res.returns;
+}
+
+export async function apiPreviewGstReturn(form: GstForm, period: string): Promise<ApiGstPreview> {
+  const res = await request<{ preview: ApiGstPreview }>(
+    `/api/gst/returns/preview?form=${form}&period=${encodeURIComponent(period)}`);
+  return res.preview;
+}
+
+export async function apiPrepareGstReturn(form: GstForm, period: string): Promise<ApiGstReturn> {
+  const res = await request<{ return: ApiGstReturn }>('/api/gst/returns', {
+    method: 'POST', body: JSON.stringify({ form, period }),
+  });
+  return res.return;
+}
+
+export async function apiFileGstReturn(id: string, arn: string): Promise<ApiGstReturn> {
+  const res = await request<{ return: ApiGstReturn }>(`/api/gst/returns/${id}/file`, {
+    method: 'POST', body: JSON.stringify({ arn }),
+  });
+  return res.return;
+}
+
+/** Record the tax on one invoice. The split is computed server-side. */
+export async function apiSetInvoiceTax(id: string, input: {
+  taxableValue: number; gstRate: number; placeOfSupply: string;
+  customerGstin?: string; hsnSac?: string; postCompletion?: boolean; invoiceNo?: string;
+}): Promise<Record<string, unknown>> {
+  const res = await request<{ invoice: Record<string, unknown> }>(`/api/invoices/${id}/tax`, {
+    method: 'POST', body: JSON.stringify(input),
+  });
+  return res.invoice;
+}
+
+/** The file the GSTN offline tool ingests. Bearer token, so it is fetched. */
+export async function apiGstReturnJson(id: string): Promise<{ url: string; filename: string }> {
+  const res = await fetch(`${getApiUrl()}/api/gst/returns/${id}/json`, {
+    headers: { ...(getApiToken() ? { Authorization: `Bearer ${getApiToken()}` } : {}) },
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Could not download the return (${res.status})`);
+  }
+  const m = /filename="([^"]+)"/i.exec(res.headers.get('Content-Disposition') ?? '');
+  return { url: URL.createObjectURL(await res.blob()), filename: m?.[1] ?? 'gst-return.json' };
+}
+
+// ── Tally export (server/src/tally.ts) ───────────────────────────────────────
+
+export interface ApiTallyPreflight {
+  vouchers: number;
+  ledgers: number;
+  unbalanced: Array<{ voucherNumber: string; difference: number }>;
+  ready: boolean;
+  suspense: Array<{ name: string; accountType: string }>;
+}
+
+export async function apiTallyPreflight(from: string, to: string): Promise<ApiTallyPreflight> {
+  const res = await request<{ preflight: ApiTallyPreflight }>(
+    `/api/exports/tally/preflight?from=${from}&to=${to}`);
+  return res.preflight;
+}
+
+/** The import file. Refuses to produce one that would half-import, so a 409
+ *  here carries the offending vouchers rather than a generic failure. */
+export async function apiTallyExport(from: string, to: string): Promise<{ url: string; filename: string }> {
+  const res = await fetch(`${getApiUrl()}/api/exports/tally?from=${from}&to=${to}`, {
+    headers: { ...(getApiToken() ? { Authorization: `Bearer ${getApiToken()}` } : {}) },
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Could not export (${res.status})`);
+  }
+  const m = /filename="([^"]+)"/i.exec(res.headers.get('Content-Disposition') ?? '');
+  return { url: URL.createObjectURL(await res.blob()), filename: m?.[1] ?? 'tally.xml' };
+}
+
+// ── Retention & erasure (migration 054) ──────────────────────────────────────
+
+export interface ApiRetentionPolicy {
+  id: string;
+  entity: string;
+  retainDays: number | null;
+  legalBasis: string;
+  /** A floor set by law. Extendable, never shortenable. */
+  statutory: boolean;
+  updatedAt: string;
+}
+
+export interface ApiErasureAction {
+  id: string;
+  entity: string;
+  recordCount: number;
+  action: 'erased' | 'redacted' | 'retained';
+  legalBasis: string;
+  detail: string;
+}
+
+export interface ApiErasureRequest {
+  id: string;
+  subjectType: string;
+  subjectEmail: string;
+  subjectPhone: string;
+  subjectName: string;
+  receivedOn: string;
+  status: 'received' | 'verified' | 'completed' | 'refused';
+  verifiedAt: string | null;
+  completedAt: string | null;
+  refusedReason: string;
+  actions: ApiErasureAction[];
+}
+
+export interface ApiErasurePreview {
+  matched: number;
+  steps: Array<{ entity: string; action: string; recordCount: number; legalBasis: string; detail: string }>;
+  erasedCount: number;
+  redactedCount: number;
+  retainedCount: number;
+}
+
+export async function apiGetRetentionPolicies(): Promise<ApiRetentionPolicy[]> {
+  const res = await request<{ policies: ApiRetentionPolicy[] }>('/api/retention-policies');
+  return res.policies;
+}
+
+export async function apiSetRetentionDays(id: string, retainDays: number | null): Promise<ApiRetentionPolicy> {
+  const res = await request<{ policy: ApiRetentionPolicy }>(`/api/retention-policies/${id}`, {
+    method: 'PATCH', body: JSON.stringify({ retainDays }),
+  });
+  return res.policy;
+}
+
+export async function apiRetentionSweep(): Promise<Array<{ entity: string; retainDays: number; count: number }>> {
+  const res = await request<{ expired: Array<{ entity: string; retainDays: number; count: number }> }>(
+    '/api/retention-sweep');
+  return res.expired;
+}
+
+export async function apiGetErasureRequests(): Promise<ApiErasureRequest[]> {
+  const res = await request<{ requests: ApiErasureRequest[] }>('/api/erasure-requests');
+  return res.requests;
+}
+
+export async function apiGetErasureRequest(id: string): Promise<ApiErasureRequest> {
+  const res = await request<{ request: ApiErasureRequest }>(`/api/erasure-requests/${id}`);
+  return res.request;
+}
+
+export async function apiCreateErasureRequest(input: {
+  subjectEmail?: string; subjectPhone?: string; subjectName?: string; channel?: string;
+}): Promise<ApiErasureRequest> {
+  const res = await request<{ request: ApiErasureRequest }>('/api/erasure-requests', {
+    method: 'POST', body: JSON.stringify(input),
+  });
+  return res.request;
+}
+
+/** What WOULD happen. Available before verification, because the reply to a
+ *  Data Principal is written from it. */
+export async function apiPreviewErasure(id: string): Promise<ApiErasurePreview> {
+  const res = await request<{ preview: ApiErasurePreview }>(`/api/erasure-requests/${id}/preview`);
+  return res.preview;
+}
+
+export async function apiVerifyErasure(id: string, note: string): Promise<ApiErasureRequest> {
+  const res = await request<{ request: ApiErasureRequest }>(`/api/erasure-requests/${id}/verify`, {
+    method: 'POST', body: JSON.stringify({ note }),
+  });
+  return res.request;
+}
+
+export async function apiExecuteErasure(id: string): Promise<ApiErasureRequest> {
+  const res = await request<{ request: ApiErasureRequest }>(`/api/erasure-requests/${id}/execute`, {
+    method: 'POST',
+  });
+  return res.request;
+}
+
+export async function apiRefuseErasure(id: string, reason: string): Promise<ApiErasureRequest> {
+  const res = await request<{ request: ApiErasureRequest }>(`/api/erasure-requests/${id}/refuse`, {
+    method: 'POST', body: JSON.stringify({ reason }),
+  });
+  return res.request;
+}
+
+// ── Portal lead sources (migration 055) ──────────────────────────────────────
+
+export interface ApiLeadSource {
+  id: string;
+  sourceKey: string;
+  label: string;
+  active: boolean;
+  receivedCount: number;
+  lastSeenAt: string | null;
+  createdAt: string;
+}
+
+export async function apiGetLeadSources(): Promise<{ sources: ApiLeadSource[]; available: string[] }> {
+  return request<{ sources: ApiLeadSource[]; available: string[] }>('/api/lead-sources');
+}
+
+/** Mints or rotates a portal credential. The token comes back exactly once —
+ *  only its digest is stored, so it cannot be shown again. */
+export async function apiCreateLeadSource(sourceKey: string, label?: string): Promise<{
+  source: ApiLeadSource; secret: string; ingestUrl: string; note: string;
+}> {
+  return request<{ source: ApiLeadSource; secret: string; ingestUrl: string; note: string }>(
+    '/api/lead-sources', { method: 'POST', body: JSON.stringify({ sourceKey, ...(label ? { label } : {}) }) });
+}
+
+export async function apiSetLeadSourceActive(id: string, active: boolean): Promise<ApiLeadSource> {
+  const res = await request<{ source: ApiLeadSource }>(`/api/lead-sources/${id}`, {
+    method: 'PATCH', body: JSON.stringify({ active }),
+  });
+  return res.source;
+}
+
+// ── Telephony (migration 057) ────────────────────────────────────────────────
+
+export interface ApiTelephonySettings {
+  provider: string;
+  accountSid: string;
+  callerId: string;
+  recordCalls: boolean;
+  active: boolean;
+  callbackConfigured: boolean;
+  updatedAt: string | null;
+}
+
+export async function apiGetTelephonySettings(): Promise<{
+  settings: ApiTelephonySettings; credentialsConfigured: boolean;
+}> {
+  return request<{ settings: ApiTelephonySettings; credentialsConfigured: boolean }>(
+    '/api/telephony/settings');
+}
+
+export async function apiSaveTelephonySettings(input: {
+  accountSid: string; callerId: string; recordCalls?: boolean; active?: boolean; rotateSecret?: boolean;
+}): Promise<{
+  settings: ApiTelephonySettings; callbackSecret?: string; callbackUrl?: string;
+  note?: string; recordingNotice?: string;
+}> {
+  return request('/api/telephony/settings', { method: 'PUT', body: JSON.stringify(input) });
+}
+
+/**
+ * Place a call to a lead.
+ *
+ * The number dialled comes from the lead server-side — never from here. The
+ * rep's phone rings first, and the customer only ever sees the workspace line.
+ */
+export async function apiCallLead(leadId: string): Promise<{
+  id: string; status: string; providerCallId: string; callerId: string; note: string;
+}> {
+  const res = await request<{ call: { id: string; status: string; providerCallId: string; callerId: string; note: string } }>(
+    `/api/leads/${leadId}/call`, { method: 'POST' });
+  return res.call;
+}
+
+// ── Payment gateway (migration 055) ──────────────────────────────────────────
+
+export interface ApiGatewayEvent {
+  id: string;
+  eventId: string;
+  eventType: string;
+  orderRef: string;
+  paymentRef: string;
+  amount: number;
+  signatureVerified: boolean;
+  appliedAt: string | null;
+  receivedAt: string;
+}
+
+export async function apiGetGatewayEvents(): Promise<{ events: ApiGatewayEvent[]; configured: boolean }> {
+  return request<{ events: ApiGatewayEvent[]; configured: boolean }>('/api/payments/gateway/events');
+}
+
+/**
+ * Raise a gateway order against a milestone.
+ *
+ * The amount is NOT sent — the server computes it from what is outstanding.
+ * Returns the public key id, which is what Razorpay's checkout script needs in
+ * the browser; the key secret never leaves the server.
+ */
+export async function apiCreateGatewayOrder(paymentScheduleId: string): Promise<{
+  orderId: string; amount: number; amountRupees: number; currency: string;
+  keyId: string; customerName?: string; customerEmail?: string; milestone?: string;
+}> {
+  const res = await request<{ order: {
+    orderId: string; amount: number; amountRupees: number; currency: string;
+    keyId: string; customerName?: string; customerEmail?: string; milestone?: string;
+  } }>('/api/payments/gateway/order', {
+    method: 'POST', body: JSON.stringify({ paymentScheduleId }),
+  });
+  return res.order;
+}
+
+// ── Possession & snags (migration 053) ───────────────────────────────────────
+//
+// `blockingSnags` counts only MAJOR and CRITICAL open snags, and `duesNow` is
+// computed live from receipts. Both gate acceptance server-side; the client
+// shows them so a site office knows before it asks, not after it is refused.
+
+export type PossessionStatus = 'offered' | 'inspected' | 'accepted' | 'withdrawn';
+export type SnagSeverity = 'minor' | 'major' | 'critical';
+export type SnagStatus = 'open' | 'in_progress' | 'resolved' | 'rejected';
+export type SnagCategory =
+  'civil' | 'plumbing' | 'electrical' | 'carpentry' | 'painting' | 'flooring' | 'fittings' | 'other';
+
+export interface ApiSnag {
+  id: string;
+  possessionId: string;
+  raisedOn: string;
+  location: string;
+  category: SnagCategory;
+  description: string;
+  severity: SnagSeverity;
+  status: SnagStatus;
+  assignedTo: string | null;
+  assignedName?: string;
+  targetDate: string | null;
+  resolvedOn: string | null;
+  resolution: string;
+  photoFileId: string | null;
+}
+
+export interface ApiPossession {
+  id: string;
+  bookingId: string;
+  status: PossessionStatus;
+  ocReference: string;
+  ocDatedOn: string | null;
+  offeredOn: string;
+  inspectedOn: string | null;
+  acceptedOn: string | null;
+  duesOutstanding: number;
+  receivedBy: string;
+  notes: string;
+  createdAt: string;
+  customerName?: string;
+  unitCode?: string;
+  projectName?: string;
+  blockingSnags: number;
+  duesNow?: number;
+  snags: ApiSnag[];
+}
+
+export async function apiGetPossessions(status?: PossessionStatus): Promise<ApiPossession[]> {
+  const res = await request<{ possessions: ApiPossession[] }>(
+    `/api/possessions${status ? `?status=${status}` : ''}`);
+  return res.possessions;
+}
+
+export async function apiGetPossession(id: string): Promise<ApiPossession> {
+  const res = await request<{ possession: ApiPossession }>(`/api/possessions/${id}`);
+  return res.possession;
+}
+
+export async function apiOfferPossession(input: {
+  bookingId: string; ocReference: string; ocDatedOn?: string; notes?: string;
+}): Promise<ApiPossession> {
+  const res = await request<{ possession: ApiPossession }>('/api/possessions', {
+    method: 'POST', body: JSON.stringify(input),
+  });
+  return res.possession;
+}
+
+/** `force` overrides the snag and dues gates. The server then freezes the
+ *  outstanding balance onto the record and prints it on the acknowledgement. */
+export async function apiUpdatePossession(id: string, input: {
+  status?: Exclude<PossessionStatus, 'offered'>; receivedBy?: string; notes?: string; force?: boolean;
+}): Promise<ApiPossession> {
+  const res = await request<{ possession: ApiPossession }>(`/api/possessions/${id}`, {
+    method: 'PATCH', body: JSON.stringify(input),
+  });
+  return res.possession;
+}
+
+export async function apiRaiseSnag(possessionId: string, input: {
+  description: string; location?: string; category?: SnagCategory; severity?: SnagSeverity;
+  assignedTo?: string; targetDate?: string; photoFileId?: string;
+}): Promise<ApiSnag> {
+  const res = await request<{ snag: ApiSnag }>(`/api/possessions/${possessionId}/snags`, {
+    method: 'POST', body: JSON.stringify(input),
+  });
+  return res.snag;
+}
+
+export async function apiUpdateSnag(id: string, input: {
+  status?: SnagStatus; resolution?: string; assignedTo?: string; targetDate?: string; severity?: SnagSeverity;
+}): Promise<ApiSnag> {
+  const res = await request<{ snag: ApiSnag }>(`/api/snags/${id}`, {
+    method: 'PATCH', body: JSON.stringify(input),
+  });
+  return res.snag;
+}
+
+/** The offer of possession, or the handover acknowledgement once the keys are
+ *  gone — the server picks by status, because they are different documents. */
+export async function apiPossessionPdf(id: string): Promise<{ url: string; filename: string }> {
+  const res = await fetch(`${getApiUrl()}/api/possessions/${id}/pdf`, {
+    headers: { ...(getApiToken() ? { Authorization: `Bearer ${getApiToken()}` } : {}) },
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Could not render the letter (${res.status})`);
+  }
+  const match = /filename="([^"]+)"/i.exec(res.headers.get('Content-Disposition') ?? '');
+  return { url: URL.createObjectURL(await res.blob()), filename: match?.[1] ?? 'possession.pdf' };
+}
+
+// ── Broker payout runs (migration 052) ───────────────────────────────────────
+//
+// GST is ADDED to a payout; TDS under 194-H is SUBTRACTED from it, and is
+// computed on the brokerage rather than the GST-inclusive figure. The threshold
+// is aggregate across the financial year, so the run that crosses it carries
+// the catch-up for everything paid earlier without deduction. All of that is
+// server-side; nothing here recomputes a figure.
+
+export type PayoutRunStatus = 'draft' | 'approved' | 'paid' | 'cancelled';
+
+export interface ApiPayoutLine {
+  id: string;
+  brokerId: string;
+  brokerName?: string;
+  agencyName?: string;
+  reraId?: string;
+  grossAmount: number;
+  gstPct: number;
+  gstAmount: number;
+  fyPriorGross: number;
+  fyPriorTds: number;
+  tdsPct: number;
+  tdsAmount: number;
+  netAmount: number;
+}
+
+export interface ApiPayoutRun {
+  id: string;
+  runNo: number;
+  periodStart: string;
+  periodEnd: string;
+  fyStart: string;
+  tdsPct: number;
+  tdsThreshold: number;
+  status: PayoutRunStatus;
+  grossTotal: number;
+  gstTotal: number;
+  tdsTotal: number;
+  netTotal: number;
+  paidOn: string | null;
+  paymentReference: string;
+  approvedAt: string | null;
+  createdAt: string;
+  lines: ApiPayoutLine[];
+}
+
+export async function apiGetPayoutRuns(): Promise<ApiPayoutRun[]> {
+  const res = await request<{ runs: ApiPayoutRun[] }>('/api/broker-payouts');
+  return res.runs;
+}
+
+export async function apiGetPayoutRun(id: string): Promise<ApiPayoutRun> {
+  const res = await request<{ run: ApiPayoutRun }>(`/api/broker-payouts/${id}`);
+  return res.run;
+}
+
+export async function apiBuildPayoutRun(input: {
+  periodStart: string; periodEnd: string;
+  tdsPct?: number; tdsThreshold?: number; defaultGstPct?: number;
+}): Promise<ApiPayoutRun> {
+  const res = await request<{ run: ApiPayoutRun }>('/api/broker-payouts', {
+    method: 'POST', body: JSON.stringify(input),
+  });
+  return res.run;
+}
+
+export async function apiSetPayoutRunStatus(
+  id: string, status: Exclude<PayoutRunStatus, 'draft'>, paymentReference?: string,
+): Promise<ApiPayoutRun> {
+  const res = await request<{ run: ApiPayoutRun }>(`/api/broker-payouts/${id}`, {
+    method: 'PATCH', body: JSON.stringify({ status, ...(paymentReference ? { paymentReference } : {}) }),
+  });
+  return res.run;
+}
+
+export async function apiPayoutRunPdf(id: string): Promise<{ url: string; filename: string }> {
+  const res = await fetch(`${getApiUrl()}/api/broker-payouts/${id}/pdf`, {
+    headers: { ...(getApiToken() ? { Authorization: `Bearer ${getApiToken()}` } : {}) },
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Could not render the advice (${res.status})`);
+  }
+  const match = /filename="([^"]+)"/i.exec(res.headers.get('Content-Disposition') ?? '');
+  return { url: URL.createObjectURL(await res.blob()), filename: match?.[1] ?? 'brokerage-advice.pdf' };
+}
+
+// ── Cancellation & refund (migration 051) ────────────────────────────────────
+//
+// `refundAmount` is SIGNED. Negative means the buyer owes the builder — which
+// happens whenever the agreed forfeiture exceeds what the buyer had paid, and
+// is the case an implementation that clamps at zero silently writes off. The
+// server also sends `buyerOwes` so a client cannot miss the sign by formatting
+// it away.
+
+export type CancellationStatus = 'requested' | 'approved' | 'refunded' | 'rejected';
+export type CancellationReason =
+  'buyer_finance' | 'buyer_personal' | 'project_delay' | 'builder_initiated' | 'transfer' | 'other';
+
+export interface ApiCancellation {
+  id: string;
+  bookingId: string;
+  requestedOn: string;
+  cancelledOn: string | null;
+  reasonCategory: CancellationReason;
+  reason: string;
+  consideration: number;
+  totalReceived: number;
+  forfeiturePct: number;
+  forfeitureAmount: number;
+  otherDeductions: number;
+  gstRemitted: number;
+  gstRefundable: boolean;
+  refundAmount: number;
+  buyerOwes: boolean;
+  status: CancellationStatus;
+  approvedAt: string | null;
+  refundedOn: string | null;
+  refundReference: string;
+  createdAt: string;
+  customerName?: string;
+  unitCode?: string;
+  projectName?: string;
+}
+
+export interface ApiRefundPreview {
+  consideration: number;
+  totalReceived: number;
+  forfeiturePct: number;
+  forfeitureAmount: number;
+  otherDeductions: number;
+  gstRemitted: number;
+  gstRefundable: boolean;
+  refundAmount: number;
+  buyerOwes: boolean;
+  customerName?: string;
+  unitCode?: string;
+  projectName?: string;
+}
+
+export async function apiGetCancellations(status?: CancellationStatus): Promise<ApiCancellation[]> {
+  const res = await request<{ cancellations: ApiCancellation[] }>(
+    `/api/cancellations${status ? `?status=${status}` : ''}`);
+  return res.cancellations;
+}
+
+/** What a refund WOULD be, so the decision is made with the number visible. */
+export async function apiPreviewRefund(bookingId: string, opts: {
+  forfeiturePct?: number; otherDeductions?: number; gstRemitted?: number; gstRefundable?: boolean;
+} = {}): Promise<ApiRefundPreview> {
+  const q = new URLSearchParams();
+  for (const [k, v] of Object.entries(opts)) if (v !== undefined) q.set(k, String(v));
+  const res = await request<{ preview: ApiRefundPreview }>(
+    `/api/bookings/${bookingId}/cancellation-preview${q.toString() ? `?${q}` : ''}`);
+  return res.preview;
+}
+
+export async function apiCancelBooking(input: {
+  bookingId: string; reasonCategory?: CancellationReason; reason?: string;
+  forfeiturePct?: number; otherDeductions?: number; gstRemitted?: number; gstRefundable?: boolean;
+}): Promise<ApiCancellation> {
+  const res = await request<{ cancellation: ApiCancellation }>('/api/cancellations', {
+    method: 'POST', body: JSON.stringify(input),
+  });
+  return res.cancellation;
+}
+
+export async function apiSetCancellationStatus(
+  id: string, status: Exclude<CancellationStatus, 'requested'>, refundReference?: string,
+): Promise<ApiCancellation> {
+  const res = await request<{ cancellation: ApiCancellation }>(`/api/cancellations/${id}`, {
+    method: 'PATCH', body: JSON.stringify({ status, ...(refundReference ? { refundReference } : {}) }),
+  });
+  return res.cancellation;
+}
+
+export async function apiCancellationPdf(id: string): Promise<{ url: string; filename: string }> {
+  const res = await fetch(`${getApiUrl()}/api/cancellations/${id}/pdf`, {
+    headers: { ...(getApiToken() ? { Authorization: `Bearer ${getApiToken()}` } : {}) },
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Could not render the statement (${res.status})`);
+  }
+  const match = /filename="([^"]+)"/i.exec(res.headers.get('Content-Disposition') ?? '');
+  return { url: URL.createObjectURL(await res.blob()), filename: match?.[1] ?? 'refund-statement.pdf' };
+}
+
+// ── Cost sheets (migration 050) ──────────────────────────────────────────────
+//
+// The itemised statement a buyer decides on and takes to their bank. The tax
+// arithmetic lives entirely on the server — GST is per line and never on a
+// statutory levy, TDS under 194-IA is a DEDUCTION from the builder's receipt
+// rather than an addition to the buyer's cost — so nothing here recomputes a
+// total. The client sends what the line IS and renders what comes back.
+
+export type CostSheetSection = 'consideration' | 'statutory' | 'deposit' | 'other';
+export type CostSheetBasis = 'per_sqft' | 'lump_sum' | 'pct_of_consideration';
+export type CostSheetStatus = 'draft' | 'issued' | 'accepted' | 'superseded' | 'cancelled';
+
+export interface ApiCostSheetLine {
+  id?: string;
+  sequence?: number;
+  section: CostSheetSection;
+  label: string;
+  basis: CostSheetBasis;
+  rate: number;
+  quantity?: number;
+  amount?: number;
+  gstPct: number;
+  gstAmount?: number;
+}
+
+export interface ApiCostSheetTotals {
+  consideration: number; statutory: number; deposits: number; other: number;
+  gst: number; gross: number; tds: number; netToBuilder: number; payableByBuyer: number;
+}
+
+export interface ApiCostSheet {
+  id: string;
+  unitId: string | null;
+  leadId: string | null;
+  bookingId: string | null;
+  sheetNo: number;
+  status: CostSheetStatus;
+  areaSqft: number;
+  baseRate: number;
+  tdsPct: number;
+  tdsThreshold: number;
+  validUntil: string | null;
+  notes: string;
+  createdAt: string;
+  issuedAt: string | null;
+  unitCode?: string;
+  projectName?: string;
+  customerName?: string;
+  lines: ApiCostSheetLine[];
+  totals?: ApiCostSheetTotals;
+}
+
+export async function apiGetCostSheets(): Promise<ApiCostSheet[]> {
+  const res = await request<{ costSheets: ApiCostSheet[] }>('/api/cost-sheets');
+  return res.costSheets;
+}
+
+export async function apiGetCostSheet(id: string): Promise<ApiCostSheet> {
+  const res = await request<{ costSheet: ApiCostSheet }>(`/api/cost-sheets/${id}`);
+  return res.costSheet;
+}
+
+export async function apiCreateCostSheet(input: {
+  unitId?: string; leadId?: string; areaSqft?: number; baseRate?: number;
+  tdsPct?: number; tdsThreshold?: number; validUntil?: string; notes?: string;
+  lines?: Array<Pick<ApiCostSheetLine, 'section' | 'label' | 'basis' | 'rate' | 'gstPct'> & { quantity?: number }>;
+}): Promise<ApiCostSheet> {
+  const res = await request<{ costSheet: ApiCostSheet }>('/api/cost-sheets', {
+    method: 'POST', body: JSON.stringify(input),
+  });
+  return res.costSheet;
+}
+
+export async function apiSetCostSheetLines(
+  id: string,
+  lines: Array<Pick<ApiCostSheetLine, 'section' | 'label' | 'basis' | 'rate' | 'gstPct'> & { quantity?: number }>,
+): Promise<ApiCostSheet> {
+  const res = await request<{ costSheet: ApiCostSheet }>(`/api/cost-sheets/${id}/lines`, {
+    method: 'PUT', body: JSON.stringify({ lines }),
+  });
+  return res.costSheet;
+}
+
+export async function apiSetCostSheetStatus(
+  id: string, status: Exclude<CostSheetStatus, 'draft'>,
+): Promise<ApiCostSheet> {
+  const res = await request<{ costSheet: ApiCostSheet }>(`/api/cost-sheets/${id}`, {
+    method: 'PATCH', body: JSON.stringify({ status }),
+  });
+  return res.costSheet;
+}
+
+export async function apiDeleteCostSheet(id: string): Promise<void> {
+  await request<void>(`/api/cost-sheets/${id}`, { method: 'DELETE' });
+}
+
+/** The sheet as the buyer's bank reads it. Same Bearer-token reason as the
+ *  other PDF endpoints: it has to be fetched, not linked. */
+export async function apiCostSheetPdf(id: string): Promise<{ url: string; filename: string }> {
+  const res = await fetch(`${getApiUrl()}/api/cost-sheets/${id}/pdf`, {
+    headers: { ...(getApiToken() ? { Authorization: `Bearer ${getApiToken()}` } : {}) },
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Could not render the cost sheet (${res.status})`);
+  }
+  const match = /filename="([^"]+)"/i.exec(res.headers.get('Content-Disposition') ?? '');
+  return { url: URL.createObjectURL(await res.blob()), filename: match?.[1] ?? 'cost-sheet.pdf' };
+}
+
+// ── RERA & escrow (migration 042) ────────────────────────────────────────────
+//
+// The seventy per cent designated-account obligation, made countable. This
+// MEASURES; it does not move money and posts no journals — `inAccount` is only
+// as good as the bank transactions that have been entered, which is why a
+// project whose designated account was never reconciled shows its whole
+// obligation as a shortfall.
+
+export interface ApiReraRegistration {
+  id: string;
+  projectId: string;
+  projectName: string;
+  registrationNo?: string;
+  registeredOn?: string | null;
+  validUntil?: string | null;
+  escrowPct: number;
+  designatedBankAccountId?: string;
+  designatedAccountName?: string;
+  designatedBankName?: string;
+  status: string;
+}
+
+export interface ApiReraPosition {
+  projectId: string;
+  projectName: string;
+  registrationNo?: string;
+  escrowPct: number;
+  collected: number;
+  required: number;
+  inAccount: number;
+  shortfall: number;
+  hasDesignatedAccount: boolean;
+}
+
+export async function apiGetReraRegistrations(): Promise<ApiReraRegistration[]> {
+  const res = await request<{ registrations: ApiReraRegistration[] }>('/api/rera/registrations');
+  return res.registrations;
+}
+
+export async function apiGetReraPosition(): Promise<ApiReraPosition[]> {
+  const res = await request<{ position: ApiReraPosition[] }>('/api/rera/position');
+  return res.position;
+}
+
+export async function apiRegisterProjectRera(input: {
+  projectId: string; registeredOn?: string; validUntil?: string;
+  escrowPct?: number; designatedBankAccountId?: string;
+}): Promise<{ id: string; projectId: string; escrowPct: number }> {
+  const res = await request<{ registration: { id: string; projectId: string; escrowPct: number } }>(
+    '/api/rera/registrations', { method: 'POST', body: JSON.stringify(input) });
+  return res.registration;
+}
+
+/** Idempotent by construction — one allocation per payment, enforced by a
+ *  unique index. Pressing it twice must not double the obligation. */
+export async function apiAllocateEscrow(projectId?: string): Promise<number> {
+  const res = await request<{ allocated: number }>('/api/rera/allocate', {
+    method: 'POST', body: JSON.stringify(projectId ? { projectId } : {}),
+  });
+  return res.allocated;
+}
+
+// ── E-invoicing / IRN (server/src/einvoice.ts, migration 058) ────────────────
+
+export interface ApiEinvoice {
+  id: string;
+  invoiceId: string;
+  docType: 'INV' | 'CRN' | 'DBN';
+  docNo: string;
+  issueDate: string;
+  financialYear: string;
+  supplierGstin: string;
+  buyerGstin: string;
+  taxableValue: number;
+  totalValue: number;
+  irn: string | null;
+  status: 'prepared' | 'registered' | 'cancelled' | 'rejected';
+  ackNo: string | null;
+  ackDate: string | null;
+  signedQr: string | null;
+  cancelReason: string | null;
+  cancelledAt: string | null;
+  rejectReason: string | null;
+  /** Whether the portal's 24-hour cancellation window is still open. */
+  cancellable: boolean;
+}
+
+export interface ApiEinvoicePreview {
+  invoiceId: string;
+  /** Whether this workspace is above the turnover threshold at all. */
+  enabled: boolean;
+  eligible: boolean;
+  reasons: string[];
+  irn: string | null;
+  financialYear: string;
+}
+
+export async function apiGetEinvoices(): Promise<ApiEinvoice[]> {
+  return (await request<{ einvoices: ApiEinvoice[] }>('/api/einvoices')).einvoices;
+}
+
+/** Read-only: why an invoice can or cannot be registered. */
+export async function apiEinvoicePreview(invoiceId: string): Promise<ApiEinvoicePreview> {
+  return request<ApiEinvoicePreview>(`/api/invoices/${invoiceId}/einvoice/preview`);
+}
+
+/** Builds and stores the INV-01 payload. Does NOT contact the portal. */
+export async function apiPrepareEinvoice(
+  invoiceId: string, docType: 'INV' | 'CRN' | 'DBN' = 'INV',
+): Promise<ApiEinvoice> {
+  const res = await request<{ einvoice: ApiEinvoice }>(`/api/invoices/${invoiceId}/einvoice`, {
+    method: 'POST', body: JSON.stringify({ docType }),
+  });
+  return res.einvoice;
+}
+
+/** Record what the IRP returned. The IRN is checked against the derived one. */
+export async function apiRegisterEinvoice(
+  id: string, input: { irn: string; ackNo: string; ackDate: string; signedQr?: string },
+): Promise<ApiEinvoice> {
+  const res = await request<{ einvoice: ApiEinvoice }>(`/api/einvoices/${id}/register`, {
+    method: 'POST', body: JSON.stringify(input),
+  });
+  return res.einvoice;
+}
+
+export async function apiCancelEinvoice(id: string, reason: string): Promise<ApiEinvoice> {
+  const res = await request<{ einvoice: ApiEinvoice }>(`/api/einvoices/${id}/cancel`, {
+    method: 'POST', body: JSON.stringify({ reason }),
+  });
+  return res.einvoice;
+}
+
+/** The INV-01 file to upload to the IRP. Bearer token, so it is fetched. */
+export async function apiEinvoiceJson(id: string): Promise<{ url: string; filename: string }> {
+  const res = await fetch(`${getApiUrl()}/api/einvoices/${id}/json`, {
+    headers: { ...(getApiToken() ? { Authorization: `Bearer ${getApiToken()}` } : {}) },
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Could not download the e-invoice (${res.status})`);
+  }
+  const m = /filename="([^"]+)"/i.exec(res.headers.get('Content-Disposition') ?? '');
+  return { url: URL.createObjectURL(await res.blob()), filename: m?.[1] ?? 'einvoice.json' };
+}
+
+export interface ApiEinvoiceCandidate {
+  id: string;
+  invoiceNo: string;
+  issueDate: string;
+  customerName: string;
+  customerGstin: string;
+  taxableValue: number;
+  totalValue: number;
+}
+
+/** Taxed B2B invoices with no live registration yet. */
+export async function apiEligibleForEinvoice(): Promise<ApiEinvoiceCandidate[]> {
+  return (await request<{ invoices: ApiEinvoiceCandidate[] }>('/api/einvoices/eligible')).invoices;
+}
+
+// ── The workspace editing itself (server/src/routes/workspaceRoutes.ts) ──────
+
+export interface ApiWorkspace {
+  id: string; name: string; company: string; slug: string;
+  email: string; phone: string; address: string; rera: string;
+  /** The original free-text field. Kept in step with `gstin` on save. */
+  gst: string;
+  /** What GST returns and e-invoicing actually read. */
+  gstin: string;
+  stateCode: string; city: string; pincode: string;
+  einvoicingEnabled: boolean;
+  currency: string; country: string; plan: string; status: string;
+}
+
+export async function apiGetWorkspace(): Promise<ApiWorkspace> {
+  return (await request<{ workspace: ApiWorkspace }>('/api/workspace')).workspace;
+}
+
+export async function apiUpdateWorkspace(patch: {
+  company?: string; name?: string; email?: string; phone?: string;
+  address?: string; rera?: string; gstin?: string; stateCode?: string;
+  city?: string; pincode?: string; einvoicingEnabled?: boolean;
+}): Promise<ApiWorkspace> {
+  const res = await request<{ workspace: ApiWorkspace }>('/api/workspace', {
+    method: 'PATCH', body: JSON.stringify(patch),
+  });
+  return res.workspace;
+}
+
+// ── Sign-in sessions and derived attendance (migration 060) ─────────────────
+
+export interface ApiUserSession {
+  id: string;
+  userId: string;
+  userName: string;
+  loginAt: string;
+  logoutAt: string | null;
+  expiresAt: string;
+  endedBy: 'open' | 'logout' | 'logout_all' | 'revoked' | 'expired';
+  ip: string;
+  userAgent: string;
+  /** Usable minutes, capped at the token's expiry when never signed out. */
+  minutes: number;
+}
+
+export interface ApiDerivedDay {
+  employeeId: string;
+  employeeName: string;
+  userId: string;
+  date: string;
+  firstLogin: string;
+  lastLogout: string;
+  sessions: number;
+  minutes: number;
+  willCreate: boolean;
+  /** Why not, when willCreate is false. */
+  reason: string;
+}
+
+/** Sign-in history. `mine` needs no permission; anything wider needs view_hr. */
+export async function apiGetSessions(
+  params: { from?: string; to?: string; userId?: string; mine?: boolean } = {},
+): Promise<ApiUserSession[]> {
+  const q = new URLSearchParams();
+  if (params.from) q.set('from', params.from);
+  if (params.to) q.set('to', params.to);
+  if (params.userId) q.set('userId', params.userId);
+  if (params.mine) q.set('mine', 'true');
+  const s = q.toString();
+  return (await request<{ sessions: ApiUserSession[] }>(`/api/sessions${s ? `?${s}` : ''}`)).sessions;
+}
+
+/** What derivation would write. Read-only. */
+export async function apiPreviewDerivedAttendance(
+  from: string, to: string,
+): Promise<ApiDerivedDay[]> {
+  return (await request<{ days: ApiDerivedDay[] }>(
+    `/api/sessions/attendance-preview?from=${from}&to=${to}`)).days;
+}
+
+/** Write the proposed rows. Needs manage_attendance. */
+export async function apiDeriveAttendance(
+  from: string, to: string,
+): Promise<{ created: number; skipped: number; days: ApiDerivedDay[] }> {
+  return request(`/api/sessions/derive-attendance`, {
+    method: 'POST', body: JSON.stringify({ from, to }),
+  });
+}
+
+// ── A person's own HR record (server/src/routes/hrRoutes.ts) ────────────────
+
+export interface ApiMyPayslip {
+  month: string;
+  processedAt: string | null;
+  name?: string;
+  gross?: number;
+  daysPresent?: number;
+  basis?: string;
+}
+
+export interface ApiMyHr {
+  employee: {
+    id: string; name: string; designation?: string; department?: string;
+    type: string; monthlySalary: number | null; dailyWage: number | null;
+    joinDate?: string; active: boolean;
+  } | null;
+  attendance: Array<{ id: string; date: string; checkIn: string; checkOut?: string; method: string }>;
+  leave: Array<{ id: string; type: string; from: string; to: string; days: number; reason: string; status: string }>;
+  payslips: ApiMyPayslip[];
+  /** Present when no employee record is linked to the signed-in account. */
+  note?: string;
+}
+
+/**
+ * The signed-in person's own HR record. Needs no HR permission — six of the ten
+ * roles hold none, and their own attendance and payslips were closed to them.
+ * Scoped by the session, so there is no id to tamper with.
+ */
+export async function apiGetMyHr(): Promise<ApiMyHr> {
+  return request<ApiMyHr>('/api/hr/me');
+}
+
+// ── Project-scoped HR (migrations 061 / 062) ────────────────────────────────
+
+export interface ApiHrScope {
+  /** True when this person's HR covers the whole workspace. */
+  companyWide: boolean;
+  projectIds: string[];
+  projects: Array<{ id: string; name: string; city: string; status: string }>;
+}
+
+/**
+ * Which sites this person's HR covers.
+ *
+ * The client cannot work this out for itself: being company-wide depends on a
+ * permission AND on whether any posting exists, so a screen that guessed would
+ * offer a project filter the server then rejects. Ask the server.
+ */
+export async function apiGetHrScope(): Promise<ApiHrScope> {
+  return request<ApiHrScope>('/api/hr/scope');
+}
+
+export interface ApiPosting {
+  id: string; userId: string; userName: string;
+  projectId: string; projectName: string; roleNote: string; createdAt: string;
+}
+
+/** Postings need manage_users, not an HR key — otherwise a site HR manager
+ *  could widen their own scope by posting themselves to another site. */
+export async function apiGetPostings(userId?: string): Promise<ApiPosting[]> {
+  const q = userId ? `?userId=${encodeURIComponent(userId)}` : '';
+  return (await request<{ postings: ApiPosting[] }>(`/api/hr/postings${q}`)).postings;
+}
+export async function apiCreatePosting(userId: string, projectId: string, roleNote?: string): Promise<{ id: string }> {
+  return (await request<{ posting: { id: string } }>('/api/hr/postings', {
+    method: 'POST', body: JSON.stringify({ userId, projectId, roleNote }),
+  })).posting;
+}
+export async function apiDeletePosting(userId: string, projectId: string): Promise<void> {
+  await request<void>(`/api/hr/postings/${userId}/${projectId}`, { method: 'DELETE' });
+}
+
+// ── The permission matrix (server/src/routes/usersRoutes.ts) ────────────────
+
+export interface ApiPermissionMatrix {
+  permissions: Array<{ key: string; description: string }>;
+  roles: Array<{ id: string; name: string; isSystem: boolean; keys: string[] }>;
+}
+
+/**
+ * Every role and what it actually grants, read from role_permissions.
+ *
+ * The Settings screen used to hold this as a hardcoded table of eighteen rows
+ * and four role columns, written when the product had four roles. It is now
+ * eleven roles and around eighty keys, so the table had quietly become
+ * fiction — which matters, because it is what an administrator checks before
+ * deciding a role is safe to hand somebody.
+ */
+export async function apiGetPermissionMatrix(): Promise<ApiPermissionMatrix> {
+  return request<ApiPermissionMatrix>('/api/permission-matrix');
+}
+
+export interface ApiAdvance {
+  id: string; employeeId: string; amount: number; recovered: number;
+  outstanding: number; perMonth: number; reason: string; issuedOn: string;
+}
+
+export async function apiGetAdvances(params: { employeeId?: string; open?: boolean } = {}): Promise<ApiAdvance[]> {
+  const q = new URLSearchParams();
+  if (params.employeeId) q.set('employeeId', params.employeeId);
+  if (params.open) q.set('open', 'true');
+  const s = q.toString();
+  return (await request<{ advances: ApiAdvance[] }>(`/api/hr/advances${s ? `?${s}` : ''}`)).advances;
+}
+export async function apiCreateAdvance(input: {
+  employeeId: string; amount: number; perMonth?: number; reason?: string; issuedOn?: string;
+}): Promise<ApiAdvance> {
+  return (await request<{ advance: ApiAdvance }>('/api/hr/advances', {
+    method: 'POST', body: JSON.stringify(input),
+  })).advance;
+}
+
+/** One person's line on a payroll run — gross, every deduction, and net. */
+export interface ApiPayrollLine {
+  employeeId: string; name: string; designation: string; empType: string;
+  projectId: string | null; basis: string;
+  daysPresent: number; overtimeHours: number;
+  basic: number; overtimePay: number; gross: number;
+  pfEmployee: number; esiEmployee: number; professionalTax: number;
+  advanceRecovery: number; unpaidLeaveDeduction: number; deductions: number;
+  net: number;
+  pfEmployer: number; esiEmployer: number; employerCost: number;
+}
+
+export interface ApiPayrollPreview {
+  month: string;
+  projectId: string | null;
+  workingDays: number;
+  items: ApiPayrollLine[];
+  totals: { gross: number; deductions: number; net: number; employerCost: number; headcount: number };
+  saved: boolean;
+  payrollRun?: ApiPayrollRun;
+}
+
+/**
+ * Build a month's payroll from the record: attendance, overtime, approved
+ * unpaid leave, outstanding advances and the statutory rates in force for
+ * that month.
+ *
+ * PREVIEWS by default. Preparing payroll is the moment somebody checks the
+ * numbers, and a call that wrote on sight would make "let me look at March"
+ * an act with consequences. Pass save to store the draft.
+ */
+export async function apiPreparePayroll(input: {
+  month: string; projectId?: string | null; workingDays?: number; save?: boolean;
+}): Promise<ApiPayrollPreview> {
+  return request<ApiPayrollPreview>('/api/hr/payroll/prepare', {
+    method: 'POST', body: JSON.stringify(input),
+  });
 }

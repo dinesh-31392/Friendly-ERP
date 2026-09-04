@@ -1,6 +1,7 @@
 import type { PoolClient } from 'pg';
 import { resolveGateway, sendWhatsAppMessage } from './evolution.js';
 import { platformPool, withTenantContext } from './db.js';
+import { startLeaderInterval } from './scheduler.js';
 
 /**
  * WhatsApp auto-reply (027).
@@ -205,10 +206,16 @@ export async function drainOutbox(db: PoolClient, limit = 5): Promise<{ sent: nu
  * which is worse than not sending at all, because the customer has moved on.
  * A queue with a time promise needs something that ticks.
  *
- * This is an in-process interval, not a cron: single Node process, no extra
- * infrastructure. It walks tenants that actually have due rows (via the
- * platform pool, which is BYPASSRLS) and drains each under its own tenant
- * context, so RLS still applies to every statement the drain runs.
+ * An interval rather than a cron — single Node process, no extra
+ * infrastructure — but held under a cluster-wide advisory lock, so only ONE
+ * instance drains at a time. The `running` flag it used to rely on guards a
+ * tick against itself and nothing else; two instances, which is what a rolling
+ * deploy produces for thirty seconds, both claimed the same rows and sent the
+ * greeting twice. A duplicate WhatsApp to a lead gets a sender number reported.
+ *
+ * It walks tenants that actually have due rows (via the platform pool, which is
+ * BYPASSRLS) and drains each under its own tenant context, so RLS still applies
+ * to every statement the drain runs.
  *
  * Set WHATSAPP_WORKER=off to disable — the page-triggered drains still work.
  */
@@ -245,8 +252,8 @@ export function startOutboxWorker(log?: { info: (o: unknown, m?: string) => void
     }
   };
 
-  const timer = setInterval(tick, everyMs);
-  // Never hold the process open on shutdown.
-  timer.unref?.();
-  return timer;
+  // The lock, not the flag, is what makes this safe on more than one instance.
+  // `running` stays as a cheap local short-circuit so a slow gateway does not
+  // stack round trips to the lock.
+  return startLeaderInterval(tick, { key: 'whatsapp-outbox', everyMs, log });
 }

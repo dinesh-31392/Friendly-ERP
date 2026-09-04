@@ -4,6 +4,7 @@ import { Building2, Mail, Lock, ArrowRight, Home, Handshake } from 'lucide-react
 import { portalLogin, portalLoginApi, findTenantBySlug } from '../services/portalService';
 import { isApiEnabled } from '../services/apiClient';
 import toast from 'react-hot-toast';
+import { BRAND, portalHost } from '../config/brand';
 
 export default function PortalLogin() {
   const navigate = useNavigate();
@@ -14,7 +15,8 @@ export default function PortalLogin() {
   // visitor arrives via the builder's subdomain / branded link
   const tenant = useMemo(() => (builderSlug ? findTenantBySlug(builderSlug) : undefined), [builderSlug]);
   const brandColor = tenant?.primaryColor || '#6366f1';
-  const brandName = tenant?.name || 'Friendly ERP';
+  // The workspace's own name, falling back to the product's when unset.
+  const brandName = tenant?.name || BRAND.name;
 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -103,7 +105,7 @@ export default function PortalLogin() {
 
         {tenant && (
           <p className="text-center text-[11px] text-zinc-400 mt-5">
-            Powered by Friendly ERP · {tenant.slug}.friendlyerp.app
+            Powered by {BRAND.name} · {portalHost(tenant.slug)}
           </p>
         )}
       </div>

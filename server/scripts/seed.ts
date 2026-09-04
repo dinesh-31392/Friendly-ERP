@@ -45,7 +45,10 @@ const PERMISSIONS = [
   'view_procurement', 'manage_procurement', 'approve_purchase_orders',
   // ERP: HR & workforce ('manage_attendance' lets field staff run the daily
   // register without payroll/leave authority)
-  'view_hr', 'manage_hr', 'manage_attendance',
+  // 'manage_hr_all' is the company-wide key. Without it an HR manager posted
+  // to a site (user_projects, migration 061) sees only that site's crew —
+  // which is the point. A manager with no posting is company-wide anyway.
+  'view_hr', 'manage_hr', 'manage_attendance', 'manage_hr_all',
   // ERP: ledger, RA billing, quotations, configurable approvals
   'view_accounts', 'manage_accounts', 'approve_vendor_bills', 'signoff_ra_bills',
   'create_quotations', 'approve_discounts', 'manage_approval_rules',
@@ -60,12 +63,35 @@ const PERMISSIONS = [
 ];
 
 /**
+ * What a builder_admin does NOT get, despite otherwise holding the catalog.
+ *
+ * PLATFORM KEYS ARE NOT A WORKSPACE'S TO HOLD. view_platform and manage_branch
+ * gate the platform console — onboarding builders, suspending workspaces,
+ * branch administration — which belongs to super_admin and tech_team in the
+ * platform tenant. Granting the whole catalog minus two workflow keys handed
+ * every builder_admin in every workspace both of them.
+ *
+ * It did not escalate: the SPA keeps its own permission map that omits them,
+ * and no server route gates on either. Both of those are accidents. The moment
+ * anyone writes has_permission('view_platform') server-side, or moves the SPA
+ * onto the server's permission list — which is the obviously correct
+ * direction — every builder_admin walks into the platform console.
+ *
+ * approve_reminders and manage_team are the original two: workflow keys a
+ * workspace owner deliberately delegates rather than holds.
+ */
+export const BUILDER_ADMIN_EXCLUDES = [
+  'view_platform', 'manage_branch',
+  'approve_reminders', 'manage_team',
+];
+
+/**
  * System role → permission map. Not seeded against any tenant here (there is no
  * demo tenant any more); kept as the canonical definition for tenant
  * provisioning to apply when a builder workspace is created.
  */
 export const ROLE_PERMS: Record<string, string[]> = {
-  builder_admin: PERMISSIONS.filter(p => !['approve_reminders', 'manage_team'].includes(p)),
+  builder_admin: PERMISSIONS.filter(p => !BUILDER_ADMIN_EXCLUDES.includes(p)),
   sales_manager: [
     'view_dashboard', 'view_leads', 'manage_leads', 'assign_leads', 'add_notes', 'manage_team',
     'view_reports', 'view_inventory', 'view_projects', 'view_sales_performance', 'view_finance',
@@ -146,17 +172,31 @@ export const ROLE_PERMS: Record<string, string[]> = {
  *
  * Each stage carries BOTH `key` and `id` on purpose: the trigger matches on
  * `key` (`definition->'stages' @> [{"key": ...}]`) while the SPA's StageDef
- * reads `id`. Mirrors LEAD_STAGES in src/types/index.ts — keep them in step.
+ * reads `id`.
+ *
+ * MUST MATCH DEFAULT_PIPELINE in src/routes/tenantRoutes.ts. It did not: this
+ * file wrote `visit_scheduled` and the provisioning endpoint wrote
+ * `site_visit`, so the two ways of creating a workspace produced two different
+ * pipelines. Anything in the SPA that hardcoded one spelling then did nothing
+ * for workspaces made the other way — the Calendar's site-visit list came back
+ * empty, the "schedule a visit" button wrote a stage the database refused, and
+ * the lead score fell through to a flat default that ranked a lead which had
+ * been to site BELOW one that had merely been qualified.
+ *
+ * Aligned on `site_visit`, because that is what the provisioning endpoint
+ * writes and therefore what every workspace created through the API already
+ * has stored. Changing those rows would be a data migration; changing this
+ * constant is not.
  */
 const DEFAULT_PIPELINE = {
   stages: [
-    { key: 'new',             label: 'New',             color: 'bg-blue-500',    core: true },
-    { key: 'contacted',       label: 'Contacted',       color: 'bg-purple-500',  core: false },
-    { key: 'qualified',       label: 'Qualified',       color: 'bg-indigo-500',  core: false },
-    { key: 'visit_scheduled', label: 'Visit Scheduled', color: 'bg-amber-500',   core: false },
-    { key: 'negotiation',     label: 'Negotiation',     color: 'bg-orange-500',  core: false },
-    { key: 'booked',          label: 'Booked',          color: 'bg-emerald-500', core: true },
-    { key: 'lost',            label: 'Lost',            color: 'bg-red-400',     core: true },
+    { key: 'new',         label: 'New',         color: 'bg-blue-500',    core: true },
+    { key: 'contacted',   label: 'Contacted',   color: 'bg-indigo-500',  core: true },
+    { key: 'qualified',   label: 'Qualified',   color: 'bg-violet-500',  core: true },
+    { key: 'site_visit',  label: 'Site Visit',  color: 'bg-amber-500',   core: true },
+    { key: 'negotiation', label: 'Negotiation', color: 'bg-orange-500',  core: true },
+    { key: 'booked',      label: 'Booked',      color: 'bg-emerald-500', core: true },
+    { key: 'lost',        label: 'Lost',        color: 'bg-red-400',     core: true },
   ].map(s => ({ ...s, id: s.key })),
 };
 

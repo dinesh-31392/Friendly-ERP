@@ -1,6 +1,8 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
+import multipart from '@fastify/multipart';
+import { installMetrics } from './metrics.js';
 import rateLimit from '@fastify/rate-limit';
 import { randomUUID } from 'node:crypto';
 import { env } from './env.js';
@@ -14,6 +16,19 @@ import { projectsRoutes } from './routes/projectsRoutes.js';
 import { inventoryRoutes } from './routes/inventoryRoutes.js';
 import { bookingsRoutes } from './routes/bookingsRoutes.js';
 import { documentsRoutes } from './routes/documentsRoutes.js';
+import { costSheetRoutes } from './routes/costSheetRoutes.js';
+import { cancellationRoutes } from './routes/cancellationRoutes.js';
+import { brokerPayoutRoutes } from './routes/brokerPayoutRoutes.js';
+import { possessionRoutes } from './routes/possessionRoutes.js';
+import { privacyRoutes } from './routes/privacyRoutes.js';
+import { exportRoutes } from './routes/exportRoutes.js';
+import { gatewayRoutes } from './routes/gatewayRoutes.js';
+import { leadSourceRoutes } from './routes/leadSourceRoutes.js';
+import { gstRoutes } from './routes/gstRoutes.js';
+import { telephonyRoutes } from './routes/telephonyRoutes.js';
+import { einvoiceRoutes } from './routes/einvoiceRoutes.js';
+import { workspaceRoutes } from './routes/workspaceRoutes.js';
+import { sessionRoutes } from './routes/sessionRoutes.js';
 import { campaignsRoutes } from './routes/campaignsRoutes.js';
 import { quotationsRoutes } from './routes/quotationsRoutes.js';
 import { serviceRoutes } from './routes/serviceRoutes.js';
@@ -60,6 +75,25 @@ const app = Fastify({ logger: true, trustProxy: 1 });
 // Security headers on every API response (nosniff, frame-deny, HSTS, no-referrer).
 // CSP is left to nginx, which serves the HTML the browser actually renders.
 await app.register(helmet, { contentSecurityPolicy: false });
+
+// Attached BEFORE the routes so its hooks see every request, including the
+// ones that never reach a handler. Called directly rather than registered:
+// see installMetrics for why a plugin context would have observed nothing.
+await installMetrics(app);
+
+/**
+ * Multipart, for the document upload route.
+ *
+ * `attachFieldsToBody` is deliberately OFF: it buffers the whole file into
+ * memory before a handler sees it, which turns a 25 MB upload into 25 MB of
+ * heap per concurrent request. The route consumes `req.file()` as a stream and
+ * writes it to disk as it arrives, so the process holds a chunk, not a file.
+ *
+ * The size ceiling is set per-request by the route (MAX_UPLOAD_BYTES) so the
+ * transport aborts an oversized body mid-flight instead of accepting it and
+ * rejecting it afterwards.
+ */
+await app.register(multipart);
 
 /**
  * Rate limiting, keyed by WHO rather than by where they are sitting.
@@ -160,6 +194,19 @@ await app.register(projectsRoutes);
 await app.register(inventoryRoutes);
 await app.register(bookingsRoutes);
 await app.register(documentsRoutes);
+await app.register(costSheetRoutes);
+await app.register(cancellationRoutes);
+await app.register(brokerPayoutRoutes);
+await app.register(possessionRoutes);
+await app.register(privacyRoutes);
+await app.register(exportRoutes);
+await app.register(gatewayRoutes);
+await app.register(leadSourceRoutes);
+await app.register(gstRoutes);
+await app.register(telephonyRoutes);
+await app.register(einvoiceRoutes);
+await app.register(workspaceRoutes);
+await app.register(sessionRoutes);
 await app.register(campaignsRoutes);
 await app.register(quotationsRoutes);
 await app.register(serviceRoutes);

@@ -27,6 +27,14 @@ export function mapEmployee(r: ApiEmployee, tenantId: string): Employee {
     monthlySalary: r.monthlySalary ?? undefined, dailyWage: r.dailyWage ?? undefined,
     joinDate: day(r.joinDate), active: r.active, userId: r.userId || undefined,
     createdAt: new Date().toISOString(),
+    // Carried through, not dropped: without it the screen cannot tell a salary
+    // it may not see from one that was never set.
+    payHidden: r.payHidden,
+    // The statutory half, so the edit drawer prefills from the list the page
+    // already fetched rather than re-reading each person one at a time.
+    uan: r.uan, esicNumber: r.esicNumber, pan: r.pan, aadhaarLast4: r.aadhaarLast4,
+    bankAccount: r.bankAccount, bankIfsc: r.bankIfsc,
+    pfOpted: r.pfOpted, ptMonthly: r.ptMonthly ?? undefined,
   };
 }
 
@@ -34,6 +42,7 @@ export function mapAttendance(r: ApiAttendance, tenantId: string): AttendanceRec
   return {
     id: r.id, tenantId, employeeId: r.employeeId, date: day(r.date),
     checkIn: r.checkIn, checkOut: r.checkOut || undefined,
+    overtimeHours: r.overtimeHours ?? 0,
     projectId: r.projectId || undefined, lat: r.lat ?? undefined, lng: r.lng ?? undefined,
     method: (r.method as AttendanceRecord['method']) || 'manual',
     createdAt: new Date().toISOString(),
@@ -47,6 +56,7 @@ export function mapLeave(r: ApiLeaveRequest, tenantId: string): LeaveRequest {
     status: r.status as LeaveRequest['status'],
     decidedBy: r.decidedBy || undefined, decidedAt: r.decidedAt || undefined,
     createdAt: new Date().toISOString(),
+    reasonHidden: r.reasonHidden,
   };
 }
 
@@ -56,6 +66,10 @@ export function mapPayrollRun(r: ApiPayrollRun, tenantId: string): PayrollRun {
     items: (r.items as PayrollItem[]) || [],
     processedBy: r.processedBy || undefined, processedAt: r.processedAt || undefined,
     createdAt: new Date().toISOString(),
+    itemsHidden: r.itemsHidden,
+    // Falls back to the array length so the demo path, which has no flags,
+    // keeps counting the way it always did.
+    itemCount: r.itemCount ?? ((r.items as PayrollItem[]) || []).length,
   };
 }
 

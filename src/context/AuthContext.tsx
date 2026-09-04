@@ -3,6 +3,8 @@ import type { User, Tenant } from '../types';
 import * as authService from '../services/authService';
 import { isApiEnabled, apiLogin, apiVerifyLoginCode, isMfaChallenge, clearApiToken, apiLogout, getStoredApiSession } from '../services/apiClient';
 import { hydrateLedger } from '../services/accountsService';
+import { syncPipelineFromServer } from '../services/metaService';
+import { syncApprovalRules } from '../services/approvalService';
 import { initializeDatabase } from '../services/db';
 import { ensureBranchMigration } from '../services/branchService';
 import { isTrialExpired } from '../services/planService';
@@ -64,9 +66,41 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // the synchronous finance statements (trial balance / P&L / fund flow, on
   // Accounts, Billing, Dashboard, Reports) fold over server-authoritative data.
   // Runs on login and on refresh-restored sessions. No-op in demo mode.
+  //
+  // Only for roles that hold view_accounts. This fired for EVERY sign-in, so a
+  // telecaller, a site engineer or an HR manager each opened their session with
+  // a request the server was always going to refuse — swallowed by the catch,
+  // visible only as a 403 in the console of a working app. Asking first is both
+  // honest and two round-trips cheaper on every one of those logins.
   useEffect(() => {
     if (!isApiEnabled() || !tenant?.id) return;
+    if (!user || !authService.hasPermission(user, 'view_accounts')) return;
     hydrateLedger(tenant.id).catch(() => { /* pages fall back to whatever's cached */ });
+  }, [tenant?.id, user]);
+
+  // The tenant's own lead pipeline. Every screen that draws a stage — the
+  // kanban columns, the stage filter, the dashboard's pipeline summary — read
+  // a hardcoded default until this ran, so a workspace using any pipeline but
+  // that default had leads sitting in stages the UI did not render.
+  //
+  // Here rather than on the Leads page because Dashboard and Reports read the
+  // same stages, and because /api/meta has no permission gate: it is UI
+  // metadata every role needs.
+  useEffect(() => {
+    if (!isApiEnabled() || !tenant?.id) return;
+    syncPipelineFromServer(tenant.id).catch(() => { /* keep the cached pipeline */ });
+  }, [tenant?.id]);
+
+  // Approval thresholds. needsApproval() is called inline while rows render, so
+  // it has to answer synchronously from a cache — this is what makes that cache
+  // the SERVER's answer rather than a browser-local invention. Until it existed,
+  // a threshold set in Settings never left the device that set it.
+  //
+  // A failure keeps whatever is cached rather than reverting to defaults:
+  // silently loosening an approval gate is the worst available failure mode.
+  useEffect(() => {
+    if (!isApiEnabled() || !tenant?.id) return;
+    syncApprovalRules(tenant.id).catch(() => { /* keep the cached thresholds */ });
   }, [tenant?.id]);
 
   const verifyLoginCode = useCallback(async (challengeId: string, code: string) => {

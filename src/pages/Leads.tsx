@@ -1,26 +1,31 @@
 import { useState, useMemo, useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
-  Search, Plus, Filter, Phone, MessageCircle, Mail, MapPin,
+  Search, Plus, Phone, MessageCircle, Mail, MapPin,
   Clock, X, Building2, Tag,
   Download, Upload, Trash2, Users, GitMerge, AlertTriangle, Gauge, Calendar, Sparkles, BookOpenCheck,
-  List, LayoutGrid, Kanban, UserCheck
+  List, LayoutGrid, Kanban, UserCheck, PhoneCall, Loader2,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { getByTenant, logAudit } from '../services/db';
 import type { Lead, LeadStage, Note, Activity, Priority, User as UserType } from '../types';
 import { leadScoreBand, explainLeadScore, LOST_REASONS } from '../types';
-import { getLeadStages, getLeadSources, getConfigurations, type StageDef } from '../services/metaService';
+import { getLeadStages, getLeadSources, getConfigurations, getVisitStageId, type StageDef } from '../services/metaService';
 import { formatCurrency, currencySymbol, localeFor, receivedOn, sinceArrival, todayISO } from '../utils/format';
-import { telHref, mailtoHref } from '../utils/contact';
+import { telHref, mailtoHref, whatsappHref, maskPhone } from '../utils/contact';
 import { whatsappSend } from '../services/whatsappService';
 import { toCsv } from '../utils/csv';
 import { inviteCustomer, portalPath } from '../services/portalService';
-import { isApiEnabled, apiGetLeads, apiCreateTask, apiReassignLeadActivities } from '../services/apiClient';
+import {
+  isApiEnabled, apiGetLeads, apiCreateTask, apiReassignLeadActivities,
+  apiCallLead, apiGetTelephonySettings,
+} from '../services/apiClient';
 import { logLeadActivity, addLeadNote } from '../services/leadActivityWrites';
 import { createLead, patchLead, deleteLead as removeLead, patchLeads, deleteLeads } from '../services/leadWrites';
 import { useTenantUsers } from '../hooks/useTenantUsers';
 import DateRangeFilter from '../components/DateRangeFilter';
+import CallHistory from '../components/CallHistory';
+import StageFilter from '../components/StageFilter';
 import LeadWhatsAppChat from '../components/LeadWhatsAppChat';
 import { type DateRange, ALL_RANGE, resolveRange, inRange, rangeSlug, rangeLabel } from '../utils/dateRange';
 import { qualificationBadge } from '../services/chatbotService';
@@ -29,9 +34,13 @@ import {
   CALL_STATUSES, type CallingMode, type CallStatus,
 } from '../services/callService';
 import toast from 'react-hot-toast';
+import { BRAND } from '../config/brand';
 
-function normalizePhone(phone: string): string {
-  return phone.replace(/\D/g, '').slice(-10);
+function normalizePhone(phone: string | undefined | null): string {
+  // Fed from CSV import rows as well as from leads, and a spreadsheet column
+  // can simply be blank — so this answers "no digits" rather than throwing and
+  // taking the import preview down with it.
+  return (phone ?? '').replace(/D/g, '').slice(-10);
 }
 
 
@@ -116,6 +125,16 @@ const defaultStageBorders: Record<string, string> = {
 const priorityColors: Record<string, string> = {
   hot: 'bg-red-100 text-red-700', warm: 'bg-amber-100 text-amber-700', cold: 'bg-zinc-100 text-zinc-500',
 };
+
+/** Priority as a 6px dot. A whole column spent on one of three words is the
+ *  kind of thing that forces a table to scroll sideways. */
+const priorityDot: Record<string, string> = {
+  hot: 'bg-red-500', warm: 'bg-amber-400', cold: 'bg-zinc-300',
+};
+
+/** "Priya Sharma" → "PS". Two letters carry the owner without a name column. */
+const initials = (name: string) =>
+  name.split(' ').filter(Boolean).map(n => n[0]).slice(0, 2).join('').toUpperCase() || '?';
 
 // Literal class map (Tailwind only generates classes it can see in source) —
 // pairs every palette color from the stage editor with its border variant
@@ -265,15 +284,92 @@ export default function Leads() {
 
   const refresh = () => setRefreshKey(k => k + 1);
 
+  // Click-to-call. Offered only when the workspace has telephony configured
+  // AND the deployment has credentials — otherwise the button would be a
+  // promise the server answers with a 503.
+  const [telephonyOn, setTelephonyOn] = useState(false);
+  const [callingLeadId, setCallingLeadId] = useState<string | null>(null);
+  useEffect(() => {
+    if (!isApiEnabled()) return;
+    let cancelled = false;
+    apiGetTelephonySettings()
+      .then(r => { if (!cancelled) setTelephonyOn(r.settings.active && r.credentialsConfigured); })
+      .catch(() => { /* not configured is the normal case, not an error */ });
+    return () => { cancelled = true; };
+  }, [tenantId]);
+
+  const placeCall = async (lead: Lead) => {
+    setCallingLeadId(lead.id);
+    try {
+      const call = await apiCallLead(lead.id);
+      // Said plainly, because it is the reason to use this rather than the
+      // dialler: the customer never sees the rep's number.
+      toast.success(`Your phone is ringing. ${lead.name} will see ${call.callerId}.`);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Could not place the call');
+    } finally {
+      setCallingLeadId(null);
+    }
+  };
+
   // Resolve the active date window once per change; leads are filtered by their
   // received date (createdAt).
   const resolvedRange = useMemo(() => resolveRange(dateRange), [dateRange]);
-  const filteredLeads = leads.filter(l => {
-    if (filterStage !== 'all' && l.stage !== filterStage) return false;
+
+  // Everything except the stage filter. The counts in the stage dropdown are
+  // taken from here on purpose: a count that also applied the stage filter
+  // would read 0 for every stage except the selected one, which tells you
+  // nothing about where to go next.
+  const searchMatched = useMemo(() => leads.filter(l => {
     if (search && !l.name.toLowerCase().includes(search.toLowerCase()) && !l.phone.includes(search)) return false;
     if (!inRange(l.enquiredAt ?? l.createdAt, resolvedRange)) return false;
     return true;
-  });
+  }), [leads, search, resolvedRange]);
+
+  const stageCounts = useMemo(() => {
+    const m: Record<string, number> = {};
+    searchMatched.forEach(l => { m[l.stage] = (m[l.stage] ?? 0) + 1; });
+    return m;
+  }, [searchMatched]);
+
+  /**
+   * Per-row derived values for the list view, computed once per lead set.
+   *
+   * explainLeadScore builds a factors array on every call, and the list renders
+   * every filtered lead — so calling it inline meant rebuilding that array for
+   * the whole table on each keystroke in the search box. There is no pagination
+   * here, so "the whole table" is however many leads the workspace has.
+   */
+  const rowMeta = useMemo(() => {
+    const m = new Map<string, { score: number; band: { label: string; color: string } }>();
+    searchMatched.forEach(l => {
+      const { score } = explainLeadScore(l, leadStages);
+      m.set(l.id, { score, band: leadScoreBand(score) });
+    });
+    return m;
+  }, [searchMatched, leadStages]);
+
+  /**
+   * Column visibility for the list.
+   *
+   * Tailwind breakpoints measure the VIEWPORT, but the detail drawer takes
+   * 440px out of the list's width without changing it. On a 1440px screen the
+   * table therefore still rendered all eight columns inside 743px, and
+   * table-fixed scaled them down until the Lead column had thirteen pixels —
+   * the same single-letter name that mobile had, arriving a different way.
+   *
+   * So the three lowest-priority columns also stand down while a lead is open.
+   * What remains is what the list is FOR when you are working one lead beside
+   * it: when it arrived, who it is, how to reach them, where they are.
+   */
+  const colValue = selectedLead ? 'hidden' : 'hidden sm:table-cell';
+  const colOwner = selectedLead ? 'hidden' : 'hidden lg:table-cell';
+  const colActions = selectedLead ? 'hidden' : 'hidden xl:table-cell';
+  const stageTotal = searchMatched.length;
+
+  const filteredLeads = filterStage === 'all'
+    ? searchMatched
+    : searchMatched.filter(l => l.stage === filterStage);
 
   const groupedLeads = leadStages.reduce((acc, stage) => {
     acc[stage.id] = filteredLeads.filter(l => l.stage === stage.id);
@@ -313,7 +409,7 @@ export default function Leads() {
   const duplicateGroups = useMemo(() => {
     const groups: Record<string, Lead[]> = {};
     leads.forEach(l => {
-      const key = normalizePhone(l.phone) || l.email.toLowerCase();
+      const key = normalizePhone(l.phone) || (l.email ?? '').toLowerCase();
       if (!key) return;
       groups[key] = groups[key] || [];
       groups[key].push(l);
@@ -433,7 +529,7 @@ export default function Leads() {
     const inPhone = normalizePhone(phone);
     const existing = leads.find(l =>
       (inPhone && normalizePhone(l.phone) === inPhone) ||
-      (email && l.email.toLowerCase() === email.toLowerCase())
+      (email && (l.email ?? '').toLowerCase() === email.toLowerCase())
     );
     if (existing) {
       if (!confirm(`A lead with this phone/email already exists ("${existing.name}"). Create anyway?`)) return;
@@ -600,7 +696,7 @@ export default function Leads() {
       return;
     }
     const existingPhones = new Set(allLeadsData.map(l => normalizePhone(l.phone)).filter(Boolean));
-    const existingEmails = new Set(allLeadsData.map(l => l.email.toLowerCase()).filter(Boolean));
+    const existingEmails = new Set(allLeadsData.map(l => (l.email ?? '').toLowerCase()).filter(Boolean));
     const valid: ImportRow[] = [];
     let invalid = 0, dupes = 0;
     rows.slice(1).forEach(r => {
@@ -667,27 +763,21 @@ export default function Leads() {
             />
           </div>
           
-          {/* Stage Filters - Scrollable on mobile */}
-          <div className="flex items-center gap-2 bg-white border border-zinc-200 rounded-xl p-1 overflow-x-auto lg:overflow-visible scrollbar-hide">
-            <button
-              onClick={() => setFilterStage('all')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all whitespace-nowrap ${filterStage === 'all' ? 'bg-indigo-600 text-white shadow-sm' : 'text-zinc-500 hover:text-zinc-700'}`}
-            >All</button>
-            {leadStages.map(s => (
-              <button
-                key={s.id}
-                onClick={() => setFilterStage(s.id)}
-                className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all whitespace-nowrap ${filterStage === s.id ? 'bg-indigo-600 text-white shadow-sm' : 'text-zinc-500 hover:text-zinc-700'}`}
-              >{s.label}</button>
-            ))}
-          </div>
-          
           {/* Action Buttons - Stack on mobile, row on desktop */}
           <div className="flex items-center gap-2 flex-wrap lg:flex-nowrap">
             <DateRangeFilter value={dateRange} onChange={setDateRange} align="right" />
-            <button className="flex items-center gap-2 px-3 py-2.5 bg-white border border-zinc-200 rounded-xl text-sm font-medium text-zinc-600 hover:bg-zinc-50 transition-colors">
-              <Filter className="h-4 w-4" /> Filters
-            </button>
+            {/* The stage list lives here now, not in a row of tabs. Counts come
+                from the leads already loaded — before the stage filter is
+                applied, so each number is the size of the stage rather than the
+                size of what is currently on screen. */}
+            <StageFilter
+              stages={leadStages}
+              value={filterStage}
+              onChange={s => setFilterStage(s as LeadStage | 'all')}
+              counts={stageCounts}
+              total={stageTotal}
+              align="right"
+            />
             <button
               onClick={() => {
                 const rows = [['Name', 'Phone', 'Email', 'Project', 'Stage', 'Budget', 'Source', 'Assigned To', 'Received At']];
@@ -858,12 +948,12 @@ export default function Leads() {
                             <div className="flex items-center gap-2.5">
                               <div className={`h-8 w-8 rounded-lg ${lead.priority === 'hot' ? 'bg-gradient-to-br from-red-100 to-orange-100' : 'bg-zinc-100'} flex items-center justify-center`}>
                                 <span className={`text-xs font-bold ${lead.priority === 'hot' ? 'text-orange-600' : 'text-zinc-500'}`}>
-                                  {lead.name.split(' ').map(n => n[0]).join('')}
+                                  {(lead.name ?? '?').split(' ').filter(Boolean).map(n => n[0]).join('') || '?'}
                                 </span>
                               </div>
                               <div>
                                 <p className="text-sm font-semibold text-zinc-900 group-hover/card:text-indigo-700 transition-colors">{lead.name}</p>
-                                <p className="text-[11px] text-zinc-500">{lead.phone}</p>
+                                <p className="text-[11px] text-zinc-500 tabular-nums">{maskPhone(lead.phone)}</p>
                               </div>
                             </div>
                             <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full capitalize ${priorityColors[lead.priority]}`}>{lead.priority}</span>
@@ -911,11 +1001,51 @@ export default function Leads() {
         {/* List View */}
         {viewMode === 'list' && (
           <div className="bg-white rounded-2xl border border-zinc-200/60 overflow-hidden">
-            <div className="overflow-x-auto">
-              <table className="w-full">
+            {/*
+              NO HORIZONTAL SCROLL, BY CONSTRUCTION.
+
+              The previous table gave each fact its own column — nine of them —
+              and needed a 1080px minimum, so on anything short of a wide
+              desktop you dragged sideways to read a lead. Two changes fix that
+              without losing anything:
+
+                1. Facts that belong together share a cell. Source, project and
+                   configuration sit under the name; the score and priority ride
+                   ON the name rather than beside it. Fewer columns, more facts.
+                2. What is left DEGRADES BY WIDTH instead of overflowing. Each
+                   column has the breakpoint below which it is the least useful
+                   thing on screen, and it hides there — never at the cost of
+                   Received, Lead or Stage, which stay at every size.
+
+              The row also gained things it never showed: the explainable lead
+              score, how long since anyone touched the lead, note count, the
+              configuration, a duplicate marker, and one-tap call / WhatsApp /
+              email that do not open the drawer.
+            */}
+            <div>
+              {/*
+                EQUAL COLUMNS, BY LETTING THE TABLE DO IT.
+
+                No column declares a width. Under `table-fixed` every auto
+                column takes an equal share of what is left after the checkbox,
+                so the seven data columns are always the same width as each
+                other and the gutters between headers are identical.
+
+                Declaring widths is what produced the uneven rhythm this
+                replaces: Lead had been the only auto column and swallowed all
+                the slack (404px for 180px of name), and hand-tuning the rest
+                traded one lopsided column for a row of slightly-off ones.
+
+                It also re-divides on its own. When Value, Owner and Actions
+                stand down at narrow widths or beside the open drawer, the
+                remaining columns simply widen into an equal share — no
+                breakpoint-specific widths to keep in step, and nothing that can
+                overflow the card the way a pinned 224px did at 375px.
+              */}
+              <table className="w-full table-fixed">
                 <thead>
                   <tr className="bg-zinc-50/50 border-b border-zinc-100">
-                    <th className="px-4 py-3 w-10">
+                    <th className="px-3 py-3 w-9">
                       <input
                         type="checkbox"
                         checked={allVisibleSelected}
@@ -924,24 +1054,33 @@ export default function Leads() {
                         title="Select all visible leads"
                       />
                     </th>
-                    <th className="text-left px-5 py-3 text-xs font-semibold text-zinc-500 uppercase tracking-wider">Name</th>
-                    <th className="text-left px-5 py-3 text-xs font-semibold text-zinc-500 uppercase tracking-wider">Contact</th>
-                    <th className="text-left px-5 py-3 text-xs font-semibold text-zinc-500 uppercase tracking-wider">Project</th>
-                    <th className="text-right px-5 py-3 text-xs font-semibold text-zinc-500 uppercase tracking-wider">Budget</th>
-                    <th className="text-center px-5 py-3 text-xs font-semibold text-zinc-500 uppercase tracking-wider">Stage</th>
-                    <th className="text-center px-5 py-3 text-xs font-semibold text-zinc-500 uppercase tracking-wider">Priority</th>
-                    <th className="text-left px-5 py-3 text-xs font-semibold text-zinc-500 uppercase tracking-wider">Assigned To</th>
-                    <th className="text-left px-5 py-3 text-xs font-semibold text-zinc-500 uppercase tracking-wider whitespace-nowrap">Received</th>
+                    {/* Below sm there is not enough width for both a date and a
+                        readable name — the name lost, truncating to a single
+                        letter. Received hides here and its AGE moves into the
+                        Lead cell, so the fact survives even when the column
+                        cannot. */}
+                    <th className="text-left px-3 py-3 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider hidden sm:table-cell">Received</th>
+                    <th className="text-left px-3 py-3 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">Lead</th>
+                    <th className="text-left px-3 py-3 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider hidden md:table-cell">Contact</th>
+                    <th className="text-left px-3 py-3 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">Stage</th>
+                    <th className={`text-right px-3 py-3 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider ${colValue}`}>Value</th>
+                    <th className={`text-left px-3 py-3 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider ${colOwner}`} title="Assigned to">Owner</th>
+                    <th className={`text-right px-3 py-3 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider ${colActions}`}>Actions</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredLeads.map(lead => (
+                  {filteredLeads.map(lead => {
+                    const stage = leadStages.find(s => s.id === lead.stage);
+                    const { score, band } = rowMeta.get(lead.id) ?? { score: 0, band: leadScoreBand(0) };
+                    const noteCount = (notesMap.get(lead.id) || []).length;
+                    const owner = getUserName(lead.assignedTo);
+                    return (
                     <tr
                       key={lead.id}
                       onClick={() => setSelectedLead(lead)}
-                      className={`border-b border-zinc-50 hover:bg-zinc-50/50 transition-colors cursor-pointer ${selectedIds.has(lead.id) ? 'bg-indigo-50/40' : ''}`}
+                      className={`group border-b border-zinc-50 hover:bg-zinc-50/50 transition-colors cursor-pointer ${selectedIds.has(lead.id) ? 'bg-indigo-50/40' : ''}`}
                     >
-                      <td className="px-4 py-3.5" onClick={e => e.stopPropagation()}>
+                      <td className="px-3 py-3" onClick={e => e.stopPropagation()}>
                         <input
                           type="checkbox"
                           checked={selectedIds.has(lead.id)}
@@ -949,42 +1088,134 @@ export default function Leads() {
                           className="h-4 w-4 rounded border-zinc-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
                         />
                       </td>
-                      <td className="px-5 py-3.5">
-                        <p className="text-sm font-semibold text-zinc-900">{lead.name}</p>
-                        <p className="text-[11px] text-zinc-500 mt-0.5">Source: {lead.source}</p>
+
+                      {/* Received — date on top, age underneath. */}
+                      <td className="px-3 py-3 align-top hidden sm:table-cell">
+                        <p className="text-[13px] text-zinc-700 leading-tight">{receivedOn(lead.enquiredAt ?? lead.createdAt, appLocale).split(',')[0]}</p>
+                        <p className="text-[11px] text-zinc-400 leading-tight mt-0.5">{sinceArrival(lead.enquiredAt ?? lead.createdAt)}</p>
                       </td>
-                      <td className="px-5 py-3.5" onClick={e => e.stopPropagation()}>
-                        <a href={telHref(lead.phone)} className="text-sm text-zinc-700 hover:text-indigo-600 hover:underline block">{lead.phone}</a>
-                        {lead.email && <a href={mailtoHref(lead.email)} className="text-xs text-zinc-500 mt-0.5 hover:text-indigo-600 hover:underline block">{lead.email}</a>}
+
+                      {/* Lead — name with its priority and score, then where it
+                          came from and what it wants. Four facts, one column. */}
+                      <td className="px-3 py-3 align-top min-w-0">
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span
+                            className={`h-1.5 w-1.5 rounded-full shrink-0 ${priorityDot[lead.priority] ?? 'bg-zinc-300'}`}
+                            title={`${lead.priority} priority`}
+                          />
+                          <span className="text-[13px] font-semibold text-zinc-900 truncate" title={lead.name}>{lead.name}</span>
+                          <span
+                            className={`shrink-0 text-[10px] font-bold px-1.5 py-0.5 rounded ${band.color}`}
+                            title={`Lead score ${score}/100 — ${band.label}. Open the lead for the breakdown.`}
+                          >{score}</span>
+                          {lead.duplicateOf && (
+                            <span className="shrink-0" title="Created despite matching an existing lead">
+                              <GitMerge className="h-3 w-3 text-amber-500" />
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-[11px] text-zinc-400 leading-tight mt-0.5 truncate">
+                          {/* The age rejoins the row here on mobile, where the
+                              Received column is gone. */}
+                          <span className="sm:hidden">{sinceArrival(lead.enquiredAt ?? lead.createdAt)} · </span>
+                          {[lead.source, lead.project, lead.configuration].filter(Boolean).join(' · ')}
+                        </p>
                       </td>
-                      <td className="px-5 py-3.5 text-sm text-zinc-700">{lead.project}</td>
-                      <td className="px-5 py-3.5 text-sm font-semibold text-zinc-900 text-right">
-                        {formatCurrency(lead.budget, currency)}
+
+                      {/* Contact — both channels, both tappable, neither
+                          opening the drawer. */}
+                      <td className="px-3 py-3 align-top hidden md:table-cell" onClick={e => e.stopPropagation()}>
+                        {/* Masked here, full in the drawer. The href keeps the
+                            real number so click-to-call still works. */}
+                        <a href={telHref(lead.phone)} title="Open the lead to see the full number"
+                           className="text-[13px] text-zinc-700 hover:text-indigo-600 hover:underline block truncate tabular-nums">{maskPhone(lead.phone)}</a>
+                        {lead.email ? (
+                          <a href={mailtoHref(lead.email)} title={lead.email} className="text-[11px] text-zinc-400 hover:text-indigo-600 hover:underline block truncate mt-0.5">{lead.email}</a>
+                        ) : (
+                          <span className="text-[11px] text-zinc-300 block mt-0.5">no email</span>
+                        )}
                       </td>
-                      <td className="px-5 py-3.5 text-center">
-                        <span className={`inline-block text-[11px] font-semibold px-2.5 py-1 rounded-full ${stageBorder(lead.stage)} bg-opacity-10 text-opacity-100 ${
-                          lead.stage === 'new' ? 'bg-blue-500 text-blue-700 border border-blue-200' :
-                          lead.stage === 'booked' ? 'bg-emerald-500 text-emerald-700 border border-emerald-200' :
-                          lead.stage === 'lost' ? 'bg-red-500 text-red-700 border border-red-200' :
-                          'bg-zinc-500 text-zinc-700 border border-zinc-200'
-                        }`}>
-                          {leadStages.find(s => s.id === lead.stage)?.label || lead.stage}
+
+                      {/* Stage — and how long since anybody touched it, which is
+                          the number that decides whether to call today. */}
+                      <td className="px-3 py-3 align-top">
+                        <span className={`inline-block text-[11px] font-semibold px-2 py-0.5 rounded-full max-w-full truncate ${
+                          lead.stage === 'new' ? 'bg-blue-50 text-blue-700 border border-blue-200' :
+                          lead.stage === 'booked' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' :
+                          lead.stage === 'lost' ? 'bg-red-50 text-red-700 border border-red-200' :
+                          'bg-zinc-100 text-zinc-600 border border-zinc-200'
+                        }`} title={lead.stage === 'lost' && lead.lostReason ? `Lost: ${lead.lostReason}` : undefined}>
+                          {stage?.label || lead.stage}
                         </span>
+                        <p className="text-[11px] text-zinc-400 leading-tight mt-1 truncate">
+                          {lead.lastContact ? `touched ${sinceArrival(lead.lastContact)}` : 'never contacted'}
+                        </p>
                       </td>
-                      <td className="px-5 py-3.5 text-center">
-                        <span className={`inline-block text-[10px] font-semibold px-2 py-0.5 rounded-full capitalize ${priorityColors[lead.priority]}`}>
-                          {lead.priority}
-                        </span>
+
+                      {/* Value — budget, with the note count under it so a lead
+                          with history is visible without opening it. */}
+                      <td className={`px-3 py-3 align-top text-right ${colValue}`}>
+                        <p className="text-[13px] font-semibold text-zinc-900">{formatCurrency(lead.budget, currency)}</p>
+                        {noteCount > 0 && (
+                          <p className="text-[11px] text-zinc-400 leading-tight mt-0.5">{noteCount} note{noteCount === 1 ? '' : 's'}</p>
+                        )}
                       </td>
-                      <td className="px-5 py-3.5 text-sm text-zinc-700">
-                        {getUserName(lead.assignedTo)}
+
+                      {/* Owner — initials. The full name is one hover away and
+                          costs a fifth of the width. */}
+                      <td className={`px-3 py-3 align-top ${colOwner}`}>
+                        <span
+                          className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-indigo-50 text-[10px] font-bold text-indigo-700"
+                          title={owner}
+                        >{initials(owner)}</span>
                       </td>
-                      <td className="px-5 py-3.5 whitespace-nowrap">
-                        <p className="text-sm text-zinc-700">{receivedOn(lead.enquiredAt ?? lead.createdAt, appLocale)}</p>
-                        <p className="text-[11px] text-zinc-400">{sinceArrival(lead.enquiredAt ?? lead.createdAt)}</p>
+
+                      {/* Actions — reach the lead without opening it first. */}
+                      <td className={`px-3 py-3 align-top ${colActions}`} onClick={e => e.stopPropagation()}>
+                        {/* Always visible, not hover-only. A hidden control is
+                            one nobody knows exists — and on a touch screen
+                            there is no hover at all, so these were unreachable
+                            on every tablet the sales team actually uses. */}
+                        <div className="flex items-center justify-end gap-0.5">
+                          {/* Two ways to call, and they are not the same act.
+                              The link opens the dialler on this device and puts
+                              the rep's own number on the customer's phone
+                              permanently. Click-to-call goes through the
+                              workspace line, rings the rep first, and logs the
+                              call — so it is offered whenever telephony is on,
+                              and the plain dialler remains as the fallback. */}
+                          {telephonyOn && (
+                            <button
+                              onClick={() => placeCall(lead)}
+                              disabled={callingLeadId === lead.id}
+                              title={`Call ${maskPhone(lead.phone)} from the workspace number`}
+                              aria-label={`Call ${lead.name} from the workspace number`}
+                              className="p-1.5 rounded-lg text-zinc-400 hover:text-indigo-600 hover:bg-indigo-50 disabled:opacity-50">
+                              {callingLeadId === lead.id
+                                ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                : <PhoneCall className="h-3.5 w-3.5" />}
+                            </button>
+                          )}
+                          <a href={telHref(lead.phone)} title={`Call ${maskPhone(lead.phone)} from this device`} aria-label={`Call ${lead.name}`}
+                             className="p-1.5 rounded-lg text-zinc-400 hover:text-indigo-600 hover:bg-indigo-50">
+                            <Phone className="h-3.5 w-3.5" />
+                          </a>
+                          <a href={whatsappHref(lead.phone)} target="_blank" rel="noopener noreferrer"
+                             title="WhatsApp" aria-label={`WhatsApp ${lead.name}`}
+                             className="p-1.5 rounded-lg text-zinc-400 hover:text-emerald-600 hover:bg-emerald-50">
+                            <MessageCircle className="h-3.5 w-3.5" />
+                          </a>
+                          {lead.email && (
+                            <a href={mailtoHref(lead.email)} title={`Email ${lead.email}`} aria-label={`Email ${lead.name}`}
+                               className="p-1.5 rounded-lg text-zinc-400 hover:text-indigo-600 hover:bg-indigo-50">
+                              <Mail className="h-3.5 w-3.5" />
+                            </a>
+                          )}
+                        </div>
                       </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                   {filteredLeads.length === 0 && (
                     <tr>
                       <td colSpan={8} className="text-center py-12 text-zinc-400">
@@ -1019,12 +1250,18 @@ export default function Leads() {
                   <div className="flex items-center gap-3">
                     <div className={`h-10 w-10 rounded-xl ${lead.priority === 'hot' ? 'bg-gradient-to-br from-red-100 to-orange-100' : 'bg-zinc-100'} flex items-center justify-center shrink-0`}>
                       <span className={`text-sm font-bold ${lead.priority === 'hot' ? 'text-orange-600' : 'text-zinc-500'}`}>
-                        {lead.name.split(' ').map(n => n[0]).join('')}
+                        {(lead.name ?? '?').split(' ').filter(Boolean).map(n => n[0]).join('') || '?'}
                       </span>
                     </div>
-                    <div>
+                    <div className="min-w-0">
                       <p className="text-sm font-bold text-zinc-900 group-hover:text-indigo-700 transition-colors">{lead.name}</p>
-                      <p className="text-xs text-zinc-500 mt-0.5">{lead.phone}</p>
+                      <p className="text-xs text-zinc-500 mt-0.5 tabular-nums">{maskPhone(lead.phone)}</p>
+                      {/* The card is a whole button, so this cannot be a mailto
+                          link without nesting an anchor inside it. Shown as
+                          text; the detail panel has the clickable one. */}
+                      {lead.email && (
+                        <p className="text-[11px] text-zinc-400 mt-0.5 truncate" title={lead.email}>{lead.email}</p>
+                      )}
                     </div>
                   </div>
                   <span className={`mr-7 text-[10px] font-semibold px-2 py-0.5 rounded-full capitalize ${priorityColors[lead.priority]}`}>
@@ -1080,7 +1317,7 @@ export default function Leads() {
               <h3 className="font-semibold text-zinc-900 flex items-center gap-2">
                 <div className={`h-8 w-8 rounded-lg ${selectedLead.priority === 'hot' ? 'bg-gradient-to-br from-red-100 to-orange-100' : 'bg-zinc-100'} flex items-center justify-center`}>
                   <span className={`text-xs font-bold ${selectedLead.priority === 'hot' ? 'text-orange-600' : 'text-zinc-500'}`}>
-                    {selectedLead.name.split(' ').map(n => n[0]).join('')}
+                    {(selectedLead.name ?? '?').split(' ').filter(Boolean).map(n => n[0]).join('') || '?'}
                   </span>
                 </div>
                 <span className="truncate">{selectedLead.name}</span>
@@ -1149,7 +1386,7 @@ export default function Leads() {
 
             {/* Lead Score — explainable ("Lead Prophecy") */}
             {(() => {
-              const { score, factors, nextBestAction } = explainLeadScore(selectedLead);
+              const { score, factors, nextBestAction } = explainLeadScore(selectedLead, leadStages);
               const band = leadScoreBand(score);
               return (
                 <div className="bg-zinc-50 rounded-xl p-3">
@@ -1205,7 +1442,7 @@ export default function Leads() {
                   className="w-full text-sm font-semibold bg-white border border-zinc-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
                 >
                   {allUsers.filter(u => u.role !== 'super_admin' && u.active).map(u => (
-                    <option key={u.id} value={u.id}>{u.name} ({u.role.replace('_', ' ')})</option>
+                    <option key={u.id} value={u.id}>{u.name ?? 'Unnamed'} ({(u.role ?? '').replace('_', ' ') || 'no role'})</option>
                   ))}
                 </select>
               </div>
@@ -1245,9 +1482,12 @@ export default function Leads() {
                     ? <a href={mailtoHref(selectedLead.email)} className="hover:text-indigo-600 hover:underline">{selectedLead.email}</a>
                     : 'N/A'}
                 </div>
+                {/* The one place the number is shown in full. Every list view
+                    masks the last four digits (see maskPhone); opening a lead
+                    is the deliberate act that reveals it. */}
                 <div className="flex items-center gap-2 text-sm text-zinc-700">
                   <Phone className="h-4 w-4 text-zinc-400" />
-                  <a href={telHref(selectedLead.phone)} className="hover:text-indigo-600 hover:underline">{selectedLead.phone}</a>
+                  <a href={telHref(selectedLead.phone)} className="hover:text-indigo-600 hover:underline tabular-nums">{selectedLead.phone}</a>
                 </div>
                 <div className="flex items-center gap-2 text-sm text-zinc-700"><Building2 className="h-4 w-4 text-zinc-400" /> {selectedLead.project}</div>
                 <div className="flex items-center gap-2 text-sm text-zinc-700"><Tag className="h-4 w-4 text-zinc-400" /> {selectedLead.source}</div>
@@ -1385,7 +1625,7 @@ export default function Leads() {
 
                 <button
                   onClick={() => {
-                    const draft = `Hi ${selectedLead.name.split(' ')[0]}, this is ${user?.name || 'your advisor'} from ${tenant?.name || 'Friendly ERP'}. We loved hosting our buyers at ${selectedLead.project} recently! We've got a hot new matching ${selectedLead.configuration} unit within your ${formatCurrency(selectedLead.budget, currency)} budget limit. Would Saturday at 11am work for a call?`;
+                    const draft = `Hi ${selectedLead.name.split(' ')[0]}, this is ${user?.name || 'your advisor'} from ${tenant?.name || BRAND.name}. We loved hosting our buyers at ${selectedLead.project} recently! We've got a hot new matching ${selectedLead.configuration} unit within your ${formatCurrency(selectedLead.budget, currency)} budget limit. Would Saturday at 11am work for a call?`;
                     
                     // Add Note & Activity
                     void addLeadNote(selectedLead.id, `✨ AI Brand-Voice Draft generated: "${draft}"`);
@@ -1521,6 +1761,9 @@ export default function Leads() {
                 {leadActivities.length === 0 && <p className="text-xs text-zinc-400 text-center py-4">No activity recorded yet</p>}
               </div>
             </div>
+
+            {/* What the exchange observed, kept separate from what the rep wrote. */}
+            <CallHistory leadId={selectedLead.id} />
           </div>
         </div>
       </>
@@ -1548,7 +1791,14 @@ export default function Leads() {
                   dueDate: when.toISOString(),
                   priority: 'hot', status: 'pending', category: 'visit',
                 }).catch(() => toast.error('Could not add the visit to the calendar'));
-                handleStageChange(selectedLead.id, 'visit_scheduled');
+                // The tenant's OWN visit stage, not a hardcoded key: a
+                // workspace provisioned with 'site_visit' would have had this
+                // write rejected by validate_lead_stage. No visit stage at all
+                // means the lead simply stays where it is.
+                {
+                  const visitStage = getVisitStageId(tenantId);
+                  if (visitStage) handleStageChange(selectedLead.id, visitStage as typeof selectedLead.stage);
+                }
                 const label = when.toLocaleString('en-IN', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
                 void logLeadActivity({ leadId: selectedLead.id, type: 'visit', description: `Site visit scheduled for ${label}` });
                 audit('schedule_visit', selectedLead.id, `Scheduled site visit for ${selectedLead.name} on ${label}`);
@@ -1782,7 +2032,7 @@ export default function Leads() {
                     <label className="block text-xs font-semibold text-zinc-500 uppercase mb-1">Assign To</label>
                     <select name="assignedTo" defaultValue={userId} className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20">
                       {allUsers.filter(u => u.role !== 'super_admin' && u.active).map(u => (
-                        <option key={u.id} value={u.id}>{u.name} ({u.role.replace('_', ' ')})</option>
+                        <option key={u.id} value={u.id}>{u.name ?? 'Unnamed'} ({(u.role ?? '').replace('_', ' ') || 'no role'})</option>
                       ))}
                     </select>
                   </div>
@@ -1820,7 +2070,7 @@ export default function Leads() {
                     {group.map((lead, li) => (
                       <div key={lead.id} className="flex items-center gap-3 p-2.5 rounded-lg bg-zinc-50">
                         <div className="h-8 w-8 rounded-lg bg-white border border-zinc-200 flex items-center justify-center shrink-0">
-                          <span className="text-xs font-bold text-zinc-600">{lead.name.split(' ').map(n => n[0]).join('')}</span>
+                          <span className="text-xs font-bold text-zinc-600">{(lead.name ?? '?').split(' ').filter(Boolean).map(n => n[0]).join('') || '?'}</span>
                         </div>
                         <div className="flex-1 min-w-0">
                           <p className="text-sm font-semibold text-zinc-900">{lead.name} {li === 0 && <span className="text-[10px] text-indigo-500 font-normal bg-indigo-50 px-1.5 py-0.5 rounded">Primary</span>}</p>

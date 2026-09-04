@@ -276,13 +276,26 @@ on top (`approve_owner_payouts`).
 
 ## Step 9 — Backups (do not skip)
 
-Backups are **encrypted and automatic** — the `backup` service runs a daily
-AES-256 dump (`deploy/backup.sh`) with 14-day retention into the `backups`
-volume. It starts with the stack; just set `BACKUP_PASSPHRASE` in `.env` (store
-that passphrase somewhere OTHER than the server).
+Backups are **encrypted and automatic** — the `backup` service runs daily with
+14-day retention into the `backups` volume. It starts with the stack; just set
+`BACKUP_PASSPHRASE` in `.env` (store that passphrase somewhere OTHER than the
+server).
+
+**Two artefacts are written each night, and you need both.**
+
+| File | Holds |
+|---|---|
+| `friendly_crm-<stamp>.sql.gz.gpg` | the database |
+| `friendly_crm-files-<stamp>.tar.gz.gpg` | uploaded documents |
+
+The database stores a *storage key*, never the bytes of a file. Restoring the
+dump alone gives you a complete list of agreements, KYC scans and demand
+letters in which **every download 404s** — an archive that is lost but looks
+intact. Restore the pair, and restore matching timestamps: a database newer
+than the files references documents that were never archived.
 
 ```bash
-# Take a backup right now:
+# Take a backup right now (writes both artefacts):
 docker compose -f docker-compose.prod.yml exec backup /bin/sh /usr/local/bin/backup.sh
 
 # List them:
@@ -291,6 +304,12 @@ docker compose -f docker-compose.prod.yml exec backup ls -lh /backups
 # TEST YOUR RESTORE (do this before you need it — an untested backup is a guess):
 docker compose -f docker-compose.prod.yml exec backup \
   /bin/sh /usr/local/bin/restore.sh /backups/friendly_crm-YYYYMMDD-HHMMSS.sql.gz.gpg
+
+# The documents. The backup service mounts the volume READ-ONLY so it can never
+# alter what it archives, so a file restore needs its own writable mount:
+docker compose -f docker-compose.prod.yml run --rm \
+  -v friendly-crm_uploads:/data/uploads backup \
+  /bin/sh /usr/local/bin/restore.sh /backups/friendly_crm-files-YYYYMMDD-HHMMSS.tar.gz.gpg
 ```
 
 **Get the backups off the box.** A backup on the same VPS dies with the VPS.
@@ -299,6 +318,32 @@ Copy the `backups` volume to object storage or another host regularly, e.g.:
 ```bash
 0 4 * * * docker run --rm -v friendly-crm_backups:/b -v /opt/offsite:/o alpine \
   sh -c 'cp -u /b/*.gpg /o/'   # then rsync/aws s3 sync /opt/offsite elsewhere
+```
+
+### Check the box before you trust it
+
+`preflight` asserts the configuration the API is *actually running with*, not
+the one `.env` describes. It exists because every defect it looks for was
+found by hand in a deployment that looked correct: a variable filled in
+correctly and never passed to the container, or a library default that is
+right on a laptop and wrong on a VPS. None of them break the boot — the stack
+comes up healthy and the product is quietly missing pieces.
+
+```bash
+# Run it where the API runs — same env, same filesystem, same database:
+docker compose -f docker-compose.prod.yml run --rm \
+  -v friendly-crm_uploads:/data/uploads api node scripts/preflight.mjs
+```
+
+It exits non-zero on a **blocker** — something a customer meets on day one
+(no SMTP so nobody with MFA can sign in; an unwritable upload directory; a
+migration that never ran; a tenant table without forced RLS). Advisories are
+worth reading but are often deliberate.
+
+You can also point it at an `.env` file before you ship it:
+
+```bash
+cd server && node scripts/preflight.mjs ../deploy/.env
 ```
 
 A full `pg_dump` preserves the schema, RLS policies and every `tenant_id`, so

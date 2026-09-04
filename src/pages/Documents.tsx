@@ -1,8 +1,8 @@
-import { useState, useMemo, useEffect } from 'react';
-import { FileText, Search, Plus, Download, Eye, Trash2, Filter, Calendar, X, FolderOpen } from 'lucide-react';
+import { useState, useMemo, useEffect, useRef } from 'react';
+import { FileText, Search, Plus, Download, Eye, Trash2, Filter, Calendar, X, FolderOpen, Paperclip, Link2, Loader2 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { getByTenant } from '../services/db';
-import { isApiEnabled, apiGetDocuments } from '../services/apiClient';
+import { isApiEnabled, apiGetDocuments, apiUploadDocument, apiDownloadDocument } from '../services/apiClient';
 import { createDocument, deleteDocument } from '../services/documentWrites';
 import { localeFor } from '../utils/format';
 import type { Document } from '../types';
@@ -19,6 +19,16 @@ const statusColors: Record<string, string> = {
 
 const documentTypes = ['Agreement', 'Quotation', 'Payment Plan', 'Legal', 'Template', 'Brochure', 'Floor Plan', 'Other'];
 
+/** Matches what the server writes into `size`, so an uploaded file and a
+ *  locally-recorded one read the same way in the list. */
+function humanSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ['KB', 'MB', 'GB'];
+  let n = bytes / 1024, i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return `${n < 10 ? n.toFixed(1) : Math.round(n)} ${units[i]}`;
+}
+
 export default function Documents() {
   const { tenant, hasPermission } = useAuth();
   const tenantId = tenant?.id || '';
@@ -30,6 +40,10 @@ export default function Documents() {
   const [search, setSearch] = useState('');
   const [typeFilter, setTypeFilter] = useState<string>('all');
   const [showAdd, setShowAdd] = useState(false);
+  const [picked, setPicked] = useState<File | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
 
   // Feature flag: with an API URL configured, documents are read from the
   // Fastify backend (RLS-scoped). Falls back to localStorage on any API failure
@@ -70,23 +84,39 @@ export default function Documents() {
     const name = formData.get('name') as string;
     if (!name) { toast.error('Document name is required'); return; }
 
+    const type = (formData.get('type') as string) || 'Other';
+    const project = (formData.get('project') as string) || 'General';
+    const status = (formData.get('status') as string) || 'Draft';
+
+    setBusy(true);
     try {
-      await createDocument({
-        tenantId, name,
-        type: (formData.get('type') as string) || 'Other',
-        project: (formData.get('project') as string) || 'General',
-        date: new Date().toISOString(),
-        size: `${Math.floor(Math.random() * 500 + 50)} KB`,
-        status: (formData.get('status') as string) || 'Draft',
-        url: '#',
-      });
+      if (picked && isApiEnabled()) {
+        // The real path: the bytes go to the server, which owns the size and
+        // the date. Nothing about the file is invented here.
+        await apiUploadDocument(picked, { name, type, project, status, date: new Date().toISOString().slice(0, 10) });
+      } else {
+        if (picked) {
+          // Local mode has nowhere to put bytes. Say so rather than recording a
+          // row that claims to hold a file it does not.
+          toast('Saved as a register entry — file storage needs the API', { icon: 'ℹ️' });
+        }
+        await createDocument({
+          tenantId, name, type, project,
+          date: new Date().toISOString(),
+          size: picked ? humanSize(picked.size) : '—',
+          status, url: '#',
+        });
+      }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Could not add document');
       return;
+    } finally {
+      setBusy(false);
     }
     setShowAdd(false);
+    setPicked(null);
     refresh();
-    toast.success('Document added successfully');
+    toast.success(picked ? 'Document uploaded' : 'Document added');
   };
 
   const handleDelete = async (id: string) => {
@@ -102,12 +132,41 @@ export default function Documents() {
     toast.success('Document deleted');
   };
 
-  const handleDownload = (name: string) => {
-    toast.success(`Downloading ${name}...`);
-  };
-
-  const handleView = (name: string) => {
-    toast.success(`Opening ${name}`);
+  /**
+   * Pull the file down and hand it to the browser.
+   *
+   * The session is a Bearer token, so the URL cannot simply be navigated to —
+   * it has to be fetched with the header and turned into a blob. `inNewTab`
+   * previews; otherwise it saves.
+   *
+   * The object URL is revoked on a timer rather than immediately: revoking
+   * before the browser has finished acting on the anchor cancels the download
+   * in Chrome, and closes the preview tab in Firefox.
+   */
+  const openFile = async (doc: Document, inNewTab: boolean) => {
+    if (!doc.fileId) {
+      // A register entry that only points somewhere else. Honour the link if
+      // there is one and say so plainly if there is not.
+      if (doc.url && doc.url !== '#') { window.open(doc.url, '_blank', 'noopener,noreferrer'); return; }
+      toast.error('No file is attached to this document');
+      return;
+    }
+    setBusyId(doc.id);
+    try {
+      const { url, filename } = await apiDownloadDocument(doc.id);
+      if (inNewTab) {
+        window.open(url, '_blank', 'noopener,noreferrer');
+      } else {
+        const a = window.document.createElement('a');
+        a.href = url; a.download = filename;
+        window.document.body.appendChild(a); a.click(); a.remove();
+      }
+      window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not open the file');
+    } finally {
+      setBusyId(null);
+    }
   };
 
   return (
@@ -172,6 +231,12 @@ export default function Documents() {
                           <FileText className="h-4 w-4 text-indigo-500" />
                         </div>
                         <span className="text-sm font-medium text-zinc-900">{doc.name}</span>
+                        {/* A register entry and a stored file look identical in
+                            a list, and only one of them can actually be opened.
+                            Say which is which before the user finds out. */}
+                        {doc.fileId
+                          ? <Paperclip className="h-3.5 w-3.5 text-indigo-400 shrink-0" aria-label="File attached" />
+                          : <Link2 className="h-3.5 w-3.5 text-zinc-300 shrink-0" aria-label="Link only — no file stored" />}
                       </div>
                     </td>
                     <td className="px-4 py-3 text-sm text-zinc-600">{doc.type}</td>
@@ -187,8 +252,10 @@ export default function Documents() {
                     </td>
                     <td className="px-4 py-3 text-right">
                       <div className="flex items-center justify-end gap-1">
-                        <button onClick={() => handleView(doc.name)} className="p-1.5 rounded-lg hover:bg-zinc-100 text-zinc-400 hover:text-indigo-600 transition-colors" title="View"><Eye className="h-4 w-4" /></button>
-                        <button onClick={() => handleDownload(doc.name)} className="p-1.5 rounded-lg hover:bg-zinc-100 text-zinc-400 hover:text-indigo-600 transition-colors" title="Download"><Download className="h-4 w-4" /></button>
+                        <button onClick={() => openFile(doc, true)} disabled={busyId === doc.id} className="p-1.5 rounded-lg hover:bg-zinc-100 text-zinc-400 hover:text-indigo-600 transition-colors disabled:opacity-50" title="View">
+                          {busyId === doc.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Eye className="h-4 w-4" />}
+                        </button>
+                        <button onClick={() => openFile(doc, false)} disabled={busyId === doc.id} className="p-1.5 rounded-lg hover:bg-zinc-100 text-zinc-400 hover:text-indigo-600 transition-colors disabled:opacity-50" title="Download"><Download className="h-4 w-4" /></button>
                         {canManage && (
                           <button onClick={() => handleDelete(doc.id)} className="p-1.5 rounded-lg hover:bg-red-50 text-zinc-400 hover:text-red-500 transition-colors" title="Delete"><Trash2 className="h-4 w-4" /></button>
                         )}
@@ -234,14 +301,38 @@ export default function Documents() {
               </div>
               <div>
                 <label className="block text-xs font-semibold text-zinc-500 uppercase mb-1">File (optional)</label>
-                <div className="border-2 border-dashed border-zinc-200 rounded-xl p-6 text-center hover:border-indigo-300 transition-colors cursor-pointer">
-                  <FileText className="h-6 w-6 text-zinc-400 mx-auto mb-2" />
-                  <p className="text-xs text-zinc-500">Click to browse or drag & drop</p>
+                <input
+                  ref={fileInput} type="file" className="sr-only"
+                  onChange={e => setPicked(e.target.files?.[0] ?? null)}
+                />
+                <div
+                  role="button" tabIndex={0}
+                  onClick={() => fileInput.current?.click()}
+                  onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInput.current?.click(); } }}
+                  onDragOver={e => e.preventDefault()}
+                  onDrop={e => { e.preventDefault(); setPicked(e.dataTransfer.files?.[0] ?? null); }}
+                  className={`border-2 border-dashed rounded-xl p-6 text-center transition-colors cursor-pointer focus:outline-none focus:ring-2 focus:ring-indigo-500/30 ${picked ? 'border-indigo-300 bg-indigo-50/40' : 'border-zinc-200 hover:border-indigo-300'}`}
+                >
+                  {picked ? (
+                    <>
+                      <Paperclip className="h-6 w-6 text-indigo-500 mx-auto mb-2" />
+                      <p className="text-xs font-medium text-zinc-800 truncate">{picked.name}</p>
+                      <p className="text-[11px] text-zinc-500 mt-0.5">{humanSize(picked.size)} — click to replace</p>
+                    </>
+                  ) : (
+                    <>
+                      <FileText className="h-6 w-6 text-zinc-400 mx-auto mb-2" />
+                      <p className="text-xs text-zinc-500">Click to browse or drag &amp; drop</p>
+                      <p className="text-[11px] text-zinc-400 mt-0.5">Up to 25 MB</p>
+                    </>
+                  )}
                 </div>
               </div>
               <div className="flex gap-3 pt-3">
-                <button type="button" onClick={() => setShowAdd(false)} className="flex-1 px-4 py-2.5 border border-zinc-200 rounded-xl text-sm font-medium text-zinc-600 hover:bg-zinc-50">Cancel</button>
-                <button type="submit" className="flex-1 px-4 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 shadow-sm">Upload</button>
+                <button type="button" onClick={() => { setShowAdd(false); setPicked(null); }} className="flex-1 px-4 py-2.5 border border-zinc-200 rounded-xl text-sm font-medium text-zinc-600 hover:bg-zinc-50">Cancel</button>
+                <button type="submit" disabled={busy} className="flex-1 px-4 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 shadow-sm disabled:opacity-60 flex items-center justify-center gap-2">
+                  {busy && <Loader2 className="h-4 w-4 animate-spin" />}{busy ? 'Uploading…' : 'Upload'}
+                </button>
               </div>
             </form>
           </div>

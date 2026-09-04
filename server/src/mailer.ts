@@ -1,6 +1,16 @@
 import nodemailer, { type Transporter } from 'nodemailer';
 
 /**
+ * The product name in outbound mail.
+ *
+ * The SPA reads this from src/config/brand.ts; the server cannot import
+ * across that boundary, so it takes the same override env var and falls
+ * back to the same default. A re-brand sets BRAND_NAME here and
+ * VITE_BRAND_NAME there.
+ */
+const BRAND_NAME = process.env.BRAND_NAME || 'Friendly ERP';
+
+/**
  * Outbound email. Currently one message type: the login code.
  *
  * SMTP rather than a provider SDK, because that keeps the choice in the .env
@@ -93,7 +103,7 @@ export async function sendLoginCode(to: string, name: string, code: string, minu
   await t.sendMail({
     from,
     to,
-    subject: `${code} is your Friendly ERP sign-in code`,
+    subject: `${code} is your ${BRAND_NAME} sign-in code`,
     // The code is in the subject as well as the body: on a phone the
     // notification preview is often all someone needs to see.
     text:

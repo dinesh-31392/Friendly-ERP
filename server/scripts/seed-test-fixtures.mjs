@@ -47,6 +47,11 @@ if (!catalog.length) {
 
 const ROLES = {
   super_admin: catalog,
+  // Branch-scoped platform staff. Three keys only — its power comes from the
+  // platform routes, not from tenant permissions (migration 044). Needed here
+  // so verify-role-logins can sign in as the second platform role and check
+  // that support access is NOT customer-data access.
+  tech_team: ['view_dashboard', 'view_platform', 'manage_branch'],
   builder_admin: catalog.filter(k => !['approve_reminders', 'manage_team'].includes(k)),
   sales_executive: ['view_dashboard','view_leads','manage_own_leads','add_notes','view_inventory',
     'view_projects','view_messages','send_messages','view_documents','view_calendar',
@@ -98,6 +103,24 @@ async function tenant(slug, name) {
 }
 
 async function user(t, email, role, name) {
+  // One tenant per fixture address, enforced here rather than assumed.
+  //
+  // The upsert below is keyed on (tenant_id, email), so it is idempotent within
+  // a workspace but NOT across one being renamed. When this seeder's rival
+  // tenant slug changed from 'rival' to 'rivaltest', a long-lived test database
+  // kept both — two badmin@rival.test rows in two different tenants.
+  //
+  // The login route resolves an email without a tenant slug and refuses when it
+  // is ambiguous, which is correct behaviour and deliberately reports the same
+  // "Invalid email or password" as a wrong password. So the three isolation
+  // suites failed at "could not log in as rival tenant" with no hint that the
+  // cause was a stale row from an earlier schema.
+  //
+  // Deleting the strays makes a long-lived database self-heal instead of
+  // rotting silently. Safe here because this script seeds a TEST database and
+  // owns every address it writes.
+  await c.query('DELETE FROM users WHERE email = $1 AND tenant_id <> $2', [email, t.id]);
+
   // mfa_email_enabled = false: these accounts sign in programmatically, and a
   // second factor would make every suite measure the challenge flow instead of
   // what it is actually testing.
@@ -111,6 +134,7 @@ async function user(t, email, role, name) {
 
 const platform = await tenant('platform', 'Platform');
 await user(platform, 'admin@erptest.local',  'super_admin',     'Test Platform Admin');
+await user(platform, 'tech@erptest.local',   'tech_team',       'Test Branch Team');
 await user(platform, 'exec1@erptest.local',  'sales_executive', 'Test Executive One');
 await user(platform, 'exec2@erptest.local',  'sales_executive', 'Test Executive Two');
 await user(platform, 'acct@erptest.local',   'accountant',      'Test Accountant');
@@ -119,6 +143,11 @@ await user(platform, 'aud@erptest.local',    'auditor',         'Test Auditor');
 // The other side of every isolation assertion.
 const rival = await tenant('rivaltest', 'Rival Builders');
 await user(rival, 'admin@rivaltest.local', 'builder_admin', 'Rival Admin');
+// The isolation suites (accounts, land/BD, whatsapp) sign in as this address to
+// prove one workspace cannot read another's rows. It was never seeded — it had
+// simply been created by hand in a long-lived test database, so those three
+// suites passed locally and would fail on any fresh one, CI included.
+await user(rival, 'badmin@rival.test', 'builder_admin', 'Rival Builder Admin');
 
 const { rows: [n] } = await c.query('SELECT count(*)::int c FROM users WHERE email LIKE $1', ['%test.local']);
 console.log(`fixtures ready — 2 tenants, ${n.c} users, pipelines seeded`);

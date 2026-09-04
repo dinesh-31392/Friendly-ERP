@@ -36,6 +36,9 @@ export function signToken(
   // only "sign out everywhere", which is a blunt answer to a common request.
   // jsonwebtoken sets `iat` itself; both are read back in withTenantContext.
   return jwt.sign({ ...claims, jti: randomUUID() }, env.jwtSecret,
+    // PINNED. The issuer is signed into every live token and checked on every
+    // request, so changing it signs the whole estate out at once. It is a wire
+    // format, not a label anybody reads.
     { expiresIn, issuer: 'friendly-crm' });
 }
 

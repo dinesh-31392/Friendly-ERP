@@ -399,6 +399,9 @@ export interface Document {
   size: string;
   status: string;
   url: string;
+  /** Set when real bytes are stored with us, null when the row is only a link
+   *  to somewhere else. The two need different open/download behaviour. */
+  fileId?: string | null;
 }
 
 export interface Reminder {
@@ -726,6 +729,25 @@ export interface Employee {
   active: boolean;
   userId?: string;           // optional link to a login account
   createdAt: string;
+  /** The server withheld the pay figures from this reader (see maySeePay in
+   *  server/src/routes/hrRoutes.ts). Distinguishes "not disclosed to you" from
+   *  "no salary recorded" — both of which arrive as an absent number. */
+  payHidden?: boolean;
+
+  /** Statutory identity (migration 062). Without these a PF return cannot be
+   *  filed and a salary cannot be transferred — payroll would compute a
+   *  perfect net figure that nobody could actually pay. Behind the same gate
+   *  as pay, so they arrive empty for a reader who may not see salaries. */
+  uan?: string;
+  esicNumber?: string;
+  pan?: string;
+  /** Last four digits only, never the full Aadhaar number. */
+  aadhaarLast4?: string;
+  bankAccount?: string;
+  bankIfsc?: string;
+  pfOpted?: boolean;
+  /** Professional tax per month — a state slab, so recorded per person. */
+  ptMonthly?: number;
 }
 
 /** One row per employee per day. Check-in/out are timestamps; lat/lng is the
@@ -740,8 +762,14 @@ export interface AttendanceRecord {
   projectId?: string;
   lat?: number;
   lng?: number;
-  method: 'geo' | 'manual';
+  /** 'session' is derived from sign-in times rather than recorded by a person;
+   *  migration 060 widened the column's check constraint to admit it. */
+  method: 'geo' | 'manual' | 'session';
   createdAt: string;
+  /** Hours beyond the shift on this day. Payroll pays them at the statutory
+   *  multiple; the rate is not stored here because it belongs to the employee
+   *  and may change between the day worked and the day paid. */
+  overtimeHours?: number;
 }
 
 export type LeaveType = 'casual' | 'sick' | 'earned' | 'unpaid';
@@ -760,6 +788,9 @@ export interface LeaveRequest {
   decidedBy?: string;        // userId
   decidedAt?: string;
   createdAt: string;
+  /** A reason exists but was withheld — it is free text, and it is where a
+   *  medical condition gets written. The type and dates stay visible. */
+  reasonHidden?: boolean;
 }
 
 export interface PayrollItem {
@@ -782,6 +813,12 @@ export interface PayrollRun {
   processedBy?: string;
   processedAt?: string;
   createdAt: string;
+  /** `items` was emptied before it left the server. Without this flag a screen
+   *  cannot tell a withheld payroll from an empty one, and would total it to
+   *  zero — asserting a figure that is not true. */
+  itemsHidden?: boolean;
+  /** Headcount, which survives redaction: "48 people, figures not shown". */
+  itemCount?: number;
 }
 
 export type FilingFrequency = 'one_time' | 'monthly' | 'quarterly' | 'annual';
@@ -1450,13 +1487,41 @@ export interface ScoreFactor { label: string; points: number; detail: string }
  */
 export function explainLeadScore(lead: {
   stage: LeadStage; priority: Priority; budget: number; lastContact: string; source: string;
-}): { score: number; factors: ScoreFactor[]; nextBestAction: string } {
+}, pipeline?: { id: string }[]): { score: number; factors: ScoreFactor[]; nextBestAction: string } {
+  // A lead is a row from the API, not a value this module constructed, and a
+  // row may predate a column or arrive from a partial payload. The score runs
+  // inline while the list renders, so one absent `stage` took the whole Leads
+  // page down behind an error boundary rather than degrading one row.
+  const stage: LeadStage = lead.stage ?? 'new';
+  const source: string = lead.source ?? 'Unknown';
   const factors: ScoreFactor[] = [];
   const stageScores: Record<string, number> = {
     new: 5, contacted: 12, qualified: 20, visit_scheduled: 28, negotiation: 36, booked: 40, lost: 0,
   };
-  const stagePts = stageScores[lead.stage] ?? 18;
-  factors.push({ label: 'Pipeline stage', points: stagePts, detail: `At "${lead.stage.replace('_', ' ')}" — ${stagePts >= 28 ? 'deep in the funnel' : stagePts >= 12 ? 'progressing' : 'early stage'}` });
+  /**
+   * A stage this map has never heard of is scored by its POSITION in the
+   * tenant's own pipeline, not by a flat guess.
+   *
+   * The map is keyed on the DEFAULT pipeline, and stages are tenant data — the
+   * product's own provisioning code creates a pipeline using `site_visit`,
+   * which is not `visit_scheduled`. Every such lead fell through to the old
+   * flat fallback of 18 and therefore scored BELOW a merely `qualified` lead at
+   * 20: a lead that had already been to site ranked worse than one that had
+   * not. The score decides who a salesperson calls next, so the funnel was
+   * inverted at exactly the step that matters most.
+   *
+   * Position is scaled across the non-terminal stages, so the default pipeline
+   * reproduces its own tuned numbers and a custom one lands sensibly between
+   * them. `booked` and `lost` are core keys and never reach here.
+   */
+  const positional = (): number => {
+    const ids = (pipeline ?? []).map(s => s.id).filter(id => id !== 'booked' && id !== 'lost');
+    const i = ids.indexOf(stage);
+    if (i < 0 || ids.length < 2) return 18;          // genuinely unknown — old behaviour
+    return Math.round(5 + (i / (ids.length - 1)) * 31);   // 5 … 36, matching the named map
+  };
+  const stagePts = stageScores[stage] ?? positional();
+  factors.push({ label: 'Pipeline stage', points: stagePts, detail: `At "${stage.replace('_', ' ')}" — ${stagePts >= 28 ? 'deep in the funnel' : stagePts >= 12 ? 'progressing' : 'early stage'}` });
 
   const priorityScores: Record<Priority, number> = { hot: 25, warm: 15, cold: 5 };
   const prioPts = priorityScores[lead.priority] ?? 0;
@@ -1477,18 +1542,23 @@ export function explainLeadScore(lead: {
   factors.push({ label: 'Engagement recency', points: recencyPts, detail: recencyDetail });
 
   const strongSources = ['Referral', 'Walk-in', 'Website'];
-  const srcPts = strongSources.includes(lead.source) ? 5 : 2;
-  factors.push({ label: 'Lead source', points: srcPts, detail: `${lead.source}${strongSources.includes(lead.source) ? ' — high-intent channel' : ''}` });
+  const srcPts = strongSources.includes(source) ? 5 : 2;
+  factors.push({ label: 'Lead source', points: srcPts, detail: `${source}${strongSources.includes(source) ? ' — high-intent channel' : ''}` });
 
   const score = Math.min(100, factors.reduce((s, f) => s + f.points, 0));
 
   // Human-actionable recommendation derived from the weakest lever
   let nextBestAction = 'Keep nurturing on the current plan.';
-  if (lead.stage !== 'booked' && lead.stage !== 'lost') {
+  if (stage !== 'booked' && stage !== 'lost') {
     if (daysSince > 7) nextBestAction = 'Reach out now — engagement has gone cold and recency is your biggest score drag.';
     else if (stagePts < 20) nextBestAction = 'Qualify budget & timeline to move this out of the early funnel.';
-    else if (lead.stage === 'visit_scheduled') nextBestAction = 'Confirm the site visit and prep a personalized unit shortlist.';
-    else if (lead.stage === 'negotiation') nextBestAction = 'Send the payment plan and push for a booking token.';
+    // Matched on the stage KEY containing "visit" rather than one exact
+    // spelling: the default pipeline calls it visit_scheduled and the
+    // provisioned one calls it site_visit, so the exact check never fired for a
+    // real workspace and told reps to "book a site visit" for leads that had
+    // already been to site.
+    else if (/visit/.test(stage)) nextBestAction = 'Confirm the site visit and prep a personalized unit shortlist.';
+    else if (stage === 'negotiation') nextBestAction = 'Send the payment plan and push for a booking token.';
     else nextBestAction = 'Book a site visit while interest is warm.';
   }
   return { score, factors, nextBestAction };

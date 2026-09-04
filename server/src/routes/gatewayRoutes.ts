@@ -245,12 +245,18 @@ export async function gatewayRoutes(app: FastifyInstance): Promise<void> {
       // The idempotency gate. ON CONFLICT DO NOTHING means a redelivery inserts
       // no row and returns none — which is how a duplicate is detected without
       // a race between a SELECT and an INSERT.
+      //
+      // Keyed by TENANT as well (065). Razorpay event ids are unique within a
+      // merchant account and every builder connects their own, so a global key
+      // let the first workspace to see an id suppress that id for everybody:
+      // another builder's payment.captured would be answered 200 as a
+      // duplicate and their demand would never be marked paid.
       const { rows: [event] } = await client.query(
         `INSERT INTO gateway_events
            (tenant_id, provider, event_id, event_type, order_ref, payment_ref, amount,
             signature_verified, payload)
          VALUES ($1, 'razorpay', $2, $3, $4, $5, $6, true, $7)
-         ON CONFLICT (provider, event_id) DO NOTHING
+         ON CONFLICT (tenant_id, provider, event_id) DO NOTHING
          RETURNING id`,
         [order.tenant_id, eventId, parsed.eventType, parsed.orderId, parsed.paymentId,
          parsed.amountRupees, JSON.stringify(body)]);

@@ -258,14 +258,21 @@ export async function telephonyRoutes(app: FastifyInstance): Promise<void> {
       try {
         await client.query('BEGIN');
 
-        // The idempotency gate: one row per call per status. ON CONFLICT DO
-        // NOTHING returns none for a redelivery, with no race between a SELECT
-        // and an INSERT.
+        // The idempotency gate: one row per call per status PER WORKSPACE. ON
+        // CONFLICT DO NOTHING returns none for a redelivery, with no race
+        // between a SELECT and an INSERT.
+        //
+        // tenant_id is part of the key (065). Without it the first workspace to
+        // record a provider call id owned it for every workspace: the real
+        // callback for another builder's call with the same id inserted
+        // nothing, was reported as a duplicate, and that call log never moved.
+        // Provider ids are unique within an account, and every builder brings
+        // their own account.
         const { rows: [stored] } = await client.query(
           `INSERT INTO telephony_events
              (tenant_id, provider, provider_call_id, event_status, payload)
            VALUES ($1, 'exotel', $2, $3, $4)
-           ON CONFLICT (provider, provider_call_id, event_status) DO NOTHING
+           ON CONFLICT (tenant_id, provider, provider_call_id, event_status) DO NOTHING
            RETURNING id`,
           [match.tenant_id, evt.providerCallId, status, JSON.stringify(body)]);
 

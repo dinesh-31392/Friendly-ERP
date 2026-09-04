@@ -729,6 +729,10 @@ export interface Employee {
   active: boolean;
   userId?: string;           // optional link to a login account
   createdAt: string;
+  /** The server withheld the pay figures from this reader (see maySeePay in
+   *  server/src/routes/hrRoutes.ts). Distinguishes "not disclosed to you" from
+   *  "no salary recorded" — both of which arrive as an absent number. */
+  payHidden?: boolean;
 }
 
 /** One row per employee per day. Check-in/out are timestamps; lat/lng is the
@@ -743,7 +747,9 @@ export interface AttendanceRecord {
   projectId?: string;
   lat?: number;
   lng?: number;
-  method: 'geo' | 'manual';
+  /** 'session' is derived from sign-in times rather than recorded by a person;
+   *  migration 060 widened the column's check constraint to admit it. */
+  method: 'geo' | 'manual' | 'session';
   createdAt: string;
 }
 
@@ -763,6 +769,9 @@ export interface LeaveRequest {
   decidedBy?: string;        // userId
   decidedAt?: string;
   createdAt: string;
+  /** A reason exists but was withheld — it is free text, and it is where a
+   *  medical condition gets written. The type and dates stay visible. */
+  reasonHidden?: boolean;
 }
 
 export interface PayrollItem {
@@ -785,6 +794,12 @@ export interface PayrollRun {
   processedBy?: string;
   processedAt?: string;
   createdAt: string;
+  /** `items` was emptied before it left the server. Without this flag a screen
+   *  cannot tell a withheld payroll from an empty one, and would total it to
+   *  zero — asserting a figure that is not true. */
+  itemsHidden?: boolean;
+  /** Headcount, which survives redaction: "48 people, figures not shown". */
+  itemCount?: number;
 }
 
 export type FilingFrequency = 'one_time' | 'monthly' | 'quarterly' | 'annual';

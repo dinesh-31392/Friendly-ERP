@@ -15,19 +15,53 @@ async function gate(db: import('pg').PoolClient, perm: string): Promise<boolean>
   return !!allowed;
 }
 
+/**
+ * Who may see what a person is PAID, and why it is not view_hr.
+ *
+ * view_hr is held by three roles, and one of them is site_engineer — who has
+ * it solely so they can mark a crew register with manage_attendance. Gating
+ * salary on view_hr therefore handed every site engineer the monthly salary of
+ * every colleague, every leave reason including medical ones, and every
+ * payroll run with per-person gross. That was never the intent: ROLE_PERMS
+ * describes site_engineer as marking attendance, not reading the payroll.
+ *
+ * Pay is visible to two roles and no others:
+ *
+ *   manage_hr        the desk that prepares payroll — it cannot do the job
+ *                    without the figures.
+ *   view_audit_log   the auditor, whose entire purpose is to read everything
+ *                    and change nothing. Auditing a payroll run without the
+ *                    amounts is not auditing it.
+ *
+ * The route gate stays at view_hr so the roster, attendance and leave dates
+ * remain visible to whoever runs a site. What is redacted is the money and the
+ * reason somebody was off sick.
+ */
+async function maySeePay(db: import('pg').PoolClient): Promise<boolean> {
+  const { rows: [r] } = await db.query(
+    `SELECT has_permission('manage_hr') OR has_permission('view_audit_log') AS allowed`);
+  return !!r?.allowed;
+}
+
 export async function hrRoutes(app: FastifyInstance): Promise<void> {
   // ── Employees ───────────────────────────────────────────────────────────
-  const empToApi = (r: Record<string, unknown>) => ({
+  const empToApi = (r: Record<string, unknown>, canSeePay = false) => ({
     id: r.id, name: r.name, phone: r.phone, email: r.email, designation: r.designation, department: r.department,
-    type: r.type, projectId: r.project_id, monthlySalary: num(r.monthly_salary), dailyWage: num(r.daily_wage),
+    type: r.type, projectId: r.project_id,
+    // Null rather than absent: a client that shows a dash for "not disclosed"
+    // is honest, where a missing key looks like an employee on no salary.
+    monthlySalary: canSeePay ? num(r.monthly_salary) : null,
+    dailyWage: canSeePay ? num(r.daily_wage) : null,
+    payHidden: !canSeePay,
     joinDate: r.join_date, active: r.active, userId: r.user_id,
   });
 
   app.get('/api/employees', { preHandler: requireAuth }, async (req, reply) =>
     withTenantContext(req.ctx, async (db) => {
       if (!await gate(db, 'view_hr')) return reply.code(403).send({ error: 'Missing permission: view_hr' });
+      const canSeePay = await maySeePay(db);
       const { rows } = await db.query('SELECT * FROM employees ORDER BY name');
-      return { employees: rows.map(empToApi) };
+      return { employees: rows.map(r => empToApi(r, canSeePay)) };
     }),
   );
 
@@ -49,7 +83,11 @@ export async function hrRoutes(app: FastifyInstance): Promise<void> {
           `INSERT INTO employees (tenant_id, name, phone, email, designation, department, type, project_id, monthly_salary, daily_wage, join_date)
            VALUES (app_current_tenant(), $1,$2,$3,$4,$5,$6,$7,$8,$9, COALESCE($10, CURRENT_DATE)) RETURNING *`,
           [b.name, b.phone || '', b.email || null, b.designation || '', b.department || '', b.type || 'staff', b.projectId || null, b.monthlySalary ?? null, b.dailyWage ?? null, b.joinDate || null]);
-        reply.code(201); return { employee: empToApi(rows[0]) };
+        // `true`: this route is gated on manage_hr, which is one of the two keys
+        // maySeePay grants on — and the caller just typed the salary in. Handing
+        // back a redacted row would make a client that refreshes from the
+        // response show a dash for the figure it had only just saved.
+        reply.code(201); return { employee: empToApi(rows[0], true) };
       }),
   );
 
@@ -75,7 +113,8 @@ export async function hrRoutes(app: FastifyInstance): Promise<void> {
            WHERE id = $6 RETURNING *`,
           [b.active ?? null, b.monthlySalary ?? null, b.dailyWage ?? null, b.designation ?? null, b.department ?? null, req.params.id]);
         if (!rows[0]) return reply.code(404).send({ error: 'Employee not found' });
-        return { employee: empToApi(rows[0]) };
+        // manage_hr again — same reason as the create above.
+        return { employee: empToApi(rows[0], true) };
       }),
   );
 
@@ -146,13 +185,25 @@ export async function hrRoutes(app: FastifyInstance): Promise<void> {
   );
 
   // ── Leave requests (maker-checker) ──────────────────────────────────────
-  const leaveToApi = (r: Record<string, unknown>) => ({ id: r.id, employeeId: r.employee_id, type: r.type, from: r.from_date, to: r.to_date, days: r.days, reason: r.reason, status: r.status, decidedBy: r.decided_by, decidedAt: r.decided_at });
+  // The TYPE (sick, casual, earned) stays visible — a site manager planning a
+  // week needs to know who is off. The free-text REASON does not: it is where
+  // "chemotherapy" gets written, and that is health data about a colleague.
+  const leaveToApi = (r: Record<string, unknown>, canSeeReason = false) => ({
+    id: r.id, employeeId: r.employee_id, type: r.type, from: r.from_date, to: r.to_date,
+    days: r.days,
+    reason: canSeeReason ? r.reason : '',
+    reasonHidden: !canSeeReason && !!r.reason,
+    status: r.status, decidedBy: r.decided_by, decidedAt: r.decided_at,
+  });
 
   app.get('/api/leave-requests', { preHandler: requireAuth }, async (req, reply) =>
     withTenantContext(req.ctx, async (db) => {
       if (!await gate(db, 'view_hr')) return reply.code(403).send({ error: 'Missing permission: view_hr' });
       const { rows } = await db.query('SELECT * FROM leave_requests ORDER BY created_at DESC');
-      return { leaveRequests: rows.map(leaveToApi) };
+      const canSeeReason = await maySeePay(db);
+      // Explicit arrow, never bare .map(leaveToApi): map passes the index as the
+      // second argument, which would hide row 0 and reveal every row after it.
+      return { leaveRequests: rows.map(r => leaveToApi(r, canSeeReason)) };
     }),
   );
 
@@ -174,7 +225,7 @@ export async function hrRoutes(app: FastifyInstance): Promise<void> {
           `INSERT INTO leave_requests (tenant_id, employee_id, type, from_date, to_date, days, reason)
            VALUES (app_current_tenant(), $1, $2, $3, $4, $5, $6) RETURNING *`,
           [req.body.employeeId, req.body.type || 'casual', req.body.from, req.body.to, req.body.days ?? 1, req.body.reason || null]);
-        reply.code(201); return { leaveRequest: leaveToApi(rows[0]) };
+        reply.code(201); return { leaveRequest: leaveToApi(rows[0], true) };
       }),
   );
 
@@ -198,18 +249,31 @@ export async function hrRoutes(app: FastifyInstance): Promise<void> {
            WHERE id = $4 RETURNING *`,
           [req.body.status, decided, req.ctx.userId || null, req.params.id]);
         if (!rows[0]) return reply.code(404).send({ error: 'Leave request not found' });
-        return { leaveRequest: leaveToApi(rows[0]) };
+        return { leaveRequest: leaveToApi(rows[0], true) };
       }),
   );
 
   // ── Payroll runs ────────────────────────────────────────────────────────
-  const payrollToApi = (r: Record<string, unknown>) => ({ id: r.id, month: r.month, status: r.status, items: r.items, processedBy: r.processed_by, processedAt: r.processed_at });
+  // `items` is the whole payroll: every name with what they were paid. It is
+  // the single most sensitive array in the product, and it was being handed to
+  // anyone holding view_hr.
+  const payrollToApi = (r: Record<string, unknown>, canSeePay = false) => ({
+    id: r.id, month: r.month, status: r.status,
+    items: canSeePay ? r.items : [],
+    itemsHidden: !canSeePay,
+    // The count survives redaction so a run still reads as a run rather than
+    // an empty one — "48 people, figures not shown" is useful and discloses
+    // nothing.
+    itemCount: Array.isArray(r.items) ? (r.items as unknown[]).length : 0,
+    processedBy: r.processed_by, processedAt: r.processed_at,
+  });
 
   app.get('/api/payroll-runs', { preHandler: requireAuth }, async (req, reply) =>
     withTenantContext(req.ctx, async (db) => {
       if (!await gate(db, 'view_hr')) return reply.code(403).send({ error: 'Missing permission: view_hr' });
+      const canSeePay = await maySeePay(db);
       const { rows } = await db.query('SELECT * FROM payroll_runs ORDER BY month DESC');
-      return { payrollRuns: rows.map(payrollToApi) };
+      return { payrollRuns: rows.map(r => payrollToApi(r, canSeePay)) };
     }),
   );
 
@@ -230,7 +294,7 @@ export async function hrRoutes(app: FastifyInstance): Promise<void> {
            RETURNING *`,
           [req.body.month, JSON.stringify(req.body.items || [])]);
         if (!rows[0]) return reply.code(409).send({ error: 'Payroll for this month is already processed' });
-        reply.code(201); return { payrollRun: payrollToApi(rows[0]) };
+        reply.code(201); return { payrollRun: payrollToApi(rows[0], true) };
       }),
   );
 
@@ -250,7 +314,68 @@ export async function hrRoutes(app: FastifyInstance): Promise<void> {
           `UPDATE payroll_runs SET status = 'processed', processed_by = $1, processed_at = now() WHERE id = $2 AND status = 'draft' RETURNING *`,
           [req.ctx.userId || null, req.params.id]);
         if (!rows[0]) return reply.code(404).send({ error: 'Draft payroll run not found' });
-        return { payrollRun: payrollToApi(rows[0]) };
+        return { payrollRun: payrollToApi(rows[0], true) };
       }),
   );
+
+  /**
+   * GET /api/hr/me — a person's own HR record.
+   *
+   * NO HR PERMISSION, deliberately. Every read above is gated on view_hr,
+   * which three roles hold — so a sales executive, a telecaller, an accountant
+   * and a BD manager could not see their own attendance, their own leave or
+   * their own payslip. Their data was in the product and closed to them.
+   *
+   * Scoped by the SESSION, never by a parameter: the employee row is found
+   * through app_current_user(), so there is no id to tamper with and no way
+   * to ask for somebody else by changing a number in the URL.
+   *
+   * Pay appears here in full. It is their own salary — the redaction above
+   * exists to stop people reading each other's, not their own.
+   */
+  app.get('/api/hr/me', { preHandler: requireAuth }, async (req) =>
+    withTenantContext(req.ctx, async (db) => {
+      const { rows: [emp] } = await db.query(
+        'SELECT * FROM employees WHERE user_id = app_current_user() LIMIT 1');
+      if (!emp) {
+        // A real state, not an error: plenty of users are not employees —
+        // a platform admin, or a login created before the HR record.
+        return {
+          employee: null, attendance: [], leave: [], payslips: [],
+          note: 'No employee record is linked to this account. HR can link one.',
+        };
+      }
+
+      const { rows: att } = await db.query(
+        `SELECT * FROM attendance WHERE employee_id = $1
+          ORDER BY date DESC LIMIT 120`, [emp.id]);
+      const { rows: lv } = await db.query(
+        `SELECT * FROM leave_requests WHERE employee_id = $1
+          ORDER BY from_date DESC LIMIT 60`, [emp.id]);
+
+      // PROCESSED runs only. A draft is a working figure that HR may still
+      // change, and showing somebody a number that later moves is worse than
+      // showing them nothing yet.
+      const { rows: runs } = await db.query(
+        `SELECT month, items, processed_at FROM payroll_runs
+          WHERE status = 'processed' ORDER BY month DESC LIMIT 24`);
+
+      const payslips = runs
+        .map(r => {
+          const items = Array.isArray(r.items) ? r.items as Array<Record<string, unknown>> : [];
+          // Their line and nobody else's — the array holds the whole company.
+          const mine = items.find(i => i.employeeId === emp.id);
+          return mine ? { month: r.month, processedAt: r.processed_at, ...mine } : null;
+        })
+        .filter(Boolean);
+
+      return {
+        employee: empToApi(emp, true),
+        attendance: att.map(attToApi),
+        leave: lv.map(r => leaveToApi(r, true)),
+        payslips,
+      };
+    }),
+  );
+
 }

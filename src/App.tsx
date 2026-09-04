@@ -28,6 +28,7 @@ import Service from './pages/Service';
 import Bookings from './pages/Bookings';
 import CostSheets from './pages/CostSheets';
 import Customers from './pages/Customers';
+import MyHr from './pages/MyHr';
 import Possession from './pages/Possession';
 import Leasing from './pages/Leasing';
 import Brokers from './pages/Brokers';
@@ -124,6 +125,10 @@ function AppRoutes() {
         <Route path="/execution" element={<PermissionGuard permission="view_execution" module="execution"><Execution /></PermissionGuard>} />
         <Route path="/procurement" element={<PermissionGuard permission="view_procurement" module="procurement"><Procurement /></PermissionGuard>} />
         <Route path="/hr" element={<PermissionGuard permission="view_hr" module="hr"><HR /></PermissionGuard>} />
+        {/* Everyone signed in may read their OWN record. Gated on
+            view_dashboard, the one key every role holds, rather than an HR
+            key that six of the ten roles do not have. */}
+        <Route path="/my-hr" element={<PermissionGuard permission="view_dashboard"><MyHr /></PermissionGuard>} />
         <Route path="/accounts" element={<PermissionGuard permission="view_accounts" module="accounts"><Accounts /></PermissionGuard>} />
         <Route path="/bd" element={<PermissionGuard permission="view_bd" module="bd"><BD /></PermissionGuard>} />
         <Route path="/land" element={<PermissionGuard permission="view_land" module="land"><Land /></PermissionGuard>} />

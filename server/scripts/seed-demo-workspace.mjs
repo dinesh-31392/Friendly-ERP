@@ -270,12 +270,24 @@ for (const [title, cat, days] of [['Call Neha about floor plan','follow_up',1],[
      VALUES ($1,$2,$3, now() + ($4 || ' days')::interval, 'hot','pending',$5,$2)`,
     [t.id, userId.sales, title, String(days), cat]);
 }
+// The fourth column is the LOGIN this employee is, where there is one.
+// Without it the demo seeded an employee called Imran Qureshi and a user
+// called Imran Qureshi and left them strangers to each other — so /api/hr/me
+// found nothing, and "My Attendance & Pay" could only ever show the
+// no-record-linked state for a person who plainly has a record.
 const employeeIds = [];
-for (const [name, desig, dept, sal] of [['Imran Qureshi','Site Engineer','Execution',65000],['Sunita Bhosale','Accountant','Finance',55000],['Ramesh Yadav','Supervisor','Execution',38000]]) {
+for (const [name, desig, dept, sal, login] of [
+  ['Imran Qureshi',  'Site Engineer', 'Execution', 65000, 'site'],
+  ['Sunita Bhosale', 'Accountant',    'Finance',   55000, 'accounts'],
+  // No login on purpose: a supervisor who is paid but does not use the ERP is
+  // the normal case on a site, and the page has to handle being asked about
+  // somebody who never signs in.
+  ['Ramesh Yadav',   'Supervisor',    'Execution', 38000, null],
+]) {
   const { rows: [e] } = await c.query(
-    `INSERT INTO employees (tenant_id, name, phone, designation, department, type, project_id, monthly_salary, join_date, active)
-     VALUES ($1,$2,'9830000000',$3,$4,'staff',$5,$6, CURRENT_DATE - 200, true) RETURNING id`,
-    [t.id, name, desig, dept, proj.id, sal]);
+    `INSERT INTO employees (tenant_id, name, phone, designation, department, type, project_id, monthly_salary, join_date, active, user_id)
+     VALUES ($1,$2,'9830000000',$3,$4,'staff',$5,$6, CURRENT_DATE - 200, true, $7) RETURNING id`,
+    [t.id, name, desig, dept, proj.id, sal, login ? userId[login] : null]);
   employeeIds.push(e.id);
 }
 
@@ -291,10 +303,21 @@ await c.query(
   `INSERT INTO leave_requests (tenant_id, employee_id, type, from_date, to_date, days, reason, status)
    VALUES ($1,$2,'casual', CURRENT_DATE + 3, CURRENT_DATE + 4, 2, 'Family function', 'pending')`,
   [t.id, employeeIds[2]]);
+// A processed run with its LINES, not an empty array. `items` is what the
+// payroll screen renders and what a payslip is drawn from, so seeding `[]`
+// left an HR manager looking at an empty table totalling zero and an employee
+// with no payslip — the module shipped, and the demo could not show it.
+//
+// It is also the only way to see the redaction work: a site engineer opening
+// this run is told how many people are in it and not what they were paid.
 await c.query(
   `INSERT INTO payroll_runs (tenant_id, month, status, items, processed_at)
-   VALUES ($1, to_char(CURRENT_DATE - interval '1 month', 'YYYY-MM'), 'processed', '[]'::jsonb, now())`,
-  [t.id]);
+   VALUES ($1, to_char(CURRENT_DATE - interval '1 month', 'YYYY-MM'), 'processed', $2::jsonb, now())`,
+  [t.id, JSON.stringify([
+    { employeeId: employeeIds[0], name: 'Imran Qureshi',  designation: 'Site Engineer', empType: 'staff', basis: 'Monthly salary', gross: 65000 },
+    { employeeId: employeeIds[1], name: 'Sunita Bhosale', designation: 'Accountant',    empType: 'staff', basis: 'Monthly salary', gross: 55000 },
+    { employeeId: employeeIds[2], name: 'Ramesh Yadav',   designation: 'Supervisor',    empType: 'staff', basis: 'Monthly salary', gross: 38000 },
+  ])]);
 console.log('→ site visits');
 // The middle of the funnel, across every state the page distinguishes: two
 // still to happen, one held and converted, one held and not, one nobody turned

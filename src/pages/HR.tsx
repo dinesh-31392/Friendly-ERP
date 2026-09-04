@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect } from 'react';
 import {
   UserCheck, Users, MapPin, CalendarDays, Wallet, Plus, X, Trash2,
-  CheckCircle2, LogOut, Building2, AlertTriangle,
+  CheckCircle2, LogOut, LogIn, Building2, AlertTriangle,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { getByTenant, logAudit } from '../services/db';
@@ -15,12 +15,16 @@ import type {
 } from '../types';
 import { DEPARTMENTS, LEAVE_TYPES } from '../types';
 import toast from 'react-hot-toast';
+import SessionAttendancePanel from '../components/SessionAttendancePanel';
 
-type Tab = 'employees' | 'attendance' | 'leave' | 'payroll';
+type Tab = 'employees' | 'attendance' | 'sessions' | 'leave' | 'payroll';
 
 const TABS: { id: Tab; label: string; icon: React.ElementType }[] = [
   { id: 'employees', label: 'Employees', icon: Users },
   { id: 'attendance', label: 'Attendance', icon: MapPin },
+  // Beside Attendance because that is what it feeds — and its own tab, so a
+  // derived time is never mistaken for a check-in somebody actually made.
+  { id: 'sessions', label: 'Sign-in Times', icon: LogIn },
   { id: 'leave', label: 'Leave', icon: CalendarDays },
   { id: 'payroll', label: 'Payroll', icon: Wallet },
 ];
@@ -80,6 +84,14 @@ export default function HR() {
     () => new Set(leaves.filter(l => l.status === 'approved' && l.from <= attendanceDate && attendanceDate <= l.to).map(l => l.employeeId)),
     [leaves, attendanceDate]
   );
+
+  // The server redacts pay for anyone who is not manage_hr or view_audit_log —
+  // a site engineer holds view_hr only so they can mark a crew register. The
+  // screen has to SAY so: totalling a withheld payroll gives zero, and a zero
+  // on a payroll screen is a claim about what people were paid.
+  const payHidden = employees.some(e => e.payHidden);
+  const runTotal = (r: PayrollRun) => r.items.reduce((s, i) => s + i.gross, 0);
+  const runCount = (r: PayrollRun) => r.itemCount ?? r.items.length;
 
   const activeEmployees = employees.filter(e => e.active);
   const empName = (id: string) => employees.find(e => e.id === id)?.name || '—';
@@ -308,9 +320,16 @@ export default function HR() {
             <span className="text-xs font-medium text-zinc-500">Last Payroll</span>
           </div>
           <p className="text-2xl font-bold text-zinc-900">
-            {payrollRuns[0] ? formatCurrency(payrollRuns[0].items.reduce((s, i) => s + i.gross, 0), currency) : '—'}
+            {!payrollRuns[0] ? '—'
+              : payrollRuns[0].itemsHidden ? <span className="text-base font-semibold text-zinc-400">Not shown</span>
+              : formatCurrency(runTotal(payrollRuns[0]), currency)}
           </p>
-          <p className="text-xs text-zinc-500 mt-1">{payrollRuns[0] ? `${payrollRuns[0].month} · ${payrollRuns[0].status}` : 'no runs yet'}</p>
+          <p className="text-xs text-zinc-500 mt-1">
+            {payrollRuns[0]
+              ? `${payrollRuns[0].month} · ${payrollRuns[0].status}${
+                  payrollRuns[0].itemsHidden ? ` · ${runCount(payrollRuns[0])} people` : ''}`
+              : 'no runs yet'}
+          </p>
         </div>
       </div>
 
@@ -342,6 +361,16 @@ export default function HR() {
               </button>
             )}
           </div>
+          {payHidden && (
+            // Said once at the top rather than left for the reader to infer from
+            // a column of "Not shown" — it is a rule about their role, not a
+            // gap in the data.
+            <p className="px-5 py-2.5 bg-zinc-50/60 border-b border-zinc-100 text-[11px] text-zinc-500 flex items-center gap-1.5">
+              <AlertTriangle className="h-3 w-3 shrink-0" />
+              Pay figures are not shown to your role. You can mark attendance and see who is
+              on leave; salaries and payroll amounts are visible to HR and to an auditor.
+            </p>
+          )}
           {employees.length === 0 ? (
             <div className="py-16 text-center">
               <Users className="h-10 w-10 text-zinc-300 mx-auto mb-2" />
@@ -375,9 +404,11 @@ export default function HR() {
                       <td className="px-4 py-3 text-sm text-zinc-600 hidden md:table-cell">{emp.department}</td>
                       <td className="px-4 py-3 text-sm text-zinc-600 hidden sm:table-cell">{emp.projectId ? projectName(emp.projectId) : 'Head office'}</td>
                       <td className="px-4 py-3 text-sm font-semibold text-zinc-900 text-right">
-                        {emp.type === 'staff'
-                          ? (emp.monthlySalary ? `${formatCurrency(emp.monthlySalary, currency)}/mo` : '—')
-                          : (emp.dailyWage ? `${formatCurrencyFull(emp.dailyWage, currency)}/day` : '—')}
+                        {emp.payHidden
+                          ? <span className="text-xs font-medium text-zinc-400">Not shown</span>
+                          : emp.type === 'staff'
+                            ? (emp.monthlySalary ? `${formatCurrency(emp.monthlySalary, currency)}/mo` : '—')
+                            : (emp.dailyWage ? `${formatCurrencyFull(emp.dailyWage, currency)}/day` : '—')}
                       </td>
                       <td className="px-4 py-3 text-center">
                         <button
@@ -403,6 +434,8 @@ export default function HR() {
       )}
 
       {/* ── Attendance ── */}
+      {tab === 'sessions' && <SessionAttendancePanel canManage={canMark} />}
+
       {tab === 'attendance' && (
         <div className="bg-white rounded-2xl border border-zinc-200/60 overflow-hidden">
           <div className="px-5 py-4 border-b border-zinc-100 flex items-center gap-3 flex-wrap">
@@ -502,7 +535,9 @@ export default function HR() {
                     <p className="text-sm font-medium text-zinc-900">{empName(req.employeeId)}</p>
                     <p className="text-[11px] text-zinc-500">
                       {LEAVE_TYPES.find(t => t.id === req.type)?.label} · {fmtDate(req.from)}{req.to !== req.from ? ` → ${fmtDate(req.to)}` : ''} · {req.days}d
-                      {req.reason ? ` · ${req.reason}` : ''}
+                      {req.reasonHidden
+                        ? <span className="italic text-zinc-400"> · reason not shown</span>
+                        : req.reason ? ` · ${req.reason}` : ''}
                     </p>
                   </div>
                   {req.status === 'pending' && canManage ? (
@@ -546,6 +581,19 @@ export default function HR() {
               <div className="py-14 text-center">
                 <Wallet className="h-10 w-10 text-zinc-300 mx-auto mb-2" />
                 <p className="text-sm text-zinc-500">No run for {payrollMonth} yet. Staff get their monthly salary; contract workers get daily wage × days present.</p>
+              </div>
+            ) : currentRun.itemsHidden ? (
+              // Not an empty run — a withheld one. Rendering the table anyway
+              // would print "Total (0 people) ₹0" over a real payroll.
+              <div className="py-14 text-center px-6">
+                <Wallet className="h-10 w-10 text-zinc-300 mx-auto mb-2" />
+                <p className="text-sm font-medium text-zinc-700">
+                  {runCount(currentRun)} {runCount(currentRun) === 1 ? 'person' : 'people'} in the {currentRun.month} run
+                </p>
+                <p className="text-xs text-zinc-500 mt-1 max-w-md mx-auto">
+                  The amounts are not shown to your role. Payroll figures are visible to
+                  HR and to an auditor; marking attendance does not require seeing them.
+                </p>
               </div>
             ) : (
               <>
@@ -600,8 +648,12 @@ export default function HR() {
               <div className="divide-y divide-zinc-50">
                 {payrollRuns.filter(r => r.month !== payrollMonth).map(run => (
                   <button key={run.id} onClick={() => setPayrollMonth(run.month)} className="w-full flex items-center justify-between px-5 py-2.5 hover:bg-zinc-50/50 text-left">
-                    <span className="text-sm text-zinc-700">{run.month} · {run.items.length} people</span>
-                    <span className="text-sm font-semibold text-zinc-900">{formatCurrency(run.items.reduce((s, i) => s + i.gross, 0), currency)}</span>
+                    <span className="text-sm text-zinc-700">{run.month} · {runCount(run)} people</span>
+                    <span className="text-sm font-semibold text-zinc-900">
+                      {run.itemsHidden
+                        ? <span className="text-xs font-medium text-zinc-400">Not shown</span>
+                        : formatCurrency(runTotal(run), currency)}
+                    </span>
                   </button>
                 ))}
               </div>

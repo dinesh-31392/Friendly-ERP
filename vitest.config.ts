@@ -16,6 +16,17 @@ export default defineConfig({
     environment: 'node',
     setupFiles: ['./src/test/setup.ts'],
     // A component that hangs is a failure, not a reason to wait.
-    testTimeout: 10_000,
+    //
+    // 30s, not 10, because of WHAT the smoke tests measure. Each one is
+    // `expect(() => render(<Page />)).not.toThrow()` — it either passes in a
+    // few hundred milliseconds or throws immediately. It can only run long for
+    // one reason: the FIRST test in a file pays for transforming that page's
+    // whole import tree, and with eight files transforming at once on a busy
+    // machine that cold start alone exceeded ten seconds. The two suites then
+    // failed on their first page while all forty-one passed in isolation.
+    //
+    // Raising this does not let a hung component through: nothing here awaits a
+    // timer or a network call, so a genuine hang still fails — just later.
+    testTimeout: 30_000,
   },
 });

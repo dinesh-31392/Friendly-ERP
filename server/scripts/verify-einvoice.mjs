@@ -192,7 +192,11 @@ ok('and says it may belong to a different document',
   /different document/i.test((await wrongIrn.json()).error ?? ''));
 
 const reg = await post(A.token, `/api/einvoices/${ein.id}/register`, {
-  irn: ein.irn, ackNo: '112410000000001', ackDate: new Date().toISOString(),
+  irn: ein.irn, ackNo: '112410000000001',
+  // A second in the past, not "now": the portal acknowledges before we record
+  // it, and an ack stamped at the same millisecond the server evaluates it
+  // made 'still cancellable' fail on a clock boundary.
+  ackDate: new Date(Date.now() - 1000).toISOString(),
 });
 ok('the matching IRN registers', reg.status === 200, String(reg.status));
 const registered = (await reg.json()).einvoice;

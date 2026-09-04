@@ -80,6 +80,10 @@ const NAV_GROUPS: NavGroupDef[] = [
   {
     id: 'workforce', label: 'Workforce', icon: UserCheck, children: [
       { to: '/hr', icon: UserCheck, label: 'HR & Workforce', permission: 'view_hr' },
+      // Their own record, not the desk that manages everyone else. Gated on
+      // view_dashboard because every role holds it — an HR key would have kept
+      // six roles out of their own attendance and payslips.
+      { to: '/my-hr', icon: Calendar, label: 'My Attendance', permission: 'view_dashboard' },
     ],
   },
   {

@@ -176,48 +176,71 @@ jobs:
       - run: node scripts/verify-golive.mjs
         working-directory: server
       - run: node scripts/verify-writes.mjs
+        working-directory: server
 
       - name: File storage — upload, isolation, and the ways it could leak
         run: node scripts/verify-file-storage.mjs
+        working-directory: server
 
       - name: Demand letters render as PDFs a buyer can be served
         run: node scripts/verify-demand-pdf.mjs
+        working-directory: server
 
       - name: Cost sheets — per-line GST, and 194-IA at the threshold
         run: node scripts/verify-cost-sheets.mjs
+        working-directory: server
 
       - name: Cancellation refunds — including the negative one
         run: node scripts/verify-cancellations.mjs
+        working-directory: server
 
       - name: Metrics — bounded cardinality, and health that can fail
         run: node scripts/verify-metrics.mjs
+        working-directory: server
 
       - name: Broker payouts — 194-H across the financial year
         run: node scripts/verify-broker-payouts.mjs
+        working-directory: server
 
       - name: Possession — the two gates before the keys change hands
         run: node scripts/verify-possession.mjs
+        working-directory: server
 
       - name: Scheduler — two instances, one winner
         run: node scripts/verify-scheduler.mjs
+        working-directory: server
 
       - name: Retention and erasure — erase, redact, or retain with a reason
         run: node scripts/verify-privacy.mjs
+        working-directory: server
 
       - name: Tally export — the sign convention, and masters before vouchers
         run: node scripts/verify-tally.mjs
+        working-directory: server
 
       - name: Payment gateway — raw-body signatures and idempotency
         run: node scripts/verify-gateway.mjs
+        working-directory: server
 
       - name: Portal lead ingest — per-portal mapping and dedupe
         run: node scripts/verify-lead-ingest.mjs
+        working-directory: server
 
       - name: GST returns — the intra/inter-state split, and three outward tables
         run: node scripts/verify-gst.mjs
+        working-directory: server
 
       - name: E-invoicing — the IRN, the B2C exclusion, and the 24-hour window
         run: node scripts/verify-einvoice.mjs
+        working-directory: server
+
+      - name: Sign-in times — presence, and the attendance it may propose
+        run: node scripts/verify-sessions.mjs
+        working-directory: server
+
+      - name: HR scoping — own record for everyone, pay for the HR desk only
+        run: node scripts/verify-hr-scope.mjs
+        working-directory: server
 
       - name: Click-to-call — the rep number never reaches the customer
         run: node scripts/verify-telephony.mjs

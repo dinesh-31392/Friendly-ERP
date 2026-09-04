@@ -1160,10 +1160,14 @@ export async function apiCreateBudget(input: { projectId: string; category: stri
 
 // ── HR & workforce ───────────────────────────────────────────────────────────
 
-export interface ApiEmployee { id: string; name: string; phone: string; email?: string | null; designation: string; department: string; type: string; projectId?: string | null; monthlySalary?: number | null; dailyWage?: number | null; joinDate: string; active: boolean; userId?: string | null }
+// The three `*Hidden` flags below are the server saying "withheld from you",
+// which is not the same statement as "absent". Pay is readable by manage_hr and
+// view_audit_log only; view_hr on its own gets the roster and the dates. See
+// maySeePay in server/src/routes/hrRoutes.ts.
+export interface ApiEmployee { id: string; name: string; phone: string; email?: string | null; designation: string; department: string; type: string; projectId?: string | null; monthlySalary?: number | null; dailyWage?: number | null; joinDate: string; active: boolean; userId?: string | null; payHidden?: boolean }
 export interface ApiAttendance { id: string; employeeId: string; date: string; checkIn: string; checkOut?: string | null; projectId?: string | null; lat?: number | null; lng?: number | null; method: string }
-export interface ApiLeaveRequest { id: string; employeeId: string; type: string; from: string; to: string; days: number; reason?: string | null; status: string; decidedBy?: string | null; decidedAt?: string | null }
-export interface ApiPayrollRun { id: string; month: string; status: string; items: unknown[]; processedBy?: string | null; processedAt?: string | null }
+export interface ApiLeaveRequest { id: string; employeeId: string; type: string; from: string; to: string; days: number; reason?: string | null; status: string; decidedBy?: string | null; decidedAt?: string | null; reasonHidden?: boolean }
+export interface ApiPayrollRun { id: string; month: string; status: string; items: unknown[]; processedBy?: string | null; processedAt?: string | null; itemsHidden?: boolean; itemCount?: number }
 
 export async function apiGetEmployees(): Promise<ApiEmployee[]> {
   return (await request<{ employees: ApiEmployee[] }>('/api/employees')).employees;
@@ -2849,4 +2853,97 @@ export async function apiUpdateWorkspace(patch: {
     method: 'PATCH', body: JSON.stringify(patch),
   });
   return res.workspace;
+}
+
+// ── Sign-in sessions and derived attendance (migration 060) ─────────────────
+
+export interface ApiUserSession {
+  id: string;
+  userId: string;
+  userName: string;
+  loginAt: string;
+  logoutAt: string | null;
+  expiresAt: string;
+  endedBy: 'open' | 'logout' | 'logout_all' | 'revoked' | 'expired';
+  ip: string;
+  userAgent: string;
+  /** Usable minutes, capped at the token's expiry when never signed out. */
+  minutes: number;
+}
+
+export interface ApiDerivedDay {
+  employeeId: string;
+  employeeName: string;
+  userId: string;
+  date: string;
+  firstLogin: string;
+  lastLogout: string;
+  sessions: number;
+  minutes: number;
+  willCreate: boolean;
+  /** Why not, when willCreate is false. */
+  reason: string;
+}
+
+/** Sign-in history. `mine` needs no permission; anything wider needs view_hr. */
+export async function apiGetSessions(
+  params: { from?: string; to?: string; userId?: string; mine?: boolean } = {},
+): Promise<ApiUserSession[]> {
+  const q = new URLSearchParams();
+  if (params.from) q.set('from', params.from);
+  if (params.to) q.set('to', params.to);
+  if (params.userId) q.set('userId', params.userId);
+  if (params.mine) q.set('mine', 'true');
+  const s = q.toString();
+  return (await request<{ sessions: ApiUserSession[] }>(`/api/sessions${s ? `?${s}` : ''}`)).sessions;
+}
+
+/** What derivation would write. Read-only. */
+export async function apiPreviewDerivedAttendance(
+  from: string, to: string,
+): Promise<ApiDerivedDay[]> {
+  return (await request<{ days: ApiDerivedDay[] }>(
+    `/api/sessions/attendance-preview?from=${from}&to=${to}`)).days;
+}
+
+/** Write the proposed rows. Needs manage_attendance. */
+export async function apiDeriveAttendance(
+  from: string, to: string,
+): Promise<{ created: number; skipped: number; days: ApiDerivedDay[] }> {
+  return request(`/api/sessions/derive-attendance`, {
+    method: 'POST', body: JSON.stringify({ from, to }),
+  });
+}
+
+// ── A person's own HR record (server/src/routes/hrRoutes.ts) ────────────────
+
+export interface ApiMyPayslip {
+  month: string;
+  processedAt: string | null;
+  name?: string;
+  gross?: number;
+  daysPresent?: number;
+  basis?: string;
+}
+
+export interface ApiMyHr {
+  employee: {
+    id: string; name: string; designation?: string; department?: string;
+    type: string; monthlySalary: number | null; dailyWage: number | null;
+    joinDate?: string; active: boolean;
+  } | null;
+  attendance: Array<{ id: string; date: string; checkIn: string; checkOut?: string; method: string }>;
+  leave: Array<{ id: string; type: string; from: string; to: string; days: number; reason: string; status: string }>;
+  payslips: ApiMyPayslip[];
+  /** Present when no employee record is linked to the signed-in account. */
+  note?: string;
+}
+
+/**
+ * The signed-in person's own HR record. Needs no HR permission — six of the ten
+ * roles hold none, and their own attendance and payslips were closed to them.
+ * Scoped by the session, so there is no id to tamper with.
+ */
+export async function apiGetMyHr(): Promise<ApiMyHr> {
+  return request<ApiMyHr>('/api/hr/me');
 }

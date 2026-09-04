@@ -79,6 +79,19 @@ describe('panels that take props', () => {
     vi.resetModules();
   });
 
+  it('SessionAttendancePanel survives a holed payload', async () => {
+    // This one earned its place: a row carrying only an id made
+    // `endedBy.replace(...)` throw, which is precisely the shape a partial
+    // payload has.
+    vi.doMock('../../services/apiClient', () => apiClientStub({}, 'holed'));
+    const { default: Panel } = await import('../../components/SessionAttendancePanel');
+    expect(() => renderPage(<Panel canManage />)).not.toThrow();
+    await new Promise(r => setTimeout(r, 0));
+    expect(thrown()).toHaveLength(0);
+    vi.doUnmock('../../services/apiClient');
+    vi.resetModules();
+  });
+
   it('ServiceRequestsPanel survives a holed payload', async () => {
     vi.doMock('../../services/apiClient', () => apiClientStub({}, 'holed'));
     const { default: Panel } = await import('../../components/ServiceRequestsPanel');

@@ -397,4 +397,57 @@ export async function usersRoutes(app: FastifyInstance): Promise<void> {
       }
     },
   );
+
+  /**
+   * GET /api/permission-matrix — who can actually do what.
+   *
+   * WHY THIS EXISTS
+   *
+   * The Settings → Permissions screen was a HARDCODED TABLE: eighteen rows of
+   * hand-written labels across four role columns, written when the product had
+   * four roles and never touched again. A workspace now has eleven roles and
+   * around eighty permission keys, so the screen showed an administrator a
+   * picture that had not been true for a long time — no HR keys at all, no
+   * execution, procurement, land, BD, leasing or accounts, and seven roles
+   * simply absent.
+   *
+   * A permissions screen that is wrong is worse than no permissions screen: it
+   * is the thing an administrator checks before deciding somebody is safe to
+   * hire into a role.
+   *
+   * This returns the catalog and every role's ACTUAL grants, read from
+   * role_permissions, so the screen cannot drift again.
+   *
+   * Readable by whoever administers the workspace, plus the auditor — reading
+   * the permission map is most of what an access review is.
+   */
+  app.get('/api/permission-matrix', { preHandler: requireAuth }, async (req, reply) =>
+    withTenantContext(req.ctx, async (db) => {
+      const { rows: [gate] } = await db.query(
+        `SELECT has_permission('manage_settings') OR has_permission('manage_users')
+             OR has_permission('view_audit_log') AS allowed`);
+      if (!gate?.allowed) {
+        return reply.code(403).send({ error: 'Missing permission: manage_settings' });
+      }
+
+      const { rows: perms } = await db.query(
+        'SELECT key, description FROM permissions ORDER BY key');
+      const { rows: roles } = await db.query(
+        `SELECT r.id, r.name, r.is_system,
+                COALESCE(
+                  (SELECT array_agg(rp.permission_key ORDER BY rp.permission_key)
+                     FROM role_permissions rp WHERE rp.role_id = r.id),
+                  ARRAY[]::text[]
+                ) AS keys
+           FROM roles r
+          ORDER BY r.name`);
+
+      return {
+        permissions: perms.map(p => ({ key: p.key, description: p.description })),
+        roles: roles.map(r => ({
+          id: r.id, name: r.name, isSystem: r.is_system, keys: r.keys as string[],
+        })),
+      };
+    }),
+  );
 }

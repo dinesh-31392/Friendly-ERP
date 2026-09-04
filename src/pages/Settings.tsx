@@ -16,6 +16,8 @@ import WhatsAppStoragePanel from '../components/WhatsAppStoragePanel';
 import PrivacyPanel from '../components/PrivacyPanel';
 import WhatsAppAutoReplyPanel from '../components/WhatsAppAutoReplyPanel';
 import PipelineSettings from '../components/PipelineSettings';
+import SitePostingsPanel from '../components/SitePostingsPanel';
+import PermissionMatrixPanel from '../components/PermissionMatrixPanel';
 import { PLANS, getPlanForTenant, getEffectiveLimits, withinLimit, planPriceLabel } from '../services/planService';
 import { portalUrl, portalPath, isPremium, slugify, isSlugAvailable } from '../services/portalService';
 import { getTenantSessions, revokeDeviceSession, currentSessionToken } from '../services/authService';
@@ -792,6 +794,12 @@ export default function Settings() {
               ))}
             </div>
 
+            {/* Who covers which site. Deliberately HERE and not on the HR page:
+                a posting decides what somebody can see, so letting a site HR
+                manager edit postings would let her widen her own scope — the one
+                thing project scoping exists to prevent. Same key as roles. */}
+            <SitePostingsPanel members={tenantUsers} canManage={canManageUsers} />
+
             {/* Signed-in devices (spec §4 session management). Revoking signs
                 that browser out on its next page load. */}
             {canManageUsers && (
@@ -973,52 +981,19 @@ export default function Settings() {
           <div className="bg-white rounded-2xl border border-zinc-200/60 p-6 space-y-4">
             <div>
               <h3 className="text-lg font-semibold text-zinc-900">Role Permissions</h3>
-              <p className="text-sm text-zinc-500 mt-0.5">Overview of what each role can access.</p>
+              <p className="text-sm text-zinc-500 mt-0.5">
+                What each role actually grants, read from the database rather than
+                described from memory.
+              </p>
             </div>
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead>
-                  <tr className="border-b border-zinc-100">
-                    <th className="text-left py-3 px-4 text-xs font-semibold text-zinc-500 uppercase">Permission</th>
-                    <th className="text-center py-3 px-4 text-xs font-semibold text-zinc-500 uppercase">Super Admin</th>
-                    <th className="text-center py-3 px-4 text-xs font-semibold text-zinc-500 uppercase">Builder Admin</th>
-                    <th className="text-center py-3 px-4 text-xs font-semibold text-zinc-500 uppercase">Sales Manager</th>
-                    <th className="text-center py-3 px-4 text-xs font-semibold text-zinc-500 uppercase">Sales Executive</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {[
-                    { label: 'View Leads', p: [1, 1, 1, 1] },
-                    { label: 'Manage All Leads', p: [1, 1, 1, 0] },
-                    { label: 'Assign Leads', p: [1, 1, 1, 0] },
-                    { label: 'View Inventory', p: [1, 1, 1, 1] },
-                    { label: 'Manage Inventory', p: [1, 1, 0, 0] },
-                    { label: 'View Bookings', p: [1, 1, 1, 1] },
-                    { label: 'Manage Bookings', p: [1, 1, 1, 0] },
-                    { label: 'Channel Partners', p: [1, 1, 1, 0] },
-                    { label: 'Manage Partners', p: [1, 1, 0, 0] },
-                    { label: 'View Reports', p: [1, 1, 1, 0] },
-                    { label: 'Manage Settings', p: [1, 1, 0, 0] },
-                    { label: 'Manage Users', p: [1, 1, 0, 0] },
-                    { label: 'Manage Campaigns', p: [1, 1, 1, 0] },
-                    { label: 'View Finance', p: [1, 1, 1, 0] },
-                    { label: 'Manage Service', p: [1, 1, 1, 0] },
-                    { label: 'Use AI Studio', p: [1, 1, 1, 1] },
-                    { label: 'Audit Log', p: [1, 1, 0, 0] },
-                    { label: 'Platform Control', p: [1, 0, 0, 0] },
-                  ].map(row => (
-                    <tr key={row.label} className="border-b border-zinc-50">
-                      <td className="py-3 px-4 text-sm text-zinc-700">{row.label}</td>
-                      {row.p.map((v, i) => (
-                        <td key={i} className="text-center py-3 px-4">
-                          {v === 1 ? <Check className="h-4 w-4 text-emerald-500 mx-auto" /> : <span className="text-zinc-300">—</span>}
-                        </td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+
+            {/* This used to be eighteen hardcoded rows across four role columns,
+                written when the product had four roles. It now has eleven and around
+                eighty permission keys, so the table had quietly become fiction — no
+                HR keys at all, nothing for execution, procurement, land, BD, leasing
+                or accounts. An administrator checks this page before deciding a role
+                is safe to hand somebody, so it has to come from role_permissions. */}
+            <PermissionMatrixPanel />
 
             {/* Configurable approval thresholds (spec: expose the approval
                 matrix as config). Amounts at/above a threshold need the

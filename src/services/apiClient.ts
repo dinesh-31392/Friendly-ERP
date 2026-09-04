@@ -3002,8 +3002,28 @@ export async function apiCreatePosting(userId: string, projectId: string, roleNo
     method: 'POST', body: JSON.stringify({ userId, projectId, roleNote }),
   })).posting;
 }
-export async function apiDeletePosting(id: string): Promise<void> {
-  await request<void>(`/api/hr/postings/${id}`, { method: 'DELETE' });
+export async function apiDeletePosting(userId: string, projectId: string): Promise<void> {
+  await request<void>(`/api/hr/postings/${userId}/${projectId}`, { method: 'DELETE' });
+}
+
+// ── The permission matrix (server/src/routes/usersRoutes.ts) ────────────────
+
+export interface ApiPermissionMatrix {
+  permissions: Array<{ key: string; description: string }>;
+  roles: Array<{ id: string; name: string; isSystem: boolean; keys: string[] }>;
+}
+
+/**
+ * Every role and what it actually grants, read from role_permissions.
+ *
+ * The Settings screen used to hold this as a hardcoded table of eighteen rows
+ * and four role columns, written when the product had four roles. It is now
+ * eleven roles and around eighty keys, so the table had quietly become
+ * fiction — which matters, because it is what an administrator checks before
+ * deciding a role is safe to hand somebody.
+ */
+export async function apiGetPermissionMatrix(): Promise<ApiPermissionMatrix> {
+  return request<ApiPermissionMatrix>('/api/permission-matrix');
 }
 
 export interface ApiAdvance {

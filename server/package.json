@@ -52,7 +52,8 @@
     "verify:sessions": "node scripts/verify-sessions.mjs",
     "verify:hrscope": "node scripts/verify-hr-scope.mjs",
     "verify:hrprojects": "node scripts/verify-hr-projects.mjs",
-    "verify:payrollcalc": "node scripts/verify-payroll-calc.mjs"
+    "verify:payrollcalc": "node scripts/verify-payroll-calc.mjs",
+    "verify:adminscope": "node scripts/verify-admin-scope.mjs"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",

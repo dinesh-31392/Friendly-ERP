@@ -34,6 +34,7 @@ const PANELS: [string, () => Promise<{ default: React.ComponentType }>][] = [
   ['ChannelIntegrations', () => import('../../components/ChannelIntegrations')],
   ['ReceiptsPanel',       () => import('../../components/ReceiptsPanel')],
   ['EinvoicePanel',       () => import('../../components/EinvoicePanel')],
+  ['PermissionMatrixPanel', () => import('../../components/PermissionMatrixPanel')],
 ];
 
 let errorSpy: ReturnType<typeof vi.spyOn>;
@@ -120,6 +121,20 @@ describe('panels that take props', () => {
     expect(() => renderPage(
       <Panel month="2026-09" projectId={null} projectName="Whole company" currency="INR" canManage />,
     )).not.toThrow();
+    await new Promise(r => setTimeout(r, 0));
+    expect(thrown()).toHaveLength(0);
+    vi.doUnmock('../../services/apiClient');
+    vi.resetModules();
+  });
+
+  it('SitePostingsPanel survives a holed payload', async () => {
+    // A posting row is rendered by projectName and userName, both of which a
+    // partial payload omits — and the panel groups rows by userId, so a row
+    // with no userId must not become a key collision.
+    vi.doMock('../../services/apiClient', () => apiClientStub({}, 'holed'));
+    const { default: Panel } = await import('../../components/SitePostingsPanel');
+    const members = [{ id: 'u1', name: 'Somebody', email: 'a@b.test', role: 'hr_manager', active: true }];
+    expect(() => renderPage(<Panel members={members} canManage />)).not.toThrow();
     await new Promise(r => setTimeout(r, 0));
     expect(thrown()).toHaveLength(0);
     vi.doUnmock('../../services/apiClient');

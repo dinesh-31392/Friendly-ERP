@@ -250,6 +250,10 @@ jobs:
         run: node scripts/verify-payroll-calc.mjs
         working-directory: server
 
+      - name: Admin scope — postings are gated like roles, and the matrix is real
+        run: node scripts/verify-admin-scope.mjs
+        working-directory: server
+
       - name: Click-to-call — the rep number never reaches the customer
         run: node scripts/verify-telephony.mjs
         working-directory: server

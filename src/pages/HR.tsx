@@ -6,7 +6,7 @@ import {
 import { useAuth } from '../context/AuthContext';
 import { getByTenant, logAudit } from '../services/db';
 import { todayKey, monthKey, leaveDays, buildPayrollItemsFrom } from '../services/hrService';
-import { isApiEnabled } from '../services/apiClient';
+import { isApiEnabled, apiGetHrScope, type ApiHrScope } from '../services/apiClient';
 import * as hrWrites from '../services/hrWrites';
 import { formatCurrency, formatCurrencyFull } from '../utils/format';
 import type {
@@ -16,6 +16,7 @@ import type {
 import { DEPARTMENTS, LEAVE_TYPES } from '../types';
 import toast from 'react-hot-toast';
 import SessionAttendancePanel from '../components/SessionAttendancePanel';
+import PayrollRunPanel from '../components/PayrollRunPanel';
 
 type Tab = 'employees' | 'attendance' | 'sessions' | 'leave' | 'payroll';
 
@@ -46,6 +47,28 @@ export default function HR() {
   const [siteFilter, setSiteFilter] = useState('all');
   const [payrollMonth, setPayrollMonth] = useState(monthKey());
   const [checkingIn, setCheckingIn] = useState<string | null>(null);
+
+  // Which sites this person's HR covers. The server decides — being
+  // company-wide depends on a permission AND on whether any posting exists,
+  // so a screen that guessed would offer a project the server then rejects.
+  const [hrScope, setHrScope] = useState<ApiHrScope | null>(null);
+  // null is the company-wide payroll run; a uuid is one site's.
+  const [payrollProject, setPayrollProject] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!isApiEnabled()) { setHrScope(null); return; }
+    let cancelled = false;
+    apiGetHrScope()
+      .then(s => {
+        if (cancelled) return;
+        setHrScope(s);
+        // A site manager has no company-wide run to look at, so the picker
+        // opens on their first site rather than on an option they cannot use.
+        if (!s.companyWide && s.projects.length > 0) setPayrollProject(s.projects[0].id);
+      })
+      .catch(() => { if (!cancelled) setHrScope(null); });
+    return () => { cancelled = true; };
+  }, [tenantId]);
 
   // API mode: the server is the source of truth for all four HR datasets;
   // localStorage stays the demo path AND the fallback if the API is down.
@@ -558,8 +581,56 @@ export default function HR() {
         </div>
       )}
 
-      {/* ── Payroll ── */}
-      {tab === 'payroll' && (
+      {/* ── Payroll ──
+          In API mode the server computes the run: gross, PF, ESI, professional
+          tax and advance recovery, using the statutory rates in force for the
+          month being paid. The demo path below keeps the old gross-only
+          arithmetic, because localStorage holds none of what the rest needs. */}
+      {tab === 'payroll' && isApiEnabled() && (
+        <div className="space-y-4">
+          <div className="bg-white rounded-2xl border border-zinc-200/60 px-5 py-3 flex items-center gap-3 flex-wrap">
+            <span className="text-xs font-semibold text-zinc-500 uppercase">Run for</span>
+            <select
+              value={payrollProject ?? ''}
+              onChange={e => setPayrollProject(e.target.value || null)}
+              className="px-3 py-1.5 bg-zinc-50 border border-zinc-200 rounded-lg text-xs"
+              aria-label="Project"
+            >
+              {/* Offered only to company-wide HR. A site manager has no
+                  company-wide run to prepare and the server would refuse. */}
+              {hrScope?.companyWide && <option value="">Whole company</option>}
+              {(hrScope?.projects ?? []).map(p => (
+                <option key={p.id} value={p.id}>{p.name}</option>
+              ))}
+            </select>
+            <input
+              type="month" value={payrollMonth} max={monthKey()}
+              onChange={e => setPayrollMonth(e.target.value)}
+              className="px-3 py-1.5 bg-zinc-50 border border-zinc-200 rounded-lg text-xs"
+              aria-label="Month"
+            />
+            <div className="flex-1" />
+            {hrScope && !hrScope.companyWide && (
+              <span className="text-[11px] text-zinc-500">
+                You run payroll for {hrScope.projects.length === 1 ? 'one site' : `${hrScope.projects.length} sites`}
+              </span>
+            )}
+          </div>
+
+          <PayrollRunPanel
+            month={payrollMonth}
+            projectId={payrollProject}
+            projectName={payrollProject
+              ? (hrScope?.projects.find(p => p.id === payrollProject)?.name ?? 'Project')
+              : 'Whole company'}
+            currency={currency}
+            canManage={canManage}
+            onProcessed={refresh}
+          />
+        </div>
+      )}
+
+      {tab === 'payroll' && !isApiEnabled() && (
         <div className="space-y-4">
           <div className="bg-white rounded-2xl border border-zinc-200/60 overflow-hidden">
             <div className="px-5 py-4 border-b border-zinc-100 flex items-center gap-3 flex-wrap">

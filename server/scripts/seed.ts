@@ -45,7 +45,10 @@ const PERMISSIONS = [
   'view_procurement', 'manage_procurement', 'approve_purchase_orders',
   // ERP: HR & workforce ('manage_attendance' lets field staff run the daily
   // register without payroll/leave authority)
-  'view_hr', 'manage_hr', 'manage_attendance',
+  // 'manage_hr_all' is the company-wide key. Without it an HR manager posted
+  // to a site (user_projects, migration 061) sees only that site's crew —
+  // which is the point. A manager with no posting is company-wide anyway.
+  'view_hr', 'manage_hr', 'manage_attendance', 'manage_hr_all',
   // ERP: ledger, RA billing, quotations, configurable approvals
   'view_accounts', 'manage_accounts', 'approve_vendor_bills', 'signoff_ra_bills',
   'create_quotations', 'approve_discounts', 'manage_approval_rules',

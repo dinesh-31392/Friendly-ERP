@@ -40,6 +40,9 @@ const ROLE_PERMS = {
   telecaller: ['view_dashboard','view_leads','manage_own_leads','add_notes','view_projects','view_calendar','schedule_visits','view_messages','send_messages'],
   accountant: ['view_dashboard','view_projects','view_reports','view_accounts','manage_accounts','view_finance','manage_finance','view_procurement','view_bookings','view_documents','view_invoices','manage_invoices','view_leasing','view_owner_payouts','manage_owner_payouts'],
   site_engineer: ['view_dashboard','view_projects','view_execution','manage_execution','view_procurement','manage_procurement','view_hr','manage_attendance','view_documents','view_calendar','view_messages','send_messages','signoff_ra_bills'],
+  // No manage_hr_all: this manager is posted to a site below, and a posted
+  // manager IS the per-project case migration 061 exists to serve. The admin
+  // holds the company-wide key.
   hr_manager: ['view_dashboard','view_hr','manage_hr','manage_attendance','view_documents','view_projects','view_reports','view_calendar','view_messages','send_messages'],
   land_manager: ['view_dashboard','view_projects','view_documents','view_land','manage_land','view_bd','view_calendar','view_messages','send_messages'],
   bd_manager: ['view_dashboard','view_projects','view_reports','view_bd','manage_bd','view_land','approve_land_qualify','view_documents','view_calendar','view_messages','send_messages'],
@@ -106,6 +109,20 @@ for (const [slug, role, name] of users) {
 console.log('→ project, towers, units');
 const { rows: [proj] } = await c.query(
   `INSERT INTO projects (tenant_id, name, city, status) VALUES ($1,'Acme Skyline','Pune','under_construction') RETURNING id`, [t.id]);
+
+// A SECOND site, so project-scoped HR has something to scope. With one
+// project every manager sees everything and the feature is invisible: the
+// demo would show a filter with one option and prove nothing.
+const { rows: [proj2] } = await c.query(
+  `INSERT INTO projects (tenant_id, name, city, status) VALUES ($1,'Acme Riverfront','Nashik','under_construction') RETURNING id`, [t.id]);
+
+// Deepa runs HR for Skyline only. She holds manage_hr and no manage_hr_all,
+// so this posting is what narrows her — and the whole point of the demo is
+// that she cannot see Riverfront's crew or their pay.
+await c.query(
+  `INSERT INTO user_project_assignments (tenant_id, user_id, project_id, role_note)
+   VALUES ($1,$2,$3,'HR for this site') ON CONFLICT DO NOTHING`,
+  [t.id, userId.hr, proj.id]);
 const { rows: [tower] } = await c.query(
   `INSERT INTO towers (tenant_id, project_id, name, floors, units_per_floor) VALUES ($1,$2,'Tower A',12,4) RETURNING id`, [t.id, proj.id]);
 
@@ -276,18 +293,25 @@ for (const [title, cat, days] of [['Call Neha about floor plan','follow_up',1],[
 // found nothing, and "My Attendance & Pay" could only ever show the
 // no-record-linked state for a person who plainly has a record.
 const employeeIds = [];
-for (const [name, desig, dept, sal, login] of [
-  ['Imran Qureshi',  'Site Engineer', 'Execution', 65000, 'site'],
-  ['Sunita Bhosale', 'Accountant',    'Finance',   55000, 'accounts'],
+// The fifth column is the SITE. Ramesh is on Riverfront so the two crews are
+// genuinely separate — Deepa, who is posted to Skyline, sees Imran and Sunita
+// and not him. With everybody on one site the scoping would be invisible.
+for (const [name, desig, dept, sal, login, site] of [
+  ['Imran Qureshi',  'Site Engineer', 'Execution', 65000, 'site',     proj.id],
+  ['Sunita Bhosale', 'Accountant',    'Finance',   55000, 'accounts', proj.id],
   // No login on purpose: a supervisor who is paid but does not use the ERP is
   // the normal case on a site, and the page has to handle being asked about
   // somebody who never signs in.
-  ['Ramesh Yadav',   'Supervisor',    'Execution', 38000, null],
+  ['Ramesh Yadav',   'Supervisor',    'Execution', 38000, null,       proj2.id],
 ]) {
   const { rows: [e] } = await c.query(
-    `INSERT INTO employees (tenant_id, name, phone, designation, department, type, project_id, monthly_salary, join_date, active, user_id)
-     VALUES ($1,$2,'9830000000',$3,$4,'staff',$5,$6, CURRENT_DATE - 200, true, $7) RETURNING id`,
-    [t.id, name, desig, dept, proj.id, sal, login ? userId[login] : null]);
+    `INSERT INTO employees (tenant_id, name, phone, designation, department, type, project_id, monthly_salary, join_date, active, user_id,
+                            uan, bank_ifsc, pt_monthly)
+     VALUES ($1,$2,'9830000000',$3,$4,'staff',$5,$6, CURRENT_DATE - 200, true, $7,
+             $8,'HDFC0001234',200) RETURNING id`,
+    [t.id, name, desig, dept, site, sal, login ? userId[login] : null,
+     // A UAN each, so the PF columns on a payslip are not all blank.
+     String(100000000000 + employeeIds.length + 1)]);
   employeeIds.push(e.id);
 }
 
@@ -299,10 +323,20 @@ for (const id of employeeIds.slice(0, 2)) {
     `INSERT INTO attendance (tenant_id, employee_id, date, check_in, project_id, method)
      VALUES ($1,$2,CURRENT_DATE,'09:15',$3,'manual')`, [t.id, id, proj.id]);
 }
+// On a SKYLINE employee, so the HR manager posted there has something pending
+// to decide. A request on the Riverfront supervisor would be correctly hidden
+// from her and the leave tab would read as empty.
 await c.query(
   `INSERT INTO leave_requests (tenant_id, employee_id, type, from_date, to_date, days, reason, status)
    VALUES ($1,$2,'casual', CURRENT_DATE + 3, CURRENT_DATE + 4, 2, 'Family function', 'pending')`,
-  [t.id, employeeIds[2]]);
+  [t.id, employeeIds[1]]);
+
+// An outstanding advance, so payroll has a deduction to recover and the
+// "Advance" column on the run is not uniformly blank.
+await c.query(
+  `INSERT INTO employee_advances (tenant_id, employee_id, amount, per_month, reason, issued_on)
+   VALUES ($1,$2,12000,4000,'Advance against salary', CURRENT_DATE - 20)`,
+  [t.id, employeeIds[0]]);
 // A processed run with its LINES, not an empty array. `items` is what the
 // payroll screen renders and what a payslip is drawn from, so seeding `[]`
 // left an HR manager looking at an empty table totalling zero and an employee
@@ -310,14 +344,40 @@ await c.query(
 //
 // It is also the only way to see the redaction work: a site engineer opening
 // this run is told how many people are in it and not what they were paid.
-await c.query(
-  `INSERT INTO payroll_runs (tenant_id, month, status, items, processed_at)
-   VALUES ($1, to_char(CURRENT_DATE - interval '1 month', 'YYYY-MM'), 'processed', $2::jsonb, now())`,
-  [t.id, JSON.stringify([
-    { employeeId: employeeIds[0], name: 'Imran Qureshi',  designation: 'Site Engineer', empType: 'staff', basis: 'Monthly salary', gross: 65000 },
-    { employeeId: employeeIds[1], name: 'Sunita Bhosale', designation: 'Accountant',    empType: 'staff', basis: 'Monthly salary', gross: 55000 },
-    { employeeId: employeeIds[2], name: 'Ramesh Yadav',   designation: 'Supervisor',    empType: 'staff', basis: 'Monthly salary', gross: 38000 },
-  ])]);
+// ONE RUN PER SITE, which is what migration 061 made possible. A single
+// company-wide run would be invisible to a site HR manager — she is not
+// company-wide — and the demo would show her an empty payroll tab.
+//
+// The lines carry the full computation, not just gross: PF capped at the
+// ₹15,000 statutory wage (₹1,800), professional tax, and net. A demo that
+// shows gross only teaches the wrong thing about what payroll is.
+const line = (id, name, desig, gross, pf, pt, adv) => ({
+  employeeId: id, name, designation: desig, empType: 'staff', projectId: null,
+  basis: 'Monthly salary', daysPresent: 26, overtimeHours: 0,
+  basic: gross, overtimePay: 0, gross,
+  pfEmployee: pf, esiEmployee: 0, professionalTax: pt, advanceRecovery: adv,
+  unpaidLeaveDeduction: 0, deductions: pf + pt + adv, net: gross - pf - pt - adv,
+  pfEmployer: pf, esiEmployer: 0, employerCost: gross + pf,
+});
+
+const skylineItems = [
+  line(employeeIds[0], 'Imran Qureshi',  'Site Engineer', 65000, 1800, 200, 4000),
+  line(employeeIds[1], 'Sunita Bhosale', 'Accountant',    55000, 1800, 200, 0),
+];
+const riverItems = [
+  line(employeeIds[2], 'Ramesh Yadav', 'Supervisor', 38000, 1800, 200, 0),
+];
+const sum = (rows, k) => rows.reduce((s, r) => s + r[k], 0);
+
+for (const [site, rows] of [[proj.id, skylineItems], [proj2.id, riverItems]]) {
+  await c.query(
+    `INSERT INTO payroll_runs (tenant_id, month, project_id, status, items, processed_at,
+                               gross_total, deduction_total, net_total, employer_cost)
+     VALUES ($1, to_char(CURRENT_DATE - interval '1 month', 'YYYY-MM'), $2, 'processed', $3::jsonb, now(),
+             $4, $5, $6, $7)`,
+    [t.id, site, JSON.stringify(rows),
+     sum(rows, 'gross'), sum(rows, 'deductions'), sum(rows, 'net'), sum(rows, 'employerCost')]);
+}
 console.log('→ site visits');
 // The middle of the funnel, across every state the page distinguishes: two
 // still to happen, one held and converted, one held and not, one nobody turned

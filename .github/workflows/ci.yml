@@ -242,6 +242,14 @@ jobs:
         run: node scripts/verify-hr-scope.mjs
         working-directory: server
 
+      - name: Project-scoped HR — a site manager cannot reach another site
+        run: node scripts/verify-hr-projects.mjs
+        working-directory: server
+
+      - name: Payroll arithmetic — the PF ceiling, the ESI cliff, and net
+        run: node scripts/verify-payroll-calc.mjs
+        working-directory: server
+
       - name: Click-to-call — the rep number never reaches the customer
         run: node scripts/verify-telephony.mjs
         working-directory: server

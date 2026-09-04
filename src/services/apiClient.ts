@@ -1167,7 +1167,11 @@ export async function apiCreateBudget(input: { projectId: string; category: stri
 export interface ApiEmployee { id: string; name: string; phone: string; email?: string | null; designation: string; department: string; type: string; projectId?: string | null; monthlySalary?: number | null; dailyWage?: number | null; joinDate: string; active: boolean; userId?: string | null; payHidden?: boolean }
 export interface ApiAttendance { id: string; employeeId: string; date: string; checkIn: string; checkOut?: string | null; projectId?: string | null; lat?: number | null; lng?: number | null; method: string }
 export interface ApiLeaveRequest { id: string; employeeId: string; type: string; from: string; to: string; days: number; reason?: string | null; status: string; decidedBy?: string | null; decidedAt?: string | null; reasonHidden?: boolean }
-export interface ApiPayrollRun { id: string; month: string; status: string; items: unknown[]; processedBy?: string | null; processedAt?: string | null; itemsHidden?: boolean; itemCount?: number }
+export interface ApiPayrollRun { id: string; month: string; status: string; items: unknown[]; processedBy?: string | null; processedAt?: string | null; itemsHidden?: boolean; itemCount?: number;
+  /** The site this run pays. null is the company-wide run (migration 061). */
+  projectId?: string | null;
+  /** Stored header totals. Money, so redacted alongside `items`. */
+  grossTotal?: number | null; deductionTotal?: number | null; netTotal?: number | null; employerCost?: number | null }
 
 export async function apiGetEmployees(): Promise<ApiEmployee[]> {
   return (await request<{ employees: ApiEmployee[] }>('/api/employees')).employees;
@@ -1203,8 +1207,8 @@ export async function apiDecideLeaveRequest(id: string, status: string): Promise
 export async function apiGetPayrollRuns(): Promise<ApiPayrollRun[]> {
   return (await request<{ payrollRuns: ApiPayrollRun[] }>('/api/payroll-runs')).payrollRuns;
 }
-export async function apiCreatePayrollRun(month: string, items: unknown[]): Promise<ApiPayrollRun> {
-  return (await request<{ payrollRun: ApiPayrollRun }>('/api/payroll-runs', { method: 'POST', body: JSON.stringify({ month, items }) })).payrollRun;
+export async function apiCreatePayrollRun(month: string, items: unknown[], projectId?: string | null): Promise<ApiPayrollRun> {
+  return (await request<{ payrollRun: ApiPayrollRun }>('/api/payroll-runs', { method: 'POST', body: JSON.stringify({ month, items, projectId: projectId ?? null }) })).payrollRun;
 }
 export async function apiProcessPayrollRun(id: string): Promise<ApiPayrollRun> {
   return (await request<{ payrollRun: ApiPayrollRun }>(`/api/payroll-runs/${id}`, { method: 'PATCH', body: JSON.stringify({ status: 'processed' }) })).payrollRun;
@@ -2946,4 +2950,103 @@ export interface ApiMyHr {
  */
 export async function apiGetMyHr(): Promise<ApiMyHr> {
   return request<ApiMyHr>('/api/hr/me');
+}
+
+// ── Project-scoped HR (migrations 061 / 062) ────────────────────────────────
+
+export interface ApiHrScope {
+  /** True when this person's HR covers the whole workspace. */
+  companyWide: boolean;
+  projectIds: string[];
+  projects: Array<{ id: string; name: string; city: string; status: string }>;
+}
+
+/**
+ * Which sites this person's HR covers.
+ *
+ * The client cannot work this out for itself: being company-wide depends on a
+ * permission AND on whether any posting exists, so a screen that guessed would
+ * offer a project filter the server then rejects. Ask the server.
+ */
+export async function apiGetHrScope(): Promise<ApiHrScope> {
+  return request<ApiHrScope>('/api/hr/scope');
+}
+
+export interface ApiPosting {
+  id: string; userId: string; userName: string;
+  projectId: string; projectName: string; roleNote: string; createdAt: string;
+}
+
+/** Postings need manage_users, not an HR key — otherwise a site HR manager
+ *  could widen their own scope by posting themselves to another site. */
+export async function apiGetPostings(userId?: string): Promise<ApiPosting[]> {
+  const q = userId ? `?userId=${encodeURIComponent(userId)}` : '';
+  return (await request<{ postings: ApiPosting[] }>(`/api/hr/postings${q}`)).postings;
+}
+export async function apiCreatePosting(userId: string, projectId: string, roleNote?: string): Promise<{ id: string }> {
+  return (await request<{ posting: { id: string } }>('/api/hr/postings', {
+    method: 'POST', body: JSON.stringify({ userId, projectId, roleNote }),
+  })).posting;
+}
+export async function apiDeletePosting(id: string): Promise<void> {
+  await request<void>(`/api/hr/postings/${id}`, { method: 'DELETE' });
+}
+
+export interface ApiAdvance {
+  id: string; employeeId: string; amount: number; recovered: number;
+  outstanding: number; perMonth: number; reason: string; issuedOn: string;
+}
+
+export async function apiGetAdvances(params: { employeeId?: string; open?: boolean } = {}): Promise<ApiAdvance[]> {
+  const q = new URLSearchParams();
+  if (params.employeeId) q.set('employeeId', params.employeeId);
+  if (params.open) q.set('open', 'true');
+  const s = q.toString();
+  return (await request<{ advances: ApiAdvance[] }>(`/api/hr/advances${s ? `?${s}` : ''}`)).advances;
+}
+export async function apiCreateAdvance(input: {
+  employeeId: string; amount: number; perMonth?: number; reason?: string; issuedOn?: string;
+}): Promise<ApiAdvance> {
+  return (await request<{ advance: ApiAdvance }>('/api/hr/advances', {
+    method: 'POST', body: JSON.stringify(input),
+  })).advance;
+}
+
+/** One person's line on a payroll run — gross, every deduction, and net. */
+export interface ApiPayrollLine {
+  employeeId: string; name: string; designation: string; empType: string;
+  projectId: string | null; basis: string;
+  daysPresent: number; overtimeHours: number;
+  basic: number; overtimePay: number; gross: number;
+  pfEmployee: number; esiEmployee: number; professionalTax: number;
+  advanceRecovery: number; unpaidLeaveDeduction: number; deductions: number;
+  net: number;
+  pfEmployer: number; esiEmployer: number; employerCost: number;
+}
+
+export interface ApiPayrollPreview {
+  month: string;
+  projectId: string | null;
+  workingDays: number;
+  items: ApiPayrollLine[];
+  totals: { gross: number; deductions: number; net: number; employerCost: number; headcount: number };
+  saved: boolean;
+  payrollRun?: ApiPayrollRun;
+}
+
+/**
+ * Build a month's payroll from the record: attendance, overtime, approved
+ * unpaid leave, outstanding advances and the statutory rates in force for
+ * that month.
+ *
+ * PREVIEWS by default. Preparing payroll is the moment somebody checks the
+ * numbers, and a call that wrote on sight would make "let me look at March"
+ * an act with consequences. Pass save to store the draft.
+ */
+export async function apiPreparePayroll(input: {
+  month: string; projectId?: string | null; workingDays?: number; save?: boolean;
+}): Promise<ApiPayrollPreview> {
+  return request<ApiPayrollPreview>('/api/hr/payroll/prepare', {
+    method: 'POST', body: JSON.stringify(input),
+  });
 }

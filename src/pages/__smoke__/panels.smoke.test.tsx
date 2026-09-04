@@ -101,6 +101,47 @@ describe('panels that take props', () => {
     vi.doUnmock('../../services/apiClient');
     vi.resetModules();
   });
+
+  it('AdvancesPanel survives a holed payload', async () => {
+    // An advance row is arithmetic on the way in — `outstanding` is computed
+    // from two numbers that a partial payload does not carry.
+    vi.doMock('../../services/apiClient', () => apiClientStub({}, 'holed'));
+    const { default: Panel } = await import('../../components/AdvancesPanel');
+    expect(() => renderPage(<Panel employees={[]} currency="INR" canManage />)).not.toThrow();
+    await new Promise(r => setTimeout(r, 0));
+    expect(thrown()).toHaveLength(0);
+    vi.doUnmock('../../services/apiClient');
+    vi.resetModules();
+  });
+
+  it('PayrollRunPanel survives a holed payload', async () => {
+    vi.doMock('../../services/apiClient', () => apiClientStub({}, 'holed'));
+    const { default: Panel } = await import('../../components/PayrollRunPanel');
+    expect(() => renderPage(
+      <Panel month="2026-09" projectId={null} projectName="Whole company" currency="INR" canManage />,
+    )).not.toThrow();
+    await new Promise(r => setTimeout(r, 0));
+    expect(thrown()).toHaveLength(0);
+    vi.doUnmock('../../services/apiClient');
+    vi.resetModules();
+  });
+
+  it('EmployeeEditDrawer opens on a record carrying nothing but an id', async () => {
+    // The drawer prefills from an employee row. Every statutory field is
+    // optional and a person hired before migration 062 has none of them, so
+    // the shape it must survive is exactly "an id and a name".
+    vi.doMock('../../services/apiClient', () => apiClientStub());
+    const { default: Drawer } = await import('../../components/EmployeeEditDrawer');
+    const bare = { id: 'e1', name: 'Nobody' } as unknown as Parameters<typeof Drawer>[0]['employee'];
+    expect(() => renderPage(
+      <Drawer employee={bare} currency="INR" projects={[]} canMoveSite
+        onClose={() => {}} onSaved={() => {}} />,
+    )).not.toThrow();
+    await new Promise(r => setTimeout(r, 0));
+    expect(thrown()).toHaveLength(0);
+    vi.doUnmock('../../services/apiClient');
+    vi.resetModules();
+  });
 });
 
 describe('no Settings tab is listed without a panel behind it', () => {

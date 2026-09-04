@@ -733,6 +733,21 @@ export interface Employee {
    *  server/src/routes/hrRoutes.ts). Distinguishes "not disclosed to you" from
    *  "no salary recorded" — both of which arrive as an absent number. */
   payHidden?: boolean;
+
+  /** Statutory identity (migration 062). Without these a PF return cannot be
+   *  filed and a salary cannot be transferred — payroll would compute a
+   *  perfect net figure that nobody could actually pay. Behind the same gate
+   *  as pay, so they arrive empty for a reader who may not see salaries. */
+  uan?: string;
+  esicNumber?: string;
+  pan?: string;
+  /** Last four digits only, never the full Aadhaar number. */
+  aadhaarLast4?: string;
+  bankAccount?: string;
+  bankIfsc?: string;
+  pfOpted?: boolean;
+  /** Professional tax per month — a state slab, so recorded per person. */
+  ptMonthly?: number;
 }
 
 /** One row per employee per day. Check-in/out are timestamps; lat/lng is the
@@ -751,6 +766,10 @@ export interface AttendanceRecord {
    *  migration 060 widened the column's check constraint to admit it. */
   method: 'geo' | 'manual' | 'session';
   createdAt: string;
+  /** Hours beyond the shift on this day. Payroll pays them at the statutory
+   *  multiple; the rate is not stored here because it belongs to the employee
+   *  and may change between the day worked and the day paid. */
+  overtimeHours?: number;
 }
 
 export type LeaveType = 'casual' | 'sick' | 'earned' | 'unpaid';

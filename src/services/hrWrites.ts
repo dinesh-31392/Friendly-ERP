@@ -30,6 +30,11 @@ export function mapEmployee(r: ApiEmployee, tenantId: string): Employee {
     // Carried through, not dropped: without it the screen cannot tell a salary
     // it may not see from one that was never set.
     payHidden: r.payHidden,
+    // The statutory half, so the edit drawer prefills from the list the page
+    // already fetched rather than re-reading each person one at a time.
+    uan: r.uan, esicNumber: r.esicNumber, pan: r.pan, aadhaarLast4: r.aadhaarLast4,
+    bankAccount: r.bankAccount, bankIfsc: r.bankIfsc,
+    pfOpted: r.pfOpted, ptMonthly: r.ptMonthly ?? undefined,
   };
 }
 
@@ -37,6 +42,7 @@ export function mapAttendance(r: ApiAttendance, tenantId: string): AttendanceRec
   return {
     id: r.id, tenantId, employeeId: r.employeeId, date: day(r.date),
     checkIn: r.checkIn, checkOut: r.checkOut || undefined,
+    overtimeHours: r.overtimeHours ?? 0,
     projectId: r.projectId || undefined, lat: r.lat ?? undefined, lng: r.lng ?? undefined,
     method: (r.method as AttendanceRecord['method']) || 'manual',
     createdAt: new Date().toISOString(),

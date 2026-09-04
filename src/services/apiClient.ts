@@ -1164,8 +1164,14 @@ export async function apiCreateBudget(input: { projectId: string; category: stri
 // which is not the same statement as "absent". Pay is readable by manage_hr and
 // view_audit_log only; view_hr on its own gets the roster and the dates. See
 // maySeePay in server/src/routes/hrRoutes.ts.
-export interface ApiEmployee { id: string; name: string; phone: string; email?: string | null; designation: string; department: string; type: string; projectId?: string | null; monthlySalary?: number | null; dailyWage?: number | null; joinDate: string; active: boolean; userId?: string | null; payHidden?: boolean }
-export interface ApiAttendance { id: string; employeeId: string; date: string; checkIn: string; checkOut?: string | null; projectId?: string | null; lat?: number | null; lng?: number | null; method: string }
+export interface ApiEmployee { id: string; name: string; phone: string; email?: string | null; designation: string; department: string; type: string; projectId?: string | null; monthlySalary?: number | null; dailyWage?: number | null; joinDate: string; active: boolean; userId?: string | null; payHidden?: boolean;
+  // Statutory identity (migration 062), behind the same gate as pay: a UAN and
+  // a bank account are HOW somebody is paid. Aadhaar is four digits, never more.
+  uan?: string; esicNumber?: string; pan?: string; aadhaarLast4?: string;
+  bankAccount?: string; bankIfsc?: string; pfOpted?: boolean; ptMonthly?: number | null }
+export interface ApiAttendance { id: string; employeeId: string; date: string; checkIn: string; checkOut?: string | null; projectId?: string | null; lat?: number | null; lng?: number | null; method: string;
+  /** Hours beyond the shift, paid at the statutory multiple (migration 062). */
+  overtimeHours?: number }
 export interface ApiLeaveRequest { id: string; employeeId: string; type: string; from: string; to: string; days: number; reason?: string | null; status: string; decidedBy?: string | null; decidedAt?: string | null; reasonHidden?: boolean }
 export interface ApiPayrollRun { id: string; month: string; status: string; items: unknown[]; processedBy?: string | null; processedAt?: string | null; itemsHidden?: boolean; itemCount?: number;
   /** The site this run pays. null is the company-wide run (migration 061). */
@@ -1179,7 +1185,15 @@ export async function apiGetEmployees(): Promise<ApiEmployee[]> {
 export async function apiCreateEmployee(input: Partial<ApiEmployee> & { name: string }): Promise<ApiEmployee> {
   return (await request<{ employee: ApiEmployee }>('/api/employees', { method: 'POST', body: JSON.stringify(input) })).employee;
 }
-export async function apiUpdateEmployee(id: string, patch: { active?: boolean; monthlySalary?: number; dailyWage?: number; designation?: string; department?: string }): Promise<ApiEmployee> {
+/** The patch mirrors what the route accepts — including the site and the
+ *  statutory identity, which had been on the server since migration 062 with
+ *  no way to send them. */
+export async function apiUpdateEmployee(id: string, patch: {
+  active?: boolean; monthlySalary?: number; dailyWage?: number;
+  designation?: string; department?: string; projectId?: string;
+  uan?: string; esicNumber?: string; pan?: string; aadhaarLast4?: string;
+  bankAccount?: string; bankIfsc?: string; pfOpted?: boolean; ptMonthly?: number;
+}): Promise<ApiEmployee> {
   return (await request<{ employee: ApiEmployee }>(`/api/employees/${id}`, { method: 'PATCH', body: JSON.stringify(patch) })).employee;
 }
 export async function apiDeleteEmployee(id: string): Promise<void> {
@@ -1192,7 +1206,7 @@ export async function apiGetAttendance(date?: string): Promise<ApiAttendance[]> 
   const q = date ? `?date=${encodeURIComponent(date)}` : '';
   return (await request<{ attendance: ApiAttendance[] }>(`/api/attendance${q}`)).attendance;
 }
-export async function apiMarkAttendance(input: { employeeId: string; date?: string; checkIn?: string; checkOut?: string; projectId?: string; lat?: number; lng?: number; method?: string }): Promise<ApiAttendance> {
+export async function apiMarkAttendance(input: { employeeId: string; date?: string; checkIn?: string; checkOut?: string; projectId?: string; lat?: number; lng?: number; method?: string; overtimeHours?: number }): Promise<ApiAttendance> {
   return (await request<{ attendance: ApiAttendance }>('/api/attendance', { method: 'POST', body: JSON.stringify(input) })).attendance;
 }
 export async function apiGetLeaveRequests(): Promise<ApiLeaveRequest[]> {

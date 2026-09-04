@@ -1,12 +1,12 @@
 import { useState, useMemo, useEffect } from 'react';
 import {
   UserCheck, Users, MapPin, CalendarDays, Wallet, Plus, X, Trash2,
-  CheckCircle2, LogOut, LogIn, Building2, AlertTriangle,
+  CheckCircle2, LogOut, LogIn, Building2, AlertTriangle, HandCoins, Pencil,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { getByTenant, logAudit } from '../services/db';
 import { todayKey, monthKey, leaveDays, buildPayrollItemsFrom } from '../services/hrService';
-import { isApiEnabled, apiGetHrScope, type ApiHrScope } from '../services/apiClient';
+import { isApiEnabled, apiGetHrScope, apiMarkAttendance, type ApiHrScope } from '../services/apiClient';
 import * as hrWrites from '../services/hrWrites';
 import { formatCurrency, formatCurrencyFull } from '../utils/format';
 import type {
@@ -17,8 +17,10 @@ import { DEPARTMENTS, LEAVE_TYPES } from '../types';
 import toast from 'react-hot-toast';
 import SessionAttendancePanel from '../components/SessionAttendancePanel';
 import PayrollRunPanel from '../components/PayrollRunPanel';
+import AdvancesPanel from '../components/AdvancesPanel';
+import EmployeeEditDrawer from '../components/EmployeeEditDrawer';
 
-type Tab = 'employees' | 'attendance' | 'sessions' | 'leave' | 'payroll';
+type Tab = 'employees' | 'attendance' | 'sessions' | 'leave' | 'advances' | 'payroll';
 
 const TABS: { id: Tab; label: string; icon: React.ElementType }[] = [
   { id: 'employees', label: 'Employees', icon: Users },
@@ -27,6 +29,9 @@ const TABS: { id: Tab; label: string; icon: React.ElementType }[] = [
   // derived time is never mistaken for a check-in somebody actually made.
   { id: 'sessions', label: 'Sign-in Times', icon: LogIn },
   { id: 'leave', label: 'Leave', icon: CalendarDays },
+  // Before Payroll, because that is the order the work happens in: an advance
+  // is given during the month and recovered by the run at the end of it.
+  { id: 'advances', label: 'Advances', icon: HandCoins },
   { id: 'payroll', label: 'Payroll', icon: Wallet },
 ];
 
@@ -54,6 +59,8 @@ export default function HR() {
   const [hrScope, setHrScope] = useState<ApiHrScope | null>(null);
   // null is the company-wide payroll run; a uuid is one site's.
   const [payrollProject, setPayrollProject] = useState<string | null>(null);
+  // The person whose record is open for editing, if any.
+  const [editing, setEditing] = useState<Employee | null>(null);
 
   useEffect(() => {
     if (!isApiEnabled()) { setHrScope(null); return; }
@@ -88,7 +95,16 @@ export default function HR() {
     () => (apiData?.employees ?? getByTenant<Employee>('employees', tenantId)).slice().sort((a, b) => a.name.localeCompare(b.name)),
     [apiData, tenantId, refreshKey]
   );
-  const projects = useMemo(() => getByTenant<Project>('projects', tenantId), [tenantId, refreshKey]);
+  // In API mode the sites come from /api/hr/scope, which returns exactly the
+  // projects this person's HR covers. Reading them from the demo store — which
+  // is what this did — left `projects` EMPTY under the API: the SITE column
+  // showed a dash for every employee who plainly had a site, and the "Deployed
+  // At" picker offered only "Head office", which a posted manager is refused.
+  const projects = useMemo<Pick<Project, 'id' | 'name'>[]>(
+    () => (isApiEnabled()
+      ? (hrScope?.projects ?? [])
+      : getByTenant<Project>('projects', tenantId)),
+    [hrScope, tenantId, refreshKey]);
   const allAttendance = useMemo(
     () => apiData?.attendance ?? getByTenant<AttendanceRecord>('attendance', tenantId),
     [apiData, tenantId, refreshKey]
@@ -160,6 +176,32 @@ export default function HR() {
     setShowAddEmployee(false);
     refresh();
     toast.success('Employee added');
+  };
+
+  /**
+   * Record overtime against a day already marked.
+   *
+   * Re-posts the attendance row: the API upserts on (employee, date) and only
+   * moves `overtime_hours` when the field is present, so the check-in and
+   * check-out already on the row survive untouched.
+   */
+  const saveOvertime = async (emp: Employee, rec: AttendanceRecord, hours: number) => {
+    const current = rec.overtimeHours ?? 0;
+    if (!Number.isFinite(hours) || hours === current) return;
+    if (hours < 0 || hours > 16) { toast.error('Overtime must be between 0 and 16 hours'); return; }
+    try {
+      await apiMarkAttendance({
+        employeeId: emp.id, date: rec.date,
+        checkIn: rec.checkIn, checkOut: rec.checkOut ?? undefined,
+        projectId: rec.projectId ?? undefined, method: rec.method,
+        overtimeHours: hours,
+      });
+      audit('update', 'attendance', emp.id, `Overtime ${hours}h for ${emp.name} — ${rec.date}`);
+      refresh();
+      toast.success(hours === 0 ? 'Overtime cleared' : `${hours}h overtime recorded`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not record that overtime');
+    }
   };
 
   const toggleEmployee = async (emp: Employee) => {
@@ -299,7 +341,21 @@ export default function HR() {
   const inputCls = 'w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20';
   const labelCls = 'block text-xs font-semibold text-zinc-500 uppercase mb-1';
   const fmtDate = (d?: string) => d ? new Date(d).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) : '—';
-  const fmtTime = (iso?: string) => iso ? new Date(iso).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }) : '';
+  /**
+   * check_in is a TEXT column and legitimately holds two shapes: a full ISO
+   * timestamp when the app stamps a check-in, and a bare "09:15" when somebody
+   * typed the time or a seeder wrote it. Passing the second to `new Date()`
+   * gives Invalid Date, which is what the register was printing next to every
+   * person who had been marked present by hand.
+   */
+  const fmtTime = (raw?: string) => {
+    if (!raw) return '';
+    if (/^\d{1,2}:\d{2}/.test(raw)) return raw.slice(0, 5);
+    const d = new Date(raw);
+    return Number.isNaN(d.getTime())
+      ? raw
+      : d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
+  };
 
   return (
     <div className="space-y-6 max-w-[1400px]">
@@ -440,9 +496,20 @@ export default function HR() {
                           className={`text-[11px] font-semibold px-2.5 py-1 rounded-full transition-colors ${emp.active ? 'bg-emerald-50 text-emerald-700' : 'bg-zinc-100 text-zinc-500'} ${canManage ? 'cursor-pointer hover:opacity-80' : ''}`}
                         >{emp.active ? 'active' : 'inactive'}</button>
                       </td>
-                      <td className="px-4 py-3 text-right">
+                      <td className="px-4 py-3 text-right whitespace-nowrap">
+                        {canManage && isApiEnabled() && (
+                          // A raise, a corrected designation, a bank account.
+                          // Until this button existed the page could hire and
+                          // fire and do nothing in between.
+                          <button
+                            onClick={() => setEditing(emp)} title={`Edit ${emp.name}`}
+                            className="p-1.5 rounded-lg hover:bg-indigo-50 text-zinc-400 hover:text-indigo-600 transition-colors"
+                          >
+                            <Pencil className="h-4 w-4" />
+                          </button>
+                        )}
                         {canManage && (
-                          <button onClick={() => deleteEmployee(emp)} className="p-1.5 rounded-lg hover:bg-red-50 text-zinc-400 hover:text-red-500 transition-colors">
+                          <button onClick={() => deleteEmployee(emp)} title={`Remove ${emp.name}`} className="p-1.5 rounded-lg hover:bg-red-50 text-zinc-400 hover:text-red-500 transition-colors">
                             <Trash2 className="h-4 w-4" />
                           </button>
                         )}
@@ -509,6 +576,23 @@ export default function HR() {
                         >
                           {checkingIn === emp.id ? 'Locating…' : 'Check In'}
                         </button>
+                      )}
+                      {canMark && rec && isApiEnabled() && (
+                        // Overtime is paid at twice the ordinary hourly rate,
+                        // and payroll already computes it — there was simply
+                        // nowhere to record the hours. Entered against the day
+                        // they were worked, not the month they are paid in.
+                        <label className="flex items-center gap-1.5 text-[11px] text-zinc-500">
+                          OT
+                          <input
+                            type="number" min="0" max="16" step="0.5"
+                            defaultValue={rec.overtimeHours ?? 0}
+                            onBlur={ev => saveOvertime(emp, rec, Number(ev.target.value))}
+                            className="w-14 px-2 py-1 bg-zinc-50 border border-zinc-200 rounded-lg text-xs tabular-nums"
+                            aria-label={`Overtime hours for ${emp.name}`}
+                          />
+                          h
+                        </label>
                       )}
                       {canMark && rec && !rec.checkOut && (
                         <button onClick={() => checkOut(emp)} className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-zinc-100 text-zinc-700 hover:bg-zinc-200 transition-colors inline-flex items-center gap-1">
@@ -579,6 +663,11 @@ export default function HR() {
             </div>
           )}
         </div>
+      )}
+
+      {/* ── Advances ── */}
+      {tab === 'advances' && (
+        <AdvancesPanel employees={employees} currency={currency} canManage={canManage} />
       )}
 
       {/* ── Payroll ──
@@ -774,8 +863,13 @@ export default function HR() {
                 </div>
                 <div>
                   <label className={labelCls}>Deployed At</label>
-                  <select name="projectId" className={inputCls}>
-                    <option value="">Head office</option>
+                  <select
+                    name="projectId" className={inputCls}
+                    defaultValue={hrScope && !hrScope.companyWide ? (hrScope.projects[0]?.id ?? '') : ''}
+                  >
+                    {/* Head office needs company-wide HR — a manager posted to
+                        a site would be refused, so it is not offered to them. */}
+                    {(!hrScope || hrScope.companyWide) && <option value="">Head office</option>}
                     {projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
                   </select>
                 </div>
@@ -840,6 +934,20 @@ export default function HR() {
             </form>
           </div>
         </div>
+      )}
+
+      {editing && (
+        <EmployeeEditDrawer
+          employee={editing}
+          currency={currency}
+          projects={projects}
+          // Moving somebody between sites is a one-way door for a posted
+          // manager — after the write they could not read the row back. The
+          // server refuses it; the drawer says so rather than offering it.
+          canMoveSite={hrScope?.companyWide !== false}
+          onClose={() => setEditing(null)}
+          onSaved={refresh}
+        />
       )}
     </div>
   );

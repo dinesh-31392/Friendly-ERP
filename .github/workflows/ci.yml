@@ -258,6 +258,10 @@ jobs:
         run: node scripts/verify-tenant-deletion.mjs
         working-directory: server
 
+      - name: White label — each builder’s own logo, in their panel and nobody else’s
+        run: node scripts/verify-white-label.mjs
+        working-directory: server
+
       - name: Role dashboards — each role sees their own report, and it is not empty
         run: node scripts/verify-role-dashboards.mjs
         working-directory: server

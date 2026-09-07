@@ -1,7 +1,7 @@
 import { createContext, useContext, useState, useEffect, ReactNode, useCallback } from 'react';
 import type { User, Tenant } from '../types';
 import * as authService from '../services/authService';
-import { isApiEnabled, apiLogin, apiVerifyLoginCode, isMfaChallenge, clearApiToken, apiLogout, getStoredApiSession } from '../services/apiClient';
+import { isApiEnabled, apiLogin, apiVerifyLoginCode, isMfaChallenge, clearApiToken, apiLogout, getStoredApiSession, apiGetWorkspace, patchStoredApiSession } from '../services/apiClient';
 import { hydrateLedger } from '../services/accountsService';
 import { syncPipelineFromServer } from '../services/metaService';
 import { syncApprovalRules } from '../services/approvalService';
@@ -252,11 +252,42 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return authService.hasPermission(user, action);
   }, [user]);
 
-  // Re-read user + tenant from storage so UI reflects saves immediately.
-  // In API mode the JWT session is the identity source — a local re-read
-  // would clobber it with stale demo data, so it is skipped.
+  /**
+   * Re-read user + tenant so the UI reflects a save immediately.
+   *
+   * IN API MODE THIS USED TO DO NOTHING. The early return was right about its
+   * premise — a local re-read WOULD clobber the JWT session with stale demo
+   * data — and wrong about the conclusion, because it left no way to refresh
+   * at all. The session's tenant is captured once at login and persisted, so
+   * after saving branding the workspace kept rendering the copy from before
+   * the change, across reloads, until the user happened to sign out and back
+   * in. The toast said "your portal and workspace now use it" and the sidebar
+   * disagreed.
+   *
+   * So in API mode it re-fetches the workspace instead of reading storage, and
+   * writes the brand fields back into the stored session so a reload keeps
+   * them. Only branding is merged: name, plan and status are the server's to
+   * change, and identity stays the JWT's.
+   *
+   * Failure is deliberately silent. This runs after a save that has already
+   * succeeded; a second toast saying the refresh failed would be alarming
+   * about something the next reload fixes anyway.
+   */
   const refreshSession = useCallback(() => {
-    if (getStoredApiSession()) return;
+    if (getStoredApiSession()) {
+      apiGetWorkspace().then(ws => {
+        const brand: Partial<Tenant> = {
+          name: ws.name,
+          company: ws.company,
+          logo: ws.logoUrl ?? '',
+          primaryColor: ws.primaryColor || undefined,
+          slug: ws.slug || undefined,
+        };
+        patchStoredApiSession(brand);
+        setTenant(prev => (prev ? { ...prev, ...brand } : prev));
+      }).catch(() => { /* the save already succeeded; a reload will pick it up */ });
+      return;
+    }
     const session = authService.getCurrentUser();
     if (session) {
       setUser(session.user);

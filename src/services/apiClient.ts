@@ -2856,6 +2856,36 @@ export interface ApiWorkspace {
   stateCode: string; city: string; pincode: string;
   einvoicingEnabled: boolean;
   currency: string; country: string; plan: string; status: string;
+  /** White-label branding. The server has always returned these; the type did
+   *  not declare them, so nothing could read the logo back after saving it. */
+  logoUrl: string;
+  primaryColor: string;
+  brandVoice: string;
+  audience: string;
+  channels: string[];
+}
+
+/**
+ * Update the tenant held in the stored session.
+ *
+ * The session is captured ONCE at login so a reload does not cost a round
+ * trip. That is the right trade for a workspace's name and plan, and the wrong
+ * one for its branding: a builder uploads their logo, the server stores it,
+ * and the sidebar keeps rendering the session's copy from before the upload —
+ * across reloads, until they happen to sign out and back in.
+ *
+ * Merged rather than replaced, because the session's tenant carries fields the
+ * workspace endpoint does not return.
+ */
+export function patchStoredApiSession(tenantPatch: Partial<Tenant>): void {
+  try {
+    const raw = localStorage.getItem(SESSION_KEY);
+    if (!raw) return;
+    const s = JSON.parse(raw);
+    localStorage.setItem(SESSION_KEY, JSON.stringify({
+      ...s, tenant: { ...s.tenant, ...tenantPatch },
+    }));
+  } catch { /* a full storage quota is not worth losing the save over */ }
 }
 
 export async function apiGetWorkspace(): Promise<ApiWorkspace> {

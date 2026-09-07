@@ -18,6 +18,7 @@ import WhatsAppAutoReplyPanel from '../components/WhatsAppAutoReplyPanel';
 import PipelineSettings from '../components/PipelineSettings';
 import SitePostingsPanel from '../components/SitePostingsPanel';
 import PermissionMatrixPanel from '../components/PermissionMatrixPanel';
+import PaymentAccountPanel from '../components/PaymentAccountPanel';
 import { PLANS, getPlanForTenant, getEffectiveLimits, withinLimit, planPriceLabel } from '../services/planService';
 import { portalUrl, portalPath, isPremium, slugify, isSlugAvailable } from '../services/portalService';
 import { getTenantSessions, revokeDeviceSession, currentSessionToken } from '../services/authService';
@@ -1044,7 +1045,14 @@ export default function Settings() {
 
         {activeTab === 'pipeline' && <PipelineSettings />}
 
-        {activeTab === 'integrations' && <IntegrationsPanel />}
+        {activeTab === 'integrations' && (
+          <>
+            <IntegrationsPanel />
+            {/* Where money actually lands. Beside the other connections
+                because it IS one — and the one with the largest consequence. */}
+            <PaymentAccountPanel />
+          </>
+        )}
         {activeTab === 'autoreply' && <WhatsAppAutoReplyPanel />}
         {activeTab === 'storage' && <WhatsAppStoragePanel />}
         {activeTab === 'retention' && <PrivacyPanel />}

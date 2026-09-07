@@ -9,21 +9,37 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
  * message from Razorpay — either the checkout handler's signature, or a
  * webhook. Both are verified here, and nothing else is trusted.
  *
- * CREDENTIALS LIVE IN THE ENVIRONMENT
+ * WHOSE CREDENTIALS
  *
- * Never in the database, never in a tenant settings row, never logged. The key
- * secret signs money movement; a workspace admin should not be able to read it
- * out of a settings page, and a database dump should not contain it.
+ * Two sources, in this order:
+ *
+ *   the workspace's own   tenant_keys, encrypted at rest with a key held only
+ *                         in the API's environment (see tenantKeys.ts). This is
+ *                         what a real deployment uses: each builder connects
+ *                         THEIR Razorpay account, and their buyers' money
+ *                         reaches them rather than the platform operator.
+ *   the platform's        RAZORPAY_* from the environment. The fallback, and
+ *                         what every existing deployment runs on today.
+ *
+ * This file originally said credentials must live only in the environment,
+ * because the key secret signs money movement: an admin should not read it out
+ * of a settings page and a dump should not contain it. Both objections are
+ * answered rather than overruled — stored ciphertext is useless without the
+ * KMS key, and no route returns a stored secret. What could not be answered
+ * was one environment holding one account for every builder on the platform,
+ * which makes the operator the money handler for their own customers.
  */
 
 export interface RazorpayConfig {
   keyId: string;
   keySecret: string;
   webhookSecret: string;
+  /** Whose account this is. Shown in settings so a builder can tell at a
+   *  glance whether money is reaching them or the platform operator. */
+  source: 'workspace' | 'platform';
 }
 
-/** Present only when the deployment has been configured. Everything that needs
- *  it returns a clear "not configured" rather than half-working. */
+/** The platform's own account, from the environment. The fallback. */
 export function razorpayConfig(): RazorpayConfig | null {
   const keyId = process.env.RAZORPAY_KEY_ID ?? '';
   const keySecret = process.env.RAZORPAY_KEY_SECRET ?? '';
@@ -32,7 +48,30 @@ export function razorpayConfig(): RazorpayConfig | null {
   // should set both.
   const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET || keySecret;
   if (!keyId || !keySecret) return null;
-  return { keyId, keySecret, webhookSecret };
+  return { keyId, keySecret, webhookSecret, source: 'platform' };
+}
+
+/** The service name these credentials are filed under in tenant_keys. */
+export const RAZORPAY_SERVICE = 'razorpay';
+
+/**
+ * Build a workspace's configuration from stored credentials.
+ *
+ * Separated from the reading so it can be unit-tested and so the partial case
+ * is handled in exactly one place: a key id with no secret is NOT a usable
+ * configuration, and treating it as one produces an authentication failure at
+ * the moment a buyer tries to pay rather than when the admin saves.
+ */
+export function razorpayFromKeys(keys: Record<string, string>): RazorpayConfig | null {
+  const keyId = (keys.key_id ?? '').trim();
+  const keySecret = (keys.key_secret ?? '').trim();
+  if (!keyId || !keySecret) return null;
+  return {
+    keyId,
+    keySecret,
+    webhookSecret: (keys.webhook_secret ?? '').trim() || keySecret,
+    source: 'workspace',
+  };
 }
 
 /**

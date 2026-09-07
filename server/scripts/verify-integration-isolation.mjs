@@ -37,7 +37,7 @@
  */
 import pg from 'pg';
 import argon2 from 'argon2';
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, createHmac, randomBytes } from 'node:crypto';
 
 const BASE = process.env.API_BASE ?? 'http://localhost:4055';
 const PW = 'Test1234!';
@@ -372,6 +372,130 @@ ok('an unsigned gateway event is refused outright',
 const { rows: evts } = await admin.query(
   'SELECT count(*)::int c FROM gateway_events WHERE event_id = $1', [`${MARK}-evt-1`]);
 ok('and nothing was recorded against either workspace', evts[0].c === 0, String(evts[0].c));
+
+console.log('\n=== 7b. EACH BUILDER COLLECTS INTO THEIR OWN RAZORPAY ACCOUNT ===');
+//
+// Until tenant_keys was wired up, razorpayConfig() read the environment and
+// nothing else — ONE merchant account for the whole platform, so every
+// builder's buyers paid the operator rather than the builder. The table for
+// per-workspace credentials had existed since migration 001 and no code ever
+// read it.
+//
+// Two properties matter here and they pull in opposite directions: a builder
+// must be able to SET their own keys, and nobody — including that builder —
+// may read one back out.
+const creds = (t) => jget(t, '/api/gateway/credentials');
+
+const before = await creds(A.token);
+ok('a workspace starts on whatever the platform provides',
+  before.status === 200 && before.body.connected === false,
+  JSON.stringify(before.body).slice(0, 120));
+
+const KEY_ID_A = 'rzp_test_' + MARK + 'A';
+const SECRET_A = 'acme-secret-' + randomBytes(8).toString('hex');
+const WEBHOOK_A = 'acme-webhook-' + randomBytes(8).toString('hex');
+const saved = await send(A.token, '/api/gateway/credentials', 'PUT',
+  { keyId: KEY_ID_A, keySecret: SECRET_A, webhookSecret: WEBHOOK_A });
+const savedBody = await saved.json().catch(() => ({}));
+
+if (saved.status === 503) {
+  // No KMS_KEY on this run. Say so rather than reporting a pass — a skipped
+  // assertion that prints a tick is how a suite lies.
+  ok('KMS_KEY is set so credentials can be stored', false,
+    'set KMS_KEY to exercise per-workspace payment credentials');
+} else {
+  ok('a builder can connect their own account', saved.status === 200 && savedBody.connected === true,
+    `${saved.status} ${JSON.stringify(savedBody).slice(0, 100)}`);
+
+  const after = await creds(A.token);
+  ok('and the workspace now collects into its own', after.body.source === 'workspace', after.body.source);
+  ok('B is unaffected and still on the platform’s',
+    (await creds(B.token)).body.source !== 'workspace');
+
+  // The write-only property. Every one of these would be a wallet if it failed.
+  ok('the secret is never returned by the endpoint that stored it',
+    !contains(savedBody, SECRET_A) && !contains(savedBody, WEBHOOK_A));
+  ok('nor by the endpoint that reports the connection',
+    !contains(after.body, SECRET_A) && !contains(after.body, WEBHOOK_A));
+  ok('only WHICH fields are stored', Array.isArray(after.body.keysPresent)
+    && after.body.keysPresent.includes('key_secret'));
+  ok('and B cannot read A’s through their own settings',
+    !contains((await creds(B.token)).body, SECRET_A));
+
+  // At rest. A dump is the threat this answers.
+  const { rows: [stored] } = await admin.query(
+    `SELECT encode(value_enc,'escape') AS raw FROM tenant_keys
+      WHERE tenant_id = $1 AND service = 'razorpay' AND key_name = 'key_secret'`, [A.tenantId]);
+  ok('the stored bytes are ciphertext — a database dump is not a wallet',
+    !!stored && !String(stored.raw).includes(SECRET_A),
+    String(stored?.raw ?? '').slice(0, 40));
+
+  // THE ONE THAT MATTERS. Each builder has their own webhook secret, so the
+  // endpoint cannot verify against a single global one: the order resolves the
+  // workspace, and the workspace resolves the secret to check against.
+  // A gateway order hangs off a real milestone, so the chain is built rather
+  // than faked: an order with no schedule could not be applied even if the
+  // signature verified, and the assertion would pass for the wrong reason.
+  const proj = (await admin.query(
+    `INSERT INTO projects (tenant_id, name, city, status)
+     VALUES ($1,'Acme Site','Pune','under_construction') RETURNING id`, [A.tenantId])).rows[0];
+  const unit = (await admin.query(
+    `INSERT INTO units (tenant_id, project_id, unit_code) VALUES ($1,$2,'A-101') RETURNING id`,
+    [A.tenantId, proj.id])).rows[0];
+  const aLeadId = (await admin.query(
+    `SELECT id FROM leads WHERE tenant_id = $1 ORDER BY created_at LIMIT 1`, [A.tenantId])).rows[0].id;
+  const booking = (await admin.query(
+    `INSERT INTO bookings (tenant_id, lead_id, unit_id) VALUES ($1,$2,$3) RETURNING id`,
+    [A.tenantId, aLeadId, unit.id])).rows[0];
+  const sched = (await admin.query(
+    `INSERT INTO payment_schedules (tenant_id, booking_id, milestone_name, sequence, amount)
+     VALUES ($1,$2,'On booking',1,100000) RETURNING id`, [A.tenantId, booking.id])).rows[0];
+
+  await admin.query(
+    `INSERT INTO gateway_orders (tenant_id, provider, order_ref, payment_schedule_id, amount, currency, status)
+     VALUES ($1,'razorpay',$2,$3,100000,'INR','created')`,
+    [A.tenantId, `${MARK}-ord-a`, sched.id]);
+
+  // Razorpay signs the RAW bytes, so the same string that is sent is signed.
+  const signWith = (secret, payload) => createHmac('sha256', secret).update(payload).digest('hex');
+  const payload = JSON.stringify({
+    event: 'payment.captured',
+    payload: { payment: { entity: { order_id: `${MARK}-ord-a`, id: `${MARK}-pay-a`, amount: 100000 } } },
+  });
+
+  const wrongSig = await fetch(`${BASE}/api/webhooks/razorpay`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-razorpay-event-id': `${MARK}-evt-cross`,
+      'x-razorpay-signature': signWith('rival-webhook-secret', payload),
+    },
+    body: payload,
+  });
+  ok('a webhook signed with ANOTHER builder’s secret is refused',
+    wrongSig.status === 401, String(wrongSig.status));
+
+  const rightSig = await fetch(`${BASE}/api/webhooks/razorpay`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-razorpay-event-id': `${MARK}-evt-own`,
+      'x-razorpay-signature': signWith(WEBHOOK_A, payload),
+    },
+    body: payload,
+  });
+  ok('[CONTROL] and one signed with the workspace’s OWN secret is accepted',
+    rightSig.status === 200, String(rightSig.status));
+  const { rows: [applied] } = await admin.query(
+    `SELECT tenant_id FROM gateway_events WHERE event_id = $1`, [`${MARK}-evt-own`]);
+  ok('[CONTROL] recorded against the workspace that raised the order',
+    applied?.tenant_id === A.tenantId, String(applied?.tenant_id));
+
+  const disc = await send(A.token, '/api/gateway/credentials', 'DELETE');
+  ok('disconnecting falls back to the platform account', disc.status === 200);
+  ok('and leaves nothing stored',
+    (await creds(A.token)).body.connected === false);
+}
 
 console.log('\n=== 8. WHATSAPP INSTANCES ARE NAMED BY THE SERVER, NOT THE CALLER ===');
 // Workspaces that have not brought their own gateway share the platform's

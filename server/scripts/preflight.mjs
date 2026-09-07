@@ -175,8 +175,23 @@ const group = (name, vars, note) => {
   else warn(`${name}: PARTIALLY configured (${set.join(', ')})`,
     `missing ${vars.filter(v => !process.env[v]).join(', ')} — half-configured usually fails at the moment of use, not at boot`);
 };
-group('Razorpay payments', ['RAZORPAY_KEY_ID', 'RAZORPAY_KEY_SECRET', 'RAZORPAY_WEBHOOK_SECRET'],
+group('Razorpay payments (platform fallback)',
+  ['RAZORPAY_KEY_ID', 'RAZORPAY_KEY_SECRET', 'RAZORPAY_WEBHOOK_SECRET'],
   'demands are still raised, payment is recorded by hand');
+
+// KMS_KEY is what lets each builder connect their OWN gateway account. Without
+// it every workspace falls back to the platform's, which means the operator
+// receives their customers' buyers' money — a regulated activity, not a
+// preference. Reported as an advisory rather than a blocker because a
+// single-builder deployment is a legitimate way to run this.
+if (process.env.KMS_KEY) {
+  ok('KMS_KEY is set — builders can connect their own payment accounts');
+} else if (process.env.RAZORPAY_KEY_ID) {
+  warn('KMS_KEY is not set, but a platform Razorpay account is',
+    'every workspace collects into THAT account. Fine for one builder; for a real multi-tenant platform it makes you the money handler for your customers.');
+} else {
+  console.log('  \x1b[90m·\x1b[0m KMS_KEY: not set — per-workspace payment credentials unavailable');
+}
 group('Exotel click-to-call', ['EXOTEL_ACCOUNT_SID', 'EXOTEL_API_KEY', 'EXOTEL_API_TOKEN'],
   'the call button reports telephony is unavailable');
 group('WhatsApp gateway', ['EVOLUTION_API_URL', 'EVOLUTION_API_KEY'],

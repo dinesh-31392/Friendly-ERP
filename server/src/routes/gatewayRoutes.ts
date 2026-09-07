@@ -2,9 +2,48 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { withTenantContext, platformPool } from '../db.js';
 import { requireAuth } from '../auth.js';
 import {
-  razorpayConfig, createOrder, verifyWebhookSignature, verifyCheckoutSignature,
-  readPaymentEvent,
+  razorpayConfig, razorpayFromKeys, RAZORPAY_SERVICE, createOrder,
+  verifyWebhookSignature, verifyCheckoutSignature, readPaymentEvent,
+  type RazorpayConfig,
 } from '../razorpay.js';
+import {
+  getTenantKeys, putTenantKey, tenantKeyNames, clearTenantKeys, kmsConfigured,
+} from '../tenantKeys.js';
+import { env } from '../env.js';
+
+/**
+ * This workspace's own Razorpay account, or the platform's.
+ *
+ * Called with an RLS-bound client, so tenant_keys is already scoped to the
+ * caller's workspace by the database — there is no tenant id to pass and
+ * therefore none to get wrong.
+ */
+async function workspaceRazorpay(db: import('pg').PoolClient): Promise<RazorpayConfig | null> {
+  const own = razorpayFromKeys(await getTenantKeys(db, RAZORPAY_SERVICE));
+  return own ?? razorpayConfig();
+}
+
+/**
+ * The same, for a tenant named explicitly — the webhook path, where there is
+ * no session and the workspace has been resolved from the order.
+ *
+ * The platform pool BYPASSes RLS, so this is one of the few places a tenant id
+ * is passed by hand. It comes from gateway_orders.tenant_id, which the caller
+ * read from the database rather than from anything in the request.
+ */
+async function tenantRazorpayById(
+  client: import('pg').PoolClient, tenantId: string,
+): Promise<RazorpayConfig | null> {
+  if (!env.kmsKey) return null;
+  const { rows } = await client.query(
+    `SELECT key_name, pgp_sym_decrypt(value_enc, $2) AS value
+       FROM tenant_keys WHERE tenant_id = $1 AND service = $3`,
+    [tenantId, env.kmsKey, RAZORPAY_SERVICE],
+  ).catch(() => ({ rows: [] as Array<Record<string, unknown>> }));
+  const keys: Record<string, string> = {};
+  for (const r of rows) if (r.value) keys[r.key_name as string] = r.value as string;
+  return razorpayFromKeys(keys);
+}
 
 /**
  * Online payments (migration 055).
@@ -80,15 +119,13 @@ export async function gatewayRoutes(app: FastifyInstance): Promise<void> {
       },
     },
     async (req, reply) => {
-      const cfg = razorpayConfig();
-      if (!cfg) {
-        return reply.code(503).send({
-          error: 'Online payments are not configured. Set RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET.',
-        });
-      }
-
-      const found = await withTenantContext(req.ctx, async (db) => {
+      // The workspace's own Razorpay account if it has connected one, so the
+      // buyer's money reaches this builder rather than the platform operator.
+      // Both come out of one tenant context — returned rather than assigned to
+      // a captured variable, which TypeScript cannot narrow across the closure.
+      const result = await withTenantContext(req.ctx, async (db) => {
         if (!await gate(db, 'manage_finance')) return { forbidden: true } as const;
+        const cfg = await workspaceRazorpay(db);
         const { rows: [m] } = await db.query(
           `SELECT s.id, s.milestone_name, s.booking_id,
                   milestone_outstanding(s.id) AS outstanding,
@@ -97,11 +134,18 @@ export async function gatewayRoutes(app: FastifyInstance): Promise<void> {
              JOIN bookings b   ON b.id = s.booking_id
              LEFT JOIN leads l ON l.id = b.lead_id
             WHERE s.id = $1`, [req.body.paymentScheduleId]);
-        return m ?? null;
+        return { cfg, milestone: m ?? null };
       });
 
-      if (found && 'forbidden' in found) {
+      if ('forbidden' in result) {
         return reply.code(403).send({ error: 'Missing permission: manage_finance' });
+      }
+      const { cfg, milestone: found } = result;
+      if (!cfg) {
+        return reply.code(503).send({
+          error: 'Online payments are not configured. Connect your Razorpay account in '
+               + 'Settings → Integrations, or set RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET.',
+        });
       }
       if (!found) return reply.code(404).send({ error: 'Milestone not found' });
 
@@ -177,7 +221,10 @@ export async function gatewayRoutes(app: FastifyInstance): Promise<void> {
       },
     },
     async (req, reply) => {
-      const cfg = razorpayConfig();
+      // Verified against the account that CREATED the order — this workspace's
+      // own, if it has one. Checking a workspace's checkout handler against the
+      // platform's key secret would reject every genuine payment.
+      const cfg = await withTenantContext(req.ctx, db => workspaceRazorpay(db));
       if (!cfg) return reply.code(503).send({ error: 'Online payments are not configured.' });
       const valid = verifyCheckoutSignature(
         req.body.orderId, req.body.paymentId, req.body.signature, cfg.keySecret);
@@ -201,13 +248,8 @@ export async function gatewayRoutes(app: FastifyInstance): Promise<void> {
   app.post('/api/webhooks/razorpay', {
     config: { rateLimit: { max: 240, timeWindow: '1 minute' } },
   }, async (req, reply) => {
-    const cfg = razorpayConfig();
-    if (!cfg) return reply.code(503).send({ error: 'Not configured' });
-
     const raw = (req as RawRequest).rawBody;
     const signature = String(req.headers['x-razorpay-signature'] ?? '');
-    const verified = !!raw && verifyWebhookSignature(raw, signature, cfg.webhookSecret);
-
     const body = (req.body ?? {}) as Record<string, unknown>;
     const parsed = readPaymentEvent(body);
     // Razorpay's own delivery id, which is present even when the envelope has
@@ -215,11 +257,6 @@ export async function gatewayRoutes(app: FastifyInstance): Promise<void> {
     // so a payload carrying neither is refused rather than applied blindly.
     const eventId = parsed.eventId || String(req.headers['x-razorpay-event-id'] ?? '');
 
-    if (!verified) {
-      // Logged, not silently dropped: a run of these is somebody probing.
-      req.log.warn({ eventId, hasSignature: !!signature }, 'razorpay webhook signature rejected');
-      return reply.code(401).send({ error: 'Invalid signature' });
-    }
     if (!eventId) return reply.code(400).send({ error: 'Missing event id' });
 
     // The platform pool, because there is no session to derive a tenant from.
@@ -232,6 +269,33 @@ export async function gatewayRoutes(app: FastifyInstance): Promise<void> {
         `SELECT id, tenant_id, payment_schedule_id, amount, status
            FROM gateway_orders WHERE provider = 'razorpay' AND order_ref = $1`,
         [parsed.orderId]);
+
+      /**
+       * THE ORDER IS LOOKED UP BEFORE THE SIGNATURE IS CHECKED, AND THAT
+       * ORDERING IS THE POINT.
+       *
+       * Each builder connects their own Razorpay account, so each has their own
+       * webhook secret. There is no single secret this endpoint could verify
+       * against: the right one is whichever workspace raised the order. So the
+       * order resolves the workspace, the workspace resolves the secret, and
+       * the secret verifies the payload.
+       *
+       * Nothing is TRUSTED before verification — the lookup is a read, and
+       * every write below happens after the check. And the failure responses
+       * are deliberately identical whether the order was found or not, so this
+       * cannot be used to ask "does order X exist on this platform".
+       */
+      const cfg = order
+        ? (await tenantRazorpayById(client, order.tenant_id as string)) ?? razorpayConfig()
+        : razorpayConfig();
+
+      const verified = !!raw && !!cfg && verifyWebhookSignature(raw, signature, cfg.webhookSecret);
+      if (!verified) {
+        await client.query('ROLLBACK');
+        // Logged, not silently dropped: a run of these is somebody probing.
+        req.log.warn({ eventId, hasSignature: !!signature }, 'razorpay webhook signature rejected');
+        return reply.code(401).send({ error: 'Invalid signature' });
+      }
 
       if (!order) {
         // An event for an order this system never raised. Recorded against no
@@ -336,8 +400,115 @@ export async function gatewayRoutes(app: FastifyInstance): Promise<void> {
         })),
         // Deliberately NOT the secret — only whether one is present, which is
         // the question an admin actually needs answered.
-        configured: !!razorpayConfig(),
+        configured: !!(await workspaceRazorpay(db)),
       };
+    }),
+  );
+
+  /**
+   * GET /api/gateway/credentials — is this workspace's own account connected?
+   *
+   * Answers only that. There is no parameter that makes it return a stored
+   * secret, because no code path here decrypts one: it reads key NAMES.
+   *
+   * `source` is what a builder actually needs to know, and it is uncomfortable
+   * on purpose — 'platform' means their buyers' money is landing in the
+   * operator's Razorpay account, not theirs.
+   */
+  app.get('/api/gateway/credentials', { preHandler: requireAuth }, async (req, reply) =>
+    withTenantContext(req.ctx, async (db) => {
+      if (!await gate(db, 'manage_settings')) {
+        return reply.code(403).send({ error: 'Missing permission: manage_settings' });
+      }
+      const names = await tenantKeyNames(db, RAZORPAY_SERVICE);
+      const cfg = await workspaceRazorpay(db);
+      return {
+        service: RAZORPAY_SERVICE,
+        // Which fields are stored, never their values.
+        keysPresent: names,
+        connected: names.includes('key_id') && names.includes('key_secret'),
+        hasWebhookSecret: names.includes('webhook_secret'),
+        source: cfg?.source ?? null,
+        platformFallbackAvailable: !!razorpayConfig(),
+        // Without a KMS key nothing can be stored, and saying so up front is
+        // better than accepting a secret and failing to encrypt it.
+        canStore: kmsConfigured(),
+        webhookUrl: env.publicBaseUrl ? `${env.publicBaseUrl}/api/webhooks/razorpay` : '',
+      };
+    }),
+  );
+
+  /**
+   * PUT /api/gateway/credentials — connect this workspace's own account.
+   *
+   * WRITE-ONLY. A value can be replaced and never read back, by anybody,
+   * through any route. Stored as pgp_sym_encrypt ciphertext under a key that
+   * lives only in the API's environment, so a database dump is not a wallet.
+   *
+   * An empty string CLEARS that field rather than storing an empty secret —
+   * "" would otherwise read back as configured and fail at the moment a buyer
+   * tries to pay.
+   */
+  app.put<{ Body: { keyId?: string; keySecret?: string; webhookSecret?: string } }>(
+    '/api/gateway/credentials',
+    {
+      preHandler: requireAuth,
+      schema: { body: { type: 'object', minProperties: 1, additionalProperties: false, properties: {
+        keyId: { type: 'string', maxLength: 120 },
+        keySecret: { type: 'string', maxLength: 200 },
+        webhookSecret: { type: 'string', maxLength: 200 },
+      } } },
+    },
+    async (req, reply) =>
+      withTenantContext(req.ctx, async (db) => {
+        if (!await gate(db, 'manage_settings')) {
+          return reply.code(403).send({ error: 'Missing permission: manage_settings' });
+        }
+        if (!kmsConfigured()) {
+          return reply.code(503).send({
+            error: 'This deployment cannot store payment credentials yet: KMS_KEY is not set. '
+                 + 'Generate one (openssl rand -base64 48), set it on the API, and restart.',
+          });
+        }
+        const b = req.body;
+        // A key id is public; a key secret is not. Rejecting an obvious
+        // swap early is cheaper than a failed payment later.
+        if (b.keySecret && /^rzp_(test|live)_/i.test(b.keySecret.trim())) {
+          return reply.code(400).send({
+            error: 'That looks like the Key Id, not the Key Secret — the secret does not start with rzp_.',
+          });
+        }
+        for (const [field, name] of [
+          [b.keyId, 'key_id'], [b.keySecret, 'key_secret'], [b.webhookSecret, 'webhook_secret'],
+        ] as const) {
+          if (field === undefined) continue;
+          await putTenantKey(db, RAZORPAY_SERVICE, name, field, req.ctx.userId);
+        }
+
+        const names = await tenantKeyNames(db, RAZORPAY_SERVICE);
+        const cfg = await workspaceRazorpay(db);
+        return {
+          connected: names.includes('key_id') && names.includes('key_secret'),
+          keysPresent: names,
+          source: cfg?.source ?? null,
+          note: names.includes('webhook_secret')
+            ? undefined
+            : 'No webhook secret stored — the key secret will be used to verify webhooks. '
+              + 'Set a separate one in the Razorpay dashboard for safety.',
+        };
+      }),
+  );
+
+  /** DELETE /api/gateway/credentials — disconnect, falling back to the
+   *  platform account if the deployment has one. */
+  app.delete('/api/gateway/credentials', { preHandler: requireAuth }, async (req, reply) =>
+    withTenantContext(req.ctx, async (db) => {
+      if (!await gate(db, 'manage_settings')) {
+        return reply.code(403).send({ error: 'Missing permission: manage_settings' });
+      }
+      const removed = await clearTenantKeys(db, RAZORPAY_SERVICE);
+      const cfg = await workspaceRazorpay(db);
+      return { removed, source: cfg?.source ?? null };
     }),
   );
 }

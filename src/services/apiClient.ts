@@ -3026,6 +3026,42 @@ export async function apiGetPermissionMatrix(): Promise<ApiPermissionMatrix> {
   return request<ApiPermissionMatrix>('/api/permission-matrix');
 }
 
+// ── This workspace's own payment account (tenant_keys) ──────────────────────
+
+export interface ApiGatewayCredentials {
+  service: string;
+  /** WHICH fields are stored — never their values. */
+  keysPresent: string[];
+  connected: boolean;
+  hasWebhookSecret: boolean;
+  /** 'workspace' = this builder collects directly. 'platform' = the operator
+   *  receives their buyers' money and must pass it on. */
+  source: 'workspace' | 'platform' | null;
+  platformFallbackAvailable: boolean;
+  /** False when the deployment has no KMS_KEY, so nothing can be stored. */
+  canStore: boolean;
+  webhookUrl: string;
+}
+
+export async function apiGetGatewayCredentials(): Promise<ApiGatewayCredentials> {
+  return request<ApiGatewayCredentials>('/api/gateway/credentials');
+}
+
+/**
+ * Store this workspace's own gateway keys. WRITE-ONLY — no route returns a
+ * stored secret, so there is deliberately no "get" counterpart for the values.
+ * Omitted fields are left alone; an empty string clears one.
+ */
+export async function apiSaveGatewayCredentials(patch: {
+  keyId?: string; keySecret?: string; webhookSecret?: string;
+}): Promise<{ connected: boolean; keysPresent: string[]; source: string | null; note?: string }> {
+  return request('/api/gateway/credentials', { method: 'PUT', body: JSON.stringify(patch) });
+}
+
+export async function apiDisconnectGateway(): Promise<{ removed: number; source: string | null }> {
+  return request('/api/gateway/credentials', { method: 'DELETE' });
+}
+
 export interface ApiAdvance {
   id: string; employeeId: string; amount: number; recovered: number;
   outstanding: number; perMonth: number; reason: string; issuedOn: string;

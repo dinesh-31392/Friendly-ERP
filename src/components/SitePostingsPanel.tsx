@@ -6,6 +6,7 @@ import {
   apiGetProjects, type ApiPosting,
 } from '../services/apiClient';
 import type { Project } from '../types';
+import LoadFailed from './LoadFailed';
 
 /**
  * Who covers which site.
@@ -43,6 +44,16 @@ export default function SitePostingsPanel({ members, canManage }: Props) {
   const [postings, setPostings] = useState<ApiPosting[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
+  /**
+   * Distinguished from "loaded and empty" deliberately.
+   *
+   * A failed postings fetch used to fall back to [], and every member then
+   * rendered as "Company-wide" — which on THIS screen is a statement about
+   * access, not a blank. An administrator would read it as "nobody is
+   * restricted to a site" and be exactly wrong, with no indication anything
+   * had gone wrong.
+   */
+  const [failed, setFailed] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   const [busy, setBusy] = useState<string | null>(null);
   const [adding, setAdding] = useState<string | null>(null);
@@ -50,14 +61,18 @@ export default function SitePostingsPanel({ members, canManage }: Props) {
   useEffect(() => {
     if (!isApiEnabled()) { setLoading(false); return; }
     let cancelled = false;
-    Promise.all([
-      apiGetPostings().catch(() => [] as ApiPosting[]),
-      apiGetProjects().catch(() => [] as Project[]),
-    ]).then(([p, pr]) => {
-      if (cancelled) return;
-      setPostings(Array.isArray(p) ? p : []);
-      setProjects(Array.isArray(pr) ? pr : []);
-    }).finally(() => { if (!cancelled) setLoading(false); });
+    setFailed(false);
+    // NOT caught per-promise any more: a rejection here has to reach the
+    // catch below so the panel can say it failed rather than render an
+    // authoritative-looking list of people who are all "Company-wide".
+    Promise.all([apiGetPostings(), apiGetProjects()])
+      .then(([p, pr]) => {
+        if (cancelled) return;
+        setPostings(Array.isArray(p) ? p : []);
+        setProjects(Array.isArray(pr) ? pr : []);
+      })
+      .catch(() => { if (!cancelled) setFailed(true); })
+      .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [refreshKey]);
 
@@ -132,6 +147,8 @@ export default function SitePostingsPanel({ members, canManage }: Props) {
 
       {loading ? (
         <div className="py-10 flex justify-center"><Loader2 className="h-5 w-5 text-zinc-300 animate-spin" /></div>
+      ) : failed ? (
+        <LoadFailed what="the site postings" onRetry={() => { setLoading(true); setRefreshKey(k => k + 1); }} />
       ) : (
         <div className="space-y-2">
           {members.filter(m => m.active).map(m => {

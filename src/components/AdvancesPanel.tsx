@@ -5,6 +5,7 @@ import {
   isApiEnabled, apiGetAdvances, apiCreateAdvance, type ApiAdvance,
 } from '../services/apiClient';
 import { formatCurrencyFull } from '../utils/format';
+import LoadFailed from './LoadFailed';
 import type { Employee } from '../types';
 
 /**
@@ -41,6 +42,8 @@ interface Props {
 export default function AdvancesPanel({ employees, currency, canManage }: Props) {
   const [advances, setAdvances] = useState<ApiAdvance[]>([]);
   const [loading, setLoading] = useState(true);
+  // "Could not load" is not "nothing outstanding" — see LoadFailed.
+  const [failed, setFailed] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   const [showNew, setShowNew] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -49,9 +52,14 @@ export default function AdvancesPanel({ employees, currency, canManage }: Props)
   useEffect(() => {
     if (!isApiEnabled()) { setLoading(false); return; }
     let cancelled = false;
+    setFailed(false);
     apiGetAdvances()
       .then(a => { if (!cancelled) setAdvances(a); })
-      .catch(() => { if (!cancelled) setAdvances([]); })
+      // Was `setAdvances([])`, which rendered "No advances recorded" — a
+      // statement about money. Somebody reads that and pays a full salary to a
+      // worker who has drawn against it, and nothing on screen suggested the
+      // list was simply missing.
+      .catch(() => { if (!cancelled) setFailed(true); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [refreshKey]);
@@ -129,6 +137,8 @@ export default function AdvancesPanel({ employees, currency, canManage }: Props)
       <div className="bg-white rounded-2xl border border-zinc-200/60 overflow-hidden">
         {loading ? (
           <div className="py-14 flex justify-center"><Loader2 className="h-6 w-6 text-zinc-300 animate-spin" /></div>
+        ) : failed ? (
+          <LoadFailed what="the advances" onRetry={() => { setLoading(true); setRefreshKey(k => k + 1); }} />
         ) : advances.length === 0 ? (
           <div className="py-14 text-center">
             <Info className="h-9 w-9 text-zinc-200 mx-auto mb-2" />

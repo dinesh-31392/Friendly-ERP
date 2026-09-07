@@ -5,6 +5,7 @@ import {
   isApiEnabled, apiGetGatewayCredentials, apiSaveGatewayCredentials,
   apiDisconnectGateway, type ApiGatewayCredentials,
 } from '../services/apiClient';
+import LoadFailed from './LoadFailed';
 
 /**
  * Connect this builder's own Razorpay account.
@@ -82,7 +83,10 @@ export default function PaymentAccountPanel() {
   if (loading) {
     return <div className="py-10 flex justify-center"><Loader2 className="h-5 w-5 text-zinc-300 animate-spin" /></div>;
   }
-  if (!state) return null;
+  // Was `return null`, so a failed fetch made the whole panel disappear — a
+  // builder looking for where to connect their payment account found nothing
+  // and no reason why.
+  if (!state) return <LoadFailed what="your payment settings" onRetry={() => { setLoading(true); setRefreshKey(k => k + 1); }} />;
 
   const label = 'block text-[11px] font-semibold text-zinc-500 uppercase mb-1';
   const input = 'w-full px-3 py-2 bg-zinc-50 border border-zinc-200 rounded-lg text-sm font-mono';

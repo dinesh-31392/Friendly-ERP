@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import { Loader2, Check, Search, ShieldAlert } from 'lucide-react';
 import { isApiEnabled, apiGetPermissionMatrix, type ApiPermissionMatrix } from '../services/apiClient';
+import LoadFailed from './LoadFailed';
 
 /**
  * Every role, and what it actually grants.
@@ -66,6 +67,9 @@ const pretty = (key: string) =>
 export default function PermissionMatrixPanel() {
   const [data, setData] = useState<ApiPermissionMatrix | null>(null);
   const [loading, setLoading] = useState(true);
+  // A permissions screen that says 'No roles' when it simply could not load is
+  // the worst kind of wrong: it is consulted to decide who is safe to trust.
+  const [failed, setFailed] = useState(false);
   const [q, setQ] = useState('');
 
   useEffect(() => {
@@ -73,7 +77,7 @@ export default function PermissionMatrixPanel() {
     let cancelled = false;
     apiGetPermissionMatrix()
       .then(d => { if (!cancelled) setData(d); })
-      .catch(() => { if (!cancelled) setData(null); })
+      .catch(() => { if (!cancelled) setFailed(true); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, []);
@@ -117,6 +121,7 @@ export default function PermissionMatrixPanel() {
     return <div className="py-12 flex justify-center"><Loader2 className="h-6 w-6 text-zinc-300 animate-spin" /></div>;
   }
 
+  if (failed) return <LoadFailed what="the permission matrix" />;
   if (!data || roles.length === 0) {
     return <div className="py-12 text-center text-sm text-zinc-500">No roles to show.</div>;
   }

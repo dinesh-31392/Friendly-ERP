@@ -142,6 +142,69 @@ describe('panels that take props', () => {
     vi.resetModules();
   });
 
+  /**
+   * A FAILED FETCH IS NOT AN EMPTY LIST.
+   *
+   * These panels used to `.catch(() => setX([]))` and then render their empty
+   * state — which on these particular screens is a CLAIM, not a blank:
+   *
+   *   SitePostings  every member shown as "Company-wide" — an administrator
+   *                 reads that as "nobody is restricted" and is wrong.
+   *   Advances      "No advances recorded" — somebody pays a full salary to a
+   *                 worker who has drawn against it.
+   *
+   * The stub rejects every call, which is the shape of an API that is down, a
+   * session that has expired, or a permission that was revoked mid-session.
+   * The assertion is that the panel says it could not load rather than
+   * asserting something false and reassuring.
+   */
+  const rejectingStub = () => {
+    const base = apiClientStub();
+    return new Proxy(base as Record<string, unknown>, {
+      get(target, prop: string) {
+        const v = target[prop];
+        if (typeof v === 'function' && prop.startsWith('api')) {
+          return () => Promise.reject(new Error('network down'));
+        }
+        return v;
+      },
+    });
+  };
+
+  it('SitePostingsPanel says it failed rather than showing everyone as company-wide', async () => {
+    vi.doMock('../../services/apiClient', () => rejectingStub());
+    const { default: Panel } = await import('../../components/SitePostingsPanel');
+    const members = [{ id: 'u1', name: 'Somebody', email: 'a@b.test', role: 'hr_manager', active: true }];
+    const { findByText, queryByText } = renderPage(<Panel members={members} canManage />);
+    expect(await findByText(/Could not load the site postings/i)).toBeTruthy();
+    // The exact badge text, not the phrase. The panel's standing explanation
+    // ("No posting means company-wide, not blind") is a heading that should
+    // survive a failed load — what must NOT survive is a per-member badge
+    // asserting that this particular person is unrestricted.
+    expect(queryByText('Company-wide'), 'claimed a member is unscoped after a failed load').toBeNull();
+    vi.doUnmock('../../services/apiClient');
+    vi.resetModules();
+  });
+
+  it('AdvancesPanel says it failed rather than reporting nothing outstanding', async () => {
+    vi.doMock('../../services/apiClient', () => rejectingStub());
+    const { default: Panel } = await import('../../components/AdvancesPanel');
+    const { findByText, queryByText } = renderPage(<Panel employees={[]} currency="INR" canManage />);
+    expect(await findByText(/Could not load the advances/i)).toBeTruthy();
+    expect(queryByText(/No advances recorded/i), 'claimed no money is owed after a failed load').toBeNull();
+    vi.doUnmock('../../services/apiClient');
+    vi.resetModules();
+  });
+
+  it('PaymentAccountPanel says it failed rather than vanishing', async () => {
+    vi.doMock('../../services/apiClient', () => rejectingStub());
+    const { default: Panel } = await import('../../components/PaymentAccountPanel');
+    const { findByText } = renderPage(<Panel />);
+    expect(await findByText(/Could not load your payment settings/i)).toBeTruthy();
+    vi.doUnmock('../../services/apiClient');
+    vi.resetModules();
+  });
+
   it('EmployeeEditDrawer opens on a record carrying nothing but an id', async () => {
     // The drawer prefills from an employee row. Every statutory field is
     // optional and a person hired before migration 062 has none of them, so

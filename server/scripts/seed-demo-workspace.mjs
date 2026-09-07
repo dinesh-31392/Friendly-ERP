@@ -151,14 +151,32 @@ const { rows: [broker] } = await c.query(
 //
 // One lead is deliberately left without an address: a real pipeline has walk-ins
 // who only ever gave a phone number, and the UI has to look right for them too.
+/**
+ * The eighth column is WHOSE lead it is, and it is the reason this list is
+ * not all one rep's any more.
+ *
+ * Every lead used to be assigned to `sales`. Three consequences, all of which
+ * made the product look broken to anybody evaluating it by role:
+ *
+ *   · The TELECALLER — whose entire job is working enquiries — opened a
+ *     dashboard with nothing on it, because no lead was theirs.
+ *   · The own-vs-all boundary was invisible. A sales executive holds
+ *     manage_own_leads and a sales manager holds manage_leads, but both saw
+ *     the same seven rows, so the difference could not be seen or demonstrated.
+ *   · Nobody could tell correct scoping from a broken query, because both
+ *     produce the same number when one person owns everything.
+ *
+ * Split so the counts differ and the boundary shows: the manager sees all
+ * seven, the executive four, the telecaller three.
+ */
 const LEADS = [
-  ['Sanjay Gupta',  '9820000001', 'new',         'Website',  null,      6000000, 'sanjay.gupta@example.com'],
-  ['Neha Kulkarni', '9820000002', 'contacted',   'WhatsApp', null,      7500000, 'neha.kulkarni@example.com'],
-  ['Arun Pillai',   '9820000003', 'qualified',   'Referral', broker.id, 8200000, 'arun.pillai@example.com'],
-  ['Divya Nair',    '9820000004', 'site_visit',  'Walk-in',  null,      6800000, ''],
-  ['Karan Shah',    '9820000005', 'negotiation', 'Website',  broker.id, 9100000, 'karan.shah@example.com'],
-  ['Farah Khan',    '9820000006', 'new',         'Portal',   null,      5500000, 'farah.khan@example.com'],
-  ['Vivek Joshi',   '9820000007', 'lost',        'Website',  null,      4800000, 'vivek.joshi@example.com', 'Bought elsewhere'],
+  ['Sanjay Gupta',  '9820000001', 'new',         'Website',  null,      6000000, 'sanjay.gupta@example.com', 'sales', null],
+  ['Neha Kulkarni', '9820000002', 'contacted',   'WhatsApp', null,      7500000, 'neha.kulkarni@example.com', 'tele', null],
+  ['Arun Pillai',   '9820000003', 'qualified',   'Referral', broker.id, 8200000, 'arun.pillai@example.com', 'sales', null],
+  ['Divya Nair',    '9820000004', 'site_visit',  'Walk-in',  null,      6800000, '', 'sales', null],
+  ['Karan Shah',    '9820000005', 'negotiation', 'Website',  broker.id, 9100000, 'karan.shah@example.com', 'sales', null],
+  ['Farah Khan',    '9820000006', 'new',         'Portal',   null,      5500000, 'farah.khan@example.com', 'tele', null],
+  ['Vivek Joshi',   '9820000007', 'lost',        'Website',  null,      4800000, 'vivek.joshi@example.com', 'tele', 'Bought elsewhere'],
 ];
 /**
  * How long ago each enquiry arrived.
@@ -183,7 +201,7 @@ const ENQUIRED_DAYS_AGO = {
 };
 
 const leadIds = [];
-for (const [name, phone, stage, source, brokerId, budget, email, lostReason] of LEADS) {
+for (const [name, phone, stage, source, brokerId, budget, email, owner, lostReason] of LEADS) {
   const daysAgo = String(ENQUIRED_DAYS_AGO[name] ?? 0);
   const { rows: [l] } = await c.query(
     `INSERT INTO leads (tenant_id, name, phone, email, stage, source, project, budget, assigned_to, broker_id, lost_reason,
@@ -192,12 +210,12 @@ for (const [name, phone, stage, source, brokerId, budget, email, lostReason] of 
              now() - ($11 || ' days')::interval,
              now() - ($11 || ' days')::interval,
              now() - ($11 || ' days')::interval) RETURNING id`,
-    [t.id, name, phone, email, stage, source, budget, userId.sales, brokerId, lostReason ?? null, daysAgo]);
+    [t.id, name, phone, email, stage, source, budget, userId[owner], brokerId, lostReason ?? null, daysAgo]);
   leadIds.push(l.id);
   await c.query(
     `INSERT INTO lead_activities (tenant_id, lead_id, user_id, type, notes)
      VALUES ($1,$2,$3,'call',$4)`,
-    [t.id, l.id, userId.sales, `Intro call with ${name.split(' ')[0]}`]);
+    [t.id, l.id, userId[owner], `Intro call with ${name.split(' ')[0]}`]);
 }
 
 console.log('→ bookings (with the full server cascade)');
@@ -281,11 +299,37 @@ await c.query(`
   ON CONFLICT (payment_id) DO NOTHING`, [t.id]);
 
 console.log('→ calendar, HR, materials');
-for (const [title, cat, days] of [['Call Neha about floor plan','follow_up',1],['Site visit — Divya','visit',2],['Collect token from Karan','payment',3]]) {
+/**
+ * A task belongs to the person who has to do it — crm_tasks.user_id, which the
+ * route scopes on. All three used to belong to `sales`, so every other role
+ * opened a calendar and a "Needs Attention" panel with nothing in them and no
+ * way to tell an empty queue from a broken one.
+ *
+ * One per working role now, in that role's own language, so each dashboard has
+ * something true on it and the scoping is visible: each person sees theirs, the
+ * roles that see all see all.
+ */
+for (const [owner, title, cat, days] of [
+  ['sales',    'Call Neha about floor plan',            'follow_up', 1],
+  ['sales',    'Collect token from Karan',              'payment',   3],
+  ['tele',     'First call — Farah Khan',               'follow_up', 1],
+  ['tele',     'Re-attempt Vivek Joshi',                'follow_up', 4],
+  ['manager',  'Review this week’s pipeline with Priya','follow_up', 2],
+  ['site',     'Walk Tower A slab with the contractor', 'visit',     1],
+  ['hr',       'Approve Sunita’s leave request',        'follow_up', 1],
+  // No task for the ACCOUNTANT, deliberately. The accountant role holds no
+  // view_calendar, so /api/crm-tasks refuses them — a task seeded here would
+  // be a row nobody can open, which is worse than an empty queue because it
+  // looks like data loss. Whether a finance role should have a calendar at all
+  // is a product question, not something a seeder should answer by writing
+  // unreachable rows.
+  ['land',     'Chase title report for Wakad parcel',   'follow_up', 3],
+  ['bd',       'Send heads of terms to Pune landowner', 'follow_up', 2],
+]) {
   await c.query(
     `INSERT INTO crm_tasks (tenant_id, user_id, title, due_date, priority, status, category, created_by)
      VALUES ($1,$2,$3, now() + ($4 || ' days')::interval, 'hot','pending',$5,$2)`,
-    [t.id, userId.sales, title, String(days), cat]);
+    [t.id, userId[owner], title, String(days), cat]);
 }
 // The fourth column is the LOGIN this employee is, where there is one.
 // Without it the demo seeded an employee called Imran Qureshi and a user
@@ -494,7 +538,13 @@ console.log(`
     partner@acme.test    referrals and commission statements for one agency
 
   Data: 48 units (2 booked), 7 leads across the pipeline, 2 bookings
-  with commissions and invoices, 3 tasks, 3 materials.
+  with commissions and invoices, 10 tasks, 3 materials.
+
+  Work is SPREAD ACROSS ROLES on purpose: 4 leads to Priya and 3 to Sneha,
+  one task each for eight of the accounts. Sign in as any of them and the
+  dashboard has something true on it — and the own-vs-all boundary is
+  visible, because the manager sees seven leads where the executive sees
+  four.
   People: 3 employees, 2 present today, 1 leave request pending, last
   month's payroll processed.
   Acquisition: 4 land parcels (1 converted), 3 BD opportunities.

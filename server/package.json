@@ -57,7 +57,8 @@
     "verify:tenantdelete": "node scripts/verify-tenant-deletion.mjs",
     "verify:confidentiality": "node scripts/verify-confidentiality.mjs",
     "preflight": "node scripts/preflight.mjs",
-    "verify:isolation": "node scripts/verify-integration-isolation.mjs"
+    "verify:isolation": "node scripts/verify-integration-isolation.mjs",
+    "verify:roledash": "node scripts/verify-role-dashboards.mjs"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",

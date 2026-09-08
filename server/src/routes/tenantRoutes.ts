@@ -82,7 +82,9 @@ const ROLE_PERMS: Record<string, string[]> = {
     'send_messages','signoff_ra_bills'],
   telecaller: ['view_dashboard','view_leads','manage_own_leads','add_notes','view_projects','view_calendar',
     'schedule_visits','view_messages','send_messages'],
-  accountant: ['view_dashboard','view_projects','view_reports','view_accounts','manage_accounts',
+  // view_calendar: finance work is dated work (migration 066). Tasks are
+  // scoped per person, so this is their own list, not the sales pipeline.
+  accountant: ['view_dashboard','view_projects','view_reports','view_accounts','manage_accounts','view_calendar',
     'view_finance','manage_finance','view_procurement','view_bookings','view_documents',
     'view_invoices','manage_invoices',
     // Prepares the owner payout; releasing it stays with the account owner, so

@@ -468,6 +468,9 @@ export function hasPermission(user: User, action: string): boolean {
       'view_accounts', 'manage_accounts',
       'view_finance', 'manage_finance',
       'view_procurement', 'view_bookings', 'view_documents',
+      // Finance work is dated work — month-end close, GST and TDS deadlines.
+      // Granted to existing workspaces by migration 066.
+      'view_calendar',
       // Prepares the owner payout statement but cannot release it — the
       // maker/checker split that migration 036 enforces in the database too
       'view_leasing', 'view_owner_payouts', 'manage_owner_payouts',

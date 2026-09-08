@@ -38,7 +38,7 @@ const ROLE_PERMS = {
   sales_manager: ['view_dashboard','view_leads','manage_leads','assign_leads','add_notes','manage_team','view_reports','view_inventory','view_projects','view_sales_performance','view_finance','view_messages','send_messages','view_documents','view_service','manage_service','view_calendar','schedule_visits','use_ai_studio','create_bookings','approve_reminders','view_campaigns','manage_campaigns','view_bookings','manage_bookings','view_brokers','view_execution','create_quotations','approve_discounts','view_invoices','view_leasing','manage_leasing'],
   sales_executive: ['view_dashboard','view_leads','manage_own_leads','add_notes','view_inventory','view_projects','view_messages','send_messages','view_documents','view_calendar','schedule_visits','use_ai_studio','create_bookings','view_bookings','create_quotations'],
   telecaller: ['view_dashboard','view_leads','manage_own_leads','add_notes','view_projects','view_calendar','schedule_visits','view_messages','send_messages'],
-  accountant: ['view_dashboard','view_projects','view_reports','view_accounts','manage_accounts','view_finance','manage_finance','view_procurement','view_bookings','view_documents','view_invoices','manage_invoices','view_leasing','view_owner_payouts','manage_owner_payouts'],
+  accountant: ['view_dashboard','view_projects','view_reports','view_accounts','manage_accounts','view_calendar','view_finance','manage_finance','view_procurement','view_bookings','view_documents','view_invoices','manage_invoices','view_leasing','view_owner_payouts','manage_owner_payouts'],
   site_engineer: ['view_dashboard','view_projects','view_execution','manage_execution','view_procurement','manage_procurement','view_hr','manage_attendance','view_documents','view_calendar','view_messages','send_messages','signoff_ra_bills'],
   // No manage_hr_all: this manager is posted to a site below, and a posted
   // manager IS the per-project case migration 061 exists to serve. The admin
@@ -317,12 +317,12 @@ for (const [owner, title, cat, days] of [
   ['manager',  'Review this week’s pipeline with Priya','follow_up', 2],
   ['site',     'Walk Tower A slab with the contractor', 'visit',     1],
   ['hr',       'Approve Sunita’s leave request',        'follow_up', 1],
-  // No task for the ACCOUNTANT, deliberately. The accountant role holds no
-  // view_calendar, so /api/crm-tasks refuses them — a task seeded here would
-  // be a row nobody can open, which is worse than an empty queue because it
-  // looks like data loss. Whether a finance role should have a calendar at all
-  // is a product question, not something a seeder should answer by writing
-  // unreachable rows.
+  // The accountant's task was removed when this role held no view_calendar —
+  // it was a row nobody could open. Migration 066 gave finance its calendar,
+  // because month-end close, GSTR-1 on the 11th and TDS on the 7th are all
+  // dated work, so the task is back and reachable.
+  ['accounts', 'Reconcile August receipts',             'payment',   2],
+  ['accounts', 'GSTR-3B for August — file by the 20th', 'payment',   5],
   ['land',     'Chase title report for Wakad parcel',   'follow_up', 3],
   ['bd',       'Send heads of terms to Pune landowner', 'follow_up', 2],
 ]) {

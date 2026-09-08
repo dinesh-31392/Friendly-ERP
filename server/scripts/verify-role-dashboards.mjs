@@ -99,6 +99,12 @@ const telecaller = await member('telecaller',
   ['view_dashboard', 'view_leads', 'manage_own_leads', 'view_calendar']);
 const hrMgr = await member('hr_manager',
   ['view_dashboard', 'view_hr', 'manage_hr', 'manage_attendance', 'view_calendar']);
+// Finance work is dated work — month-end close, GSTR-1 on the 11th, TDS on the
+// 7th — and crm_tasks has always accepted a 'payment' category this role could
+// not open. Granted in migration 066; asserted here so the four places that
+// define role grants cannot drift back out of step.
+const accountant = await member('accountant',
+  ['view_dashboard', 'view_accounts', 'manage_accounts', 'view_calendar']);
 
 const project = (await admin.query(
   `INSERT INTO projects (tenant_id, name, city, status)
@@ -115,7 +121,7 @@ for (const [name, owner] of [
      VALUES ($1,$2,'98200'||floor(random()*100000)::text,'new',$3)`,
     [tenant.id, name, owner.userId]);
 }
-for (const who of [salesExec, telecaller, hrMgr]) {
+for (const who of [salesExec, telecaller, hrMgr, accountant]) {
   await admin.query(
     `INSERT INTO crm_tasks (tenant_id, user_id, title, created_by)
      VALUES ($1,$2,$3,$2)`, [tenant.id, who.userId, `${who.slug} task`]);
@@ -163,8 +169,18 @@ const execTasks = await feed(salesExec, '/api/crm-tasks');
 const callerTasks = await feed(telecaller, '/api/crm-tasks');
 ok('each front-line person sees exactly their own task',
   execTasks === 1 && callerTasks === 1, `${execTasks}/${callerTasks}`);
-ok('and the manager, who sees all leads, sees all three tasks',
-  await feed(salesMgr, '/api/crm-tasks') === 3);
+ok('and the manager, who sees all leads, sees every task',
+  await feed(salesMgr, '/api/crm-tasks') === 4,
+  String(await feed(salesMgr, '/api/crm-tasks')));
+
+// Migration 066. This assertion is the one that would have caught the gap: the
+// accountant's task existed and the role could not read it back, which is a row
+// nobody can open rather than an empty queue.
+const acctTasks = await feed(accountant, '/api/crm-tasks');
+ok('an accountant can open their own dated work — close, GST, TDS',
+  acctTasks === 1, String(acctTasks));
+ok('and still cannot see the sales pipeline',
+  await feed(accountant, '/api/leads') === 'denied');
 
 console.log('\n=== A ROLE IS NOT SHOWN A MODULE IT DOES NOT RUN ===');
 // Refused, not empty. A zero would be a claim — "you have no employees" —

@@ -126,6 +126,11 @@ export const ROLE_PERMS: Record<string, string[]> = {
     'view_accounts', 'manage_accounts',
     'view_finance', 'manage_finance',
     'view_procurement', 'view_bookings', 'view_documents',
+    // Finance work is dated work — month-end close, GSTR-1 on the 11th, TDS on
+    // the 7th — and crm_tasks has always accepted a 'payment' category this
+    // role could not open (migration 066). Tasks stay scoped to the person, so
+    // this is their own list and grants nothing about the sales pipeline.
+    'view_calendar',
     // Prepares the owner statement; releasing it is the account owner's call,
     // so approve_owner_payouts is deliberately absent.
     'view_leasing', 'view_owner_payouts', 'manage_owner_payouts',

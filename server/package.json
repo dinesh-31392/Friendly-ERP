@@ -59,7 +59,8 @@
     "preflight": "node scripts/preflight.mjs",
     "verify:isolation": "node scripts/verify-integration-isolation.mjs",
     "verify:roledash": "node scripts/verify-role-dashboards.mjs",
-    "verify:whitelabel": "node scripts/verify-white-label.mjs"
+    "verify:whitelabel": "node scripts/verify-white-label.mjs",
+    "verify:approvals": "node scripts/verify-approval-gates.mjs"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",

@@ -108,7 +108,12 @@ export async function quotationsRoutes(app: FastifyInstance): Promise<void> {
       preHandler: requireAuth,
       schema: {
         body: {
-          type: 'object', required: ['leadId', 'unitId', 'totalAmount', 'validUntil'],
+          // base_amount is NOT NULL with no default, so omitting it passed
+          // validation and then failed the INSERT — surfacing as the generic
+          // "A required field is missing." with no field named. The SPA always
+          // sends it, so this breaks no working caller; it turns a dead end into
+          // a message that says which field.
+          type: 'object', required: ['leadId', 'unitId', 'baseAmount', 'totalAmount', 'validUntil'],
           additionalProperties: false,
           properties: { leadId: { type: 'string', pattern: UUID }, unitId: { type: 'string', pattern: UUID }, ...PROPS },
         },

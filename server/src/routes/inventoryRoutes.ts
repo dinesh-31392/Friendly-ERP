@@ -119,8 +119,19 @@ export async function inventoryRoutes(app: FastifyInstance): Promise<void> {
   /** GET /api/towers — RLS-scoped; view_inventory gates access. */
   app.get('/api/towers', { preHandler: requireAuth }, async (req, reply) =>
     withTenantContext(req.ctx, async (db) => {
-      const { rows: [{ allowed }] } = await db.query(`SELECT has_permission('view_inventory') AS allowed`);
-      if (!allowed) return reply.code(403).send({ error: 'Missing permission: view_inventory' });
+      // A tower is project STRUCTURE — name, floors, units per floor — and
+      // carries nothing commercial; price, availability and the buyer all live
+      // on /api/units, which keeps view_inventory.
+      //
+      // Gating this on view_inventory broke the Projects page for six of the ten
+      // roles: view_projects put "Projects" in their sidebar, the page counted
+      // towers from the store that fetch fills, and the refusal left it empty —
+      // so a site engineer opened the project they are building and read
+      // "0 Towers". A wrong number, not an error, which is the failure that
+      // hides. Whoever may see a project may see how many towers are in it.
+      const { rows: [{ allowed }] } = await db.query(
+        `SELECT has_permission('view_projects') OR has_permission('view_inventory') AS allowed`);
+      if (!allowed) return reply.code(403).send({ error: 'Missing permission: view_projects' });
       const { rows } = await db.query('SELECT * FROM towers ORDER BY name');
       return { towers: rows.map(toApiTower) };
     }),

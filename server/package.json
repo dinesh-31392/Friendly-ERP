@@ -60,7 +60,8 @@
     "verify:isolation": "node scripts/verify-integration-isolation.mjs",
     "verify:roledash": "node scripts/verify-role-dashboards.mjs",
     "verify:whitelabel": "node scripts/verify-white-label.mjs",
-    "verify:approvals": "node scripts/verify-approval-gates.mjs"
+    "verify:approvals": "node scripts/verify-approval-gates.mjs",
+    "verify:money": "node scripts/verify-money-controls.mjs"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",

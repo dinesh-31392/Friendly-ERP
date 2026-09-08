@@ -303,8 +303,25 @@ export async function financeApRoutes(app: FastifyInstance): Promise<void> {
     },
     async (req, reply) =>
       withTenantContext(req.ctx, async (db) => {
-        if (!await gate(db, 'manage_finance')) return reply.code(403).send({ error: 'Missing permission: manage_finance' });
-        // Two-stage maker-checker: stamp whichever approver this transition is.
+        // Two-stage maker-checker — and until now it only STAMPED the approver,
+        // never checked they were entitled to be one. Every transition gated on
+        // manage_finance alone, which broke the control in both directions:
+        //
+        //   the site engineer, who holds signoff_ra_bills and no finance key,
+        //   was refused the "Verify Progress" button Accounts.tsx renders for
+        //   them — the first stage of paying a contractor, dead for its owner
+        //
+        //   the accountant, holding manage_finance, could do BOTH stages, so one
+        //   person moved a contractor bill from submitted to approved and the
+        //   row recorded them as site verifier and finance approver alike
+        //
+        // Each stage now needs its own key; everything else stays with finance.
+        const STAGE_KEY: Record<string, string> = {
+          pmc_approved: 'signoff_ra_bills',
+          finance_approved: 'approve_vendor_bills',
+        };
+        const needed = STAGE_KEY[req.body.status] ?? 'manage_finance';
+        if (!await gate(db, needed)) return reply.code(403).send({ error: `Missing permission: ${needed}` });
         const pmc = req.body.status === 'pmc_approved' ? req.ctx.userId : null;
         const fin = req.body.status === 'finance_approved' ? req.ctx.userId : null;
         const { rows } = await db.query(

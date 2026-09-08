@@ -89,6 +89,51 @@ function collectWrites(body: QuotationBody) {
   return { cols, exprs, params };
 }
 
+/**
+ * Who is allowed to approve a discount, and on which quotation.
+ *
+ * THE HOLE THIS CLOSES
+ *
+ * The routing decision lived entirely in the browser. Bookings.tsx computed
+ *
+ *   const parked = discountNeedsApproval && !canApproveDiscount;
+ *   discountApprovedBy: ... canApproveDiscount ? actor.id : undefined,
+ *   status: parked ? 'pending_approval' : 'draft',
+ *
+ * and POSTed the result, while this route gated only on create_quotations and
+ * took discount_approved_by and status as ordinary writable columns. So the
+ * control was advisory: a sales executive holding create_quotations but NOT
+ * approve_discounts could send {discountApprovedBy: <self>, status: 'draft'} and
+ * self-approve any discount. Verified against the running API — a ₹9,00,000
+ * discount, nine times the default threshold, went live with the rep recorded
+ * as its own approver.
+ *
+ * THE RULE
+ *
+ * discount_approved_by is never accepted from the caller; it is derived. Above
+ * the tenant's threshold the quotation parks in pending_approval unless the
+ * caller holds approve_discounts, in which case they are stamped as the
+ * approver. Below the threshold no approval is involved and the column stays
+ * null, so a stamp always means a real decision by someone entitled to make it.
+ *
+ * The threshold mirrors the SPA's DEFAULTS.discount so an unconfigured
+ * workspace behaves the same on both sides; approval_workflows overrides it
+ * per tenant, under the '_approval' spelling the CHECK constraint requires.
+ */
+const DISCOUNT_DEFAULT = 100_000;
+
+async function discountRuling(db: import('pg').PoolClient, discountAmount: unknown) {
+  const amount = Number(discountAmount ?? 0);
+  if (!(amount > 0)) return { parks: false, stamp: false };
+  const { rows: [rule] } = await db.query(
+    `SELECT threshold_amount FROM approval_workflows WHERE action_type = 'discount_approval' LIMIT 1`);
+  const threshold = rule?.threshold_amount === null || rule?.threshold_amount === undefined
+    ? DISCOUNT_DEFAULT : Number(rule.threshold_amount);
+  if (amount < threshold) return { parks: false, stamp: false };
+  const { rows: [{ allowed }] } = await db.query(`SELECT has_permission('approve_discounts') AS allowed`);
+  return allowed ? { parks: false, stamp: true } : { parks: true, stamp: false };
+}
+
 export async function quotationsRoutes(app: FastifyInstance): Promise<void> {
   /** GET /api/quotations — RLS-scoped; view_bookings gates (quotes live on the
    *  bookings page). */
@@ -124,7 +169,15 @@ export async function quotationsRoutes(app: FastifyInstance): Promise<void> {
         return await withTenantContext(req.ctx, async (db) => {
           const { rows: [{ allowed }] } = await db.query(`SELECT has_permission('create_quotations') AS allowed`);
           if (!allowed) return reply.code(403).send({ error: 'Missing permission: create_quotations' });
-          const { cols, exprs, params } = collectWrites(req.body);
+          // The server decides the discount routing; the caller's own view of it
+          // is discarded, including any discountApprovedBy they tried to supply.
+          const ruling = await discountRuling(db, req.body.discountAmount);
+          const { cols, exprs, params } = collectWrites({
+            ...req.body,
+            discountApprovedBy: undefined,
+            status: ruling.parks ? 'pending_approval' : req.body.status,
+          });
+          if (ruling.stamp) { cols.push('discount_approved_by'); exprs.push('app_current_user()'); }
           params.push(req.body.leadId, req.body.unitId);
           const leadPh = `$${params.length - 1}`;
           const unitPh = `$${params.length}`;
@@ -162,9 +215,35 @@ export async function quotationsRoutes(app: FastifyInstance): Promise<void> {
         return await withTenantContext(req.ctx, async (db) => {
           const { rows: [{ allowed }] } = await db.query(`SELECT has_permission('create_quotations') AS allowed`);
           if (!allowed) return reply.code(403).send({ error: 'Missing permission: create_quotations' });
-          const { rows: found } = await db.query('SELECT 1 FROM quotations WHERE id = $1', [req.params.id]);
+          const { rows: found } = await db.query(
+            'SELECT status, discount_amount FROM quotations WHERE id = $1', [req.params.id]);
           if (found.length === 0) return reply.code(404).send({ error: 'Quotation not found' });
-          const { cols, exprs, params } = collectWrites(req.body);
+
+          // Releasing a parked quotation IS the approval — the one moment the
+          // discount takes effect — so it needs the key regardless of which
+          // status it is being moved to.
+          const releasing = found[0].status === 'pending_approval'
+            && req.body.status !== undefined && req.body.status !== 'pending_approval';
+          if (releasing) {
+            const { rows: [{ allowed: mayApprove }] } = await db.query(
+              `SELECT has_permission('approve_discounts') AS allowed`);
+            if (!mayApprove) return reply.code(403).send({ error: 'Missing permission: approve_discounts' });
+          }
+          // Only re-rule when the discount ITSELF moves. Re-running it on every
+          // edit would re-park a quotation a manager had already approved
+          // because a rep corrected an unrelated field.
+          const ruling = req.body.discountAmount !== undefined
+            ? await discountRuling(db, req.body.discountAmount)
+            : { parks: false, stamp: false };
+          const { cols, exprs, params } = collectWrites({
+            ...req.body,
+            discountApprovedBy: undefined,
+            status: ruling.parks ? 'pending_approval' : req.body.status,
+          });
+          // Raising a discount past the threshold voids the approval it had:
+          // what was signed off is no longer what the quotation says.
+          if (ruling.parks) { cols.push('discount_approved_by'); exprs.push('NULL'); }
+          if (ruling.stamp) { cols.push('discount_approved_by'); exprs.push('app_current_user()'); }
           if (cols.length === 0) return reply.code(400).send({ error: 'No writable fields supplied' });
           const sets = cols.map((c, i) => `${c} = ${exprs[i]}`);
           params.push(req.params.id);

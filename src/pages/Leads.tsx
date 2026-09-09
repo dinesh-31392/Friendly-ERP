@@ -18,7 +18,7 @@ import { toCsv } from '../utils/csv';
 import { inviteCustomer, portalPath } from '../services/portalService';
 import {
   isApiEnabled, apiGetLeads, apiCreateTask, apiReassignLeadActivities,
-  apiCallLead, apiGetTelephonySettings,
+  apiCallLead, apiGetTelephonySettings, apiGetProjects,
 } from '../services/apiClient';
 import { logLeadActivity, addLeadNote } from '../services/leadActivityWrites';
 import { createLead, patchLead, deleteLead as removeLead, patchLeads, deleteLeads } from '../services/leadWrites';
@@ -234,7 +234,37 @@ export default function Leads() {
     [apiLeads, tenantId, refreshKey]
   );
   const allUsers = useTenantUsers(tenantId, refreshKey);
-  const tenantProjects = useMemo(() => getByTenant<{ tenantId: string; id: string; name: string }>('projects', tenantId), [tenantId, refreshKey]);
+  /**
+   * The workspace's projects — FETCHED, because nothing fills the local store.
+   *
+   * getByTenant('projects', …) returned [] on every API-mode deployment: no
+   * code path has ever written a `projects` collection to browser storage, and
+   * a check of a live workspace found landLeads, bdLeads and accounts there but
+   * no projects key at all. Two things quietly depended on it:
+   *
+   *   the Add Lead form   its Project select falls back to a lone "General
+   *                       Enquiry" when the list is empty, so EVERY lead created
+   *                       through the UI was filed under that instead of the
+   *                       project the buyer enquired about — in a product whose
+   *                       whole pipeline is per-project. Confirmed by creating
+   *                       one and reading the row back from Postgres.
+   *   executive scoping   the filter below matches a rep's assigned projects by
+   *                       NAME, and with no projects to match, a rep scoped to a
+   *                       site saw only leads assigned to them personally.
+   *
+   * Every role that can reach this page holds view_projects, so this needs no
+   * permission gate of its own; a failure leaves the list empty, which is the
+   * behaviour that was there before.
+   */
+  const [tenantProjects, setTenantProjects] = useState<{ id: string; name: string }[]>([]);
+  useEffect(() => {
+    if (!isApiEnabled()) { setTenantProjects(getByTenant<{ tenantId: string; id: string; name: string }>('projects', tenantId)); return; }
+    let cancelled = false;
+    apiGetProjects()
+      .then(rows => { if (!cancelled) setTenantProjects(rows.map(p => ({ id: p.id, name: p.name }))); })
+      .catch(() => { /* leave empty — the form falls back to General Enquiry */ });
+    return () => { cancelled = true; };
+  }, [tenantId, refreshKey]);
   // Front-line staff see leads assigned to them, PLUS (when the admin has
   // scoped them to projects) every lead in their assigned projects — the
   // user_project_assignments model from the CRM spec.

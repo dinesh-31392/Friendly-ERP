@@ -62,6 +62,26 @@ export default function Dashboard() {
   const [units, setUnits] = useState<Unit[]>([]);
   const [activities, setActivities] = useState<Activity[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
+  /**
+   * The gates this effect reads, hoisted so they can be DEPENDED on.
+   *
+   * hasPermission returns false while `user` is still null, and on a cold login
+   * the session hydrates across several renders. An effect keyed only on
+   * tenantId could therefore run once with every gate false and never run
+   * again — tenantId does not change a second time and refreshKey never moves —
+   * leaving a builder looking at "0 Available Units, 0 Active Projects" on the
+   * first screen after signing in, with the real figures one navigation away.
+   * Observed exactly that on a cold start; visiting /projects and coming back
+   * filled the tiles in.
+   *
+   * These are booleans, not the hasPermission function, so depending on them
+   * re-runs the fetch when the answer changes and not merely when the callback
+   * identity does. The HR and land/BD effects below already work this way.
+   */
+  const canSeeLeads = hasPermission('view_leads');
+  const canSeeCalendar = hasPermission('view_calendar');
+  const canSeeInventory = hasPermission('view_inventory');
+  const canSeeProjects = hasPermission('view_projects');
   useEffect(() => {
     let cancelled = false;
     const set = <T,>(fn: (v: T[]) => void) => (rows: T[]) => { if (!cancelled) fn(rows); };
@@ -72,16 +92,15 @@ export default function Dashboard() {
     // land manager and an accountant hold none of view_leads / view_inventory,
     // so three of these five were a guaranteed 403 on every dashboard load —
     // caught and discarded, invisible except as red in the console.
-    if (hasPermission('view_leads')) {
+    if (canSeeLeads) {
       apiGetLeads().then(set(setAllLeads)).catch(() => {});
       apiGetLeadActivities().then(rows => { if (!cancelled) setActivities(rows.map(toActivity)); }).catch(() => {});
     }
-    if (hasPermission('view_calendar')) apiGetTasks().then(set(setAllTasks)).catch(() => {});
-    if (hasPermission('view_inventory')) apiGetUnits().then(set(setUnits)).catch(() => {});
-    if (hasPermission('view_projects')) apiGetProjects().then(set(setProjects)).catch(() => {});
+    if (canSeeCalendar) apiGetTasks().then(set(setAllTasks)).catch(() => {});
+    if (canSeeInventory) apiGetUnits().then(set(setUnits)).catch(() => {});
+    if (canSeeProjects) apiGetProjects().then(set(setProjects)).catch(() => {});
     return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tenantId, refreshKey]);
+  }, [tenantId, refreshKey, canSeeLeads, canSeeCalendar, canSeeInventory, canSeeProjects]);
   const users = useTenantUsers(tenantId, refreshKey);
 
   // ERP visibility — each block needs both the permission AND the module on

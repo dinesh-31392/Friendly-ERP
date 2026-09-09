@@ -38,7 +38,11 @@ const ROLE_PERMS = {
   sales_manager: ['view_dashboard','view_leads','manage_leads','assign_leads','add_notes','manage_team','view_reports','view_inventory','view_projects','view_sales_performance','view_finance','view_messages','send_messages','view_documents','view_service','manage_service','view_calendar','schedule_visits','use_ai_studio','create_bookings','approve_reminders','view_campaigns','manage_campaigns','view_bookings','manage_bookings','view_brokers','view_execution','create_quotations','approve_discounts','view_invoices','view_leasing','manage_leasing'],
   sales_executive: ['view_dashboard','view_leads','manage_own_leads','add_notes','view_inventory','view_projects','view_messages','send_messages','view_documents','view_calendar','schedule_visits','use_ai_studio','create_bookings','view_bookings','create_quotations'],
   telecaller: ['view_dashboard','view_leads','manage_own_leads','add_notes','view_projects','view_calendar','schedule_visits','view_messages','send_messages'],
-  accountant: ['view_dashboard','view_projects','view_reports','view_accounts','manage_accounts','view_calendar','view_finance','manage_finance','view_procurement','view_bookings','view_documents','view_invoices','manage_invoices','view_leasing','view_owner_payouts','manage_owner_payouts'],
+  // approve_vendor_bills is the second signature on a contractor RA bill. The
+  // route checks that key rather than manage_finance (068), so a demo seeded
+  // without it has an accountant who cannot approve the RA bill this seeder
+  // creates — which is exactly what happened the first time.
+  accountant: ['view_dashboard','view_projects','view_reports','view_accounts','manage_accounts','view_calendar','view_finance','manage_finance','approve_vendor_bills','view_procurement','view_bookings','view_documents','view_invoices','manage_invoices','view_leasing','view_owner_payouts','manage_owner_payouts'],
   site_engineer: ['view_dashboard','view_projects','view_execution','manage_execution','view_procurement','manage_procurement','view_hr','manage_attendance','view_documents','view_calendar','view_messages','send_messages','signoff_ra_bills'],
   // No manage_hr_all: this manager is posted to a site below, and a posted
   // manager IS the per-project case migration 061 exists to serve. The admin
@@ -494,6 +498,71 @@ for (const [type, src, name, contact, city, stage, value] of BD) {
 for (const [name, cat, unit] of [['OPC 53 Cement','Cement','bag'],['TMT Bar 12mm','Steel','kg'],['River Sand','Aggregate','cft']]) {
   await c.query(`INSERT INTO materials (tenant_id, name, category, unit, reorder_level) VALUES ($1,$2,$3,$4,100)`, [t.id, name, cat, unit]);
 }
+
+console.log('→ vendors, purchase order, vendor bill, contractor RA bill');
+/**
+ * Accounts payable and procurement, which this workspace had none of.
+ *
+ * The tables were empty: no vendors, no purchase orders, no vendor bills, no RA
+ * bills. So Procurement, Billing & Payments and the RA tab of Accounts & Ledger
+ * all opened on nothing, for every role that runs them — the same "the module
+ * looks unbuilt rather than unpopulated" problem the crm_tasks block above was
+ * written to solve.
+ *
+ * It also hid a real defect for a long time. The contractor RA bill carries a
+ * two-signature workflow — the site engineer verifies progress, then finance
+ * approves — and the API gated both stages on manage_finance, so the site
+ * engineer's own button returned 403 while the accountant could sign both
+ * halves alone. Nobody hit it because no RA bill had ever existed here to
+ * click. The bill below is left at 'submitted' precisely so that flow can be
+ * walked end to end: sign in as site@, verify progress, then as accounts@,
+ * approve.
+ */
+const { rows: [contractor] } = await c.query(
+  `INSERT INTO vendors (tenant_id, name, vendor_type, category, contact_person, phone, email, status)
+   VALUES ($1,'Sharma Constructions','contractor','Civil works','Rakesh Sharma','9822011111','accounts@sharmaconstructions.example','active')
+   RETURNING id`, [t.id]);
+const { rows: [supplier] } = await c.query(
+  `INSERT INTO vendors (tenant_id, name, vendor_type, category, contact_person, phone, email, status)
+   VALUES ($1,'Deccan Building Supplies','supplier','Cement & steel','Meena Rao','9822022222','sales@deccansupplies.example','active')
+   RETURNING id`, [t.id]);
+
+const { rows: [po] } = await c.query(
+  // purchase_orders.number is an INTEGER sequence, not a formatted reference —
+  // the SPA renders "PO-0001" from it. Passing the display string fails the
+  // insert on a numeric parse, which is how this block failed the first time.
+  `INSERT INTO purchase_orders (tenant_id, number, vendor_id, project_id, status, lines, expected_date, notes, created_by)
+   VALUES ($1,1,$2,$3,'approved',$4::jsonb, CURRENT_DATE + 12,
+           'Tower A slab — cement and steel', $5) RETURNING id`,
+  [t.id, supplier.id, proj.id, JSON.stringify([
+    { description: 'OPC 53 Cement', quantity: 400, unitRate: 410, amount: 164000 },
+    { description: 'TMT Bar 12mm', quantity: 6000, unitRate: 68, amount: 408000 },
+  ]), userId.site]);
+
+// Raised against that PO, so the procurement → payable chain is traceable
+// rather than two unrelated rows.
+//
+// 'submitted' is the awaiting-approval state here: 'pending_approval' belongs
+// to purchase_orders, and the vendor_bills CHECK rejects it. The two tables
+// spell the same idea differently.
+await c.query(
+  `INSERT INTO vendor_bills (tenant_id, vendor_id, project_id, purchase_order_id, bill_no, bill_date, due_date,
+                             amount, tax_amount, total_amount, status, category, notes, created_by)
+   VALUES ($1,$2,$3,$4,'DBS/2026/318', CURRENT_DATE - 6, CURRENT_DATE + 24,
+           572000, 102960, 674960, 'submitted', 'Materials',
+           'Against PO-2026-001', $5)`,
+  [t.id, supplier.id, proj.id, po.id, userId.accounts]);
+
+// 40% of the contract, less 5% retention — the shape an Indian construction
+// running-account bill actually takes.
+await c.query(
+  `INSERT INTO contractor_ra_bills (tenant_id, vendor_id, project_id, ra_number, work_progress_percentage,
+                                    site_progress_percentage, gross_amount, retention_amount, deductions,
+                                    net_payable, status, notes, created_by)
+   VALUES ($1,$2,$3,1,40,40,1200000,60000,$4::jsonb,1110000,'submitted',
+           'RA-1 — Tower A slab up to 4th floor', $5)`,
+  [t.id, contractor.id, proj.id,
+   JSON.stringify([{ label: 'Water & electricity', amount: 30000 }]), userId.site]);
 
 console.log('→ portal logins (customer + channel partner)');
 const { rows: [pu] } = await c.query(

@@ -218,6 +218,34 @@ ok('but the priced inventory behind those towers is still refused',
 ok('and they still cannot create a tower',
   (await api(siteEng, 'POST', '/api/towers', { projectId: project.id, name: 'Tower B' })).status === 403);
 
+// ── the drift this suite could not otherwise see ───────────────────────────
+console.log('\n=== EVERY WORKSPACE HAS SOMEBODY FOR EACH RA SIGNATURE ===');
+/**
+ * The cast above is built with explicit grants, so it proves the ROUTES are
+ * right and nothing about how real workspaces are provisioned.
+ *
+ * Migration 068 gave approve_vendor_bills to existing accountants, but role
+ * grants are also written by four code paths — seed.ts, tenantRoutes (self-serve
+ * signup), the demo seeder, and the SPA's demo map — and those build workspaces
+ * created AFTERWARDS. Updating the migration and not the four was exactly the
+ * mistake made here: re-seeding the demo workspace produced an accountant who
+ * could no longer approve a vendor bill, and the RA bill sat at pmc_approved
+ * with nobody able to move it.
+ *
+ * Asserted across every tenant in the database, so a workspace provisioned by
+ * any of those paths fails this the moment it exists.
+ */
+const stranded = await admin.query(`
+  SELECT t.slug, k.approval
+    FROM tenants t
+    JOIN (VALUES ('signoff_ra_bills'), ('approve_vendor_bills')) AS k(approval) ON true
+   WHERE EXISTS (SELECT 1 FROM roles r JOIN role_permissions rp ON rp.role_id = r.id
+                  WHERE r.tenant_id = t.id AND rp.permission_key = 'manage_finance')
+     AND NOT EXISTS (SELECT 1 FROM roles r JOIN role_permissions rp ON rp.role_id = r.id
+                      WHERE r.tenant_id = t.id AND rp.permission_key = k.approval)`);
+ok('no workspace can raise an RA bill it has nobody to sign',
+  stranded.rowCount === 0, stranded.rows.map(r => `${r.slug}:${r.approval}`).join(', '));
+
 await admin.query('DELETE FROM tenants WHERE id = $1', [tenant.id]);
 await admin.end();
 console.log(`\n===== ${pass} passed, ${fail} failed =====`);

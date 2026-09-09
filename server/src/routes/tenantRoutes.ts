@@ -86,6 +86,10 @@ const ROLE_PERMS: Record<string, string[]> = {
   // scoped per person, so this is their own list, not the sales pipeline.
   accountant: ['view_dashboard','view_projects','view_reports','view_accounts','manage_accounts','view_calendar',
     'view_finance','manage_finance','view_procurement','view_bookings','view_documents',
+    // The second signature on a contractor RA bill — the route checks this key
+    // rather than manage_finance (068). A self-serve workspace provisioned
+    // without it would have nobody able to approve a vendor bill.
+    'approve_vendor_bills',
     'view_invoices','manage_invoices',
     // Prepares the owner payout; releasing it stays with the account owner, so
     // approve_owner_payouts is deliberately absent (036 enforces this in the DB).

@@ -467,6 +467,9 @@ export function hasPermission(user: User, action: string): boolean {
       'view_dashboard', 'view_projects', 'view_reports',
       'view_accounts', 'manage_accounts',
       'view_finance', 'manage_finance',
+      // The second signature on a contractor RA bill. Migration 068 granted it
+      // to existing workspaces; this is the copy new ones are built from.
+      'approve_vendor_bills',
       'view_procurement', 'view_bookings', 'view_documents',
       // Finance work is dated work — month-end close, GST and TDS deadlines.
       // Granted to existing workspaces by migration 066.

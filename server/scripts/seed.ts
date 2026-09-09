@@ -125,6 +125,12 @@ export const ROLE_PERMS: Record<string, string[]> = {
     'view_dashboard', 'view_projects', 'view_reports',
     'view_accounts', 'manage_accounts',
     'view_finance', 'manage_finance',
+    // Approving a contractor RA bill is this desk's job, and the route now
+    // checks the key named for it rather than manage_finance (migration 068).
+    // Without this a NEW workspace gets an accountant who cannot approve a
+    // vendor bill at all — the migration only reaches workspaces that already
+    // existed when it ran.
+    'approve_vendor_bills',
     'view_procurement', 'view_bookings', 'view_documents',
     // Finance work is dated work — month-end close, GSTR-1 on the 11th, TDS on
     // the 7th — and crm_tasks has always accepted a 'payment' category this

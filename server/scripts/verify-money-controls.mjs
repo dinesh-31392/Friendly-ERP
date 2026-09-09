@@ -232,14 +232,21 @@ console.log('\n=== EVERY WORKSPACE HAS SOMEBODY FOR EACH RA SIGNATURE ===');
  * could no longer approve a vendor bill, and the RA bill sat at pmc_approved
  * with nobody able to move it.
  *
- * Asserted across every tenant in the database, so a workspace provisioned by
- * any of those paths fails this the moment it exists.
+ * Scoped to workspaces that can actually RAISE an RA bill — one that already has
+ * one, or a contractor to bill against. Asserting over every tenant instead
+ * looked stronger and was simply wrong: this database is shared by fifty suites,
+ * each creating throwaway tenants that hold manage_finance and nothing else, and
+ * the guard failed on two of them mid-run. A fixture with no contractor has
+ * nothing to approve, so demanding an approver there reports drift that is not
+ * there — and a check that cries wolf gets deleted rather than heeded.
  */
 const stranded = await admin.query(`
   SELECT t.slug, k.approval
     FROM tenants t
     JOIN (VALUES ('signoff_ra_bills'), ('approve_vendor_bills')) AS k(approval) ON true
-   WHERE EXISTS (SELECT 1 FROM roles r JOIN role_permissions rp ON rp.role_id = r.id
+   WHERE (EXISTS (SELECT 1 FROM contractor_ra_bills b WHERE b.tenant_id = t.id)
+          OR EXISTS (SELECT 1 FROM vendors v WHERE v.tenant_id = t.id AND v.vendor_type = 'contractor'))
+     AND EXISTS (SELECT 1 FROM roles r JOIN role_permissions rp ON rp.role_id = r.id
                   WHERE r.tenant_id = t.id AND rp.permission_key = 'manage_finance')
      AND NOT EXISTS (SELECT 1 FROM roles r JOIN role_permissions rp ON rp.role_id = r.id
                       WHERE r.tenant_id = t.id AND rp.permission_key = k.approval)`);

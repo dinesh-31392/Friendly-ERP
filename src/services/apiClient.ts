@@ -87,7 +87,35 @@ export function getStoredApiSession(): { user: User; tenant: Tenant } | null {
   } catch { return null; }
 }
 
+/**
+ * Drop a session the server has stopped honouring and send the user to sign in.
+ *
+ * Guarded so a page mid-load, firing a dozen parallel requests that all come
+ * back 401, redirects once rather than a dozen times. A full navigation rather
+ * than a router push, because every in-memory store still holds the old
+ * workspace's data and the login screen should start from nothing.
+ */
+let sessionLostHandled = false;
+function sessionLost(tokenThatFailed: string): void {
+  // Only discard the session that actually failed. A page that was already
+  // loading when the session died fires a dozen requests, and their 401s arrive
+  // over the following seconds — by which time the user may have signed in
+  // again on the login screen. Clearing unconditionally wiped that FRESH token
+  // and left them unable to log in at all, which is exactly what happened the
+  // first time this was wired up.
+  if (tokenThatFailed !== getApiToken()) return;
+  if (sessionLostHandled) return;
+  sessionLostHandled = true;
+  clearApiToken();
+  if (typeof window !== 'undefined' && window.location.pathname !== '/') {
+    window.location.href = '/';
+  } else if (typeof window !== 'undefined') {
+    window.location.reload();
+  }
+}
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const tokenAtRequest = getApiToken();
   const res = await fetch(`${getApiUrl()}${path}`, {
     ...init,
     headers: {
@@ -104,6 +132,27 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
+    // A 401 on an ordinary call means the SESSION is gone, not that this
+    // particular request was refused: the token expired, the account was
+    // deactivated, somebody signed out everywhere, or the workspace was
+    // rebuilt underneath it.
+    //
+    // Nothing acted on that. The error was thrown, each panel caught it the way
+    // it catches any failure, and the page rendered its empty state — so a user
+    // whose session had ended was shown "No vendors yet. Add your cement, steel
+    // and contractor partners" on a workspace that had two, with no hint they
+    // were signed out. Observed exactly that after the demo workspace was
+    // reseeded; /api/vendors was answering 401 while the page invited the user
+    // to start adding data.
+    //
+    // 403 is deliberately NOT included: that is a permission decision about one
+    // action by a valid session, and pages render it meaningfully.
+    //
+    // Auth routes are exempt, and that exemption is the whole reason this needs
+    // care — /api/auth/login answers 401 for a wrong password, so treating it as
+    // a lost session would clear state and reload the page out from under the
+    // form instead of showing "Invalid email or password".
+    if (res.status === 401 && !path.startsWith('/api/auth/') && tokenAtRequest) sessionLost(tokenAtRequest);
     throw new Error(body.error || `API error ${res.status}`);
   }
   if (res.status === 204) return undefined as T;

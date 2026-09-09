@@ -534,9 +534,13 @@ const { rows: [po] } = await c.query(
   `INSERT INTO purchase_orders (tenant_id, number, vendor_id, project_id, status, lines, expected_date, notes, created_by)
    VALUES ($1,1,$2,$3,'approved',$4::jsonb, CURRENT_DATE + 12,
            'Tower A slab — cement and steel', $5) RETURNING id`,
+  // The line shape is the SPA's PurchaseOrderLine — qty/rate, and receivedQty
+  // so the receiving flow has somewhere to count into. Writing quantity/unitRate
+  // instead type-checks nowhere and fails silently: poTotal multiplies
+  // l.qty * l.rate, so the Procurement header read "₹0" beside "1 open order".
   [t.id, supplier.id, proj.id, JSON.stringify([
-    { description: 'OPC 53 Cement', quantity: 400, unitRate: 410, amount: 164000 },
-    { description: 'TMT Bar 12mm', quantity: 6000, unitRate: 68, amount: 408000 },
+    { id: 'l1', description: 'OPC 53 Cement', unit: 'bag', qty: 400, rate: 410, receivedQty: 0 },
+    { id: 'l2', description: 'TMT Bar 12mm', unit: 'kg', qty: 6000, rate: 68, receivedQty: 0 },
   ]), userId.site]);
 
 // Raised against that PO, so the procurement → payable chain is traceable

@@ -55,6 +55,42 @@ function brandStatics() {
   };
 }
 
+/**
+ * Refuse to bake a filesystem path in as the API base.
+ *
+ * `VITE_API_URL=/ npm run build` is the documented command and the one CI runs.
+ * Run it from Git Bash or MSYS on Windows and the shell rewrites the lone `/`
+ * into the MSYS root before Node ever sees it, so the build embeds
+ * `C:/Program Files/Git` and every request resolves to a file:// URL. The app
+ * then loads, renders, and signs nobody in — the login POST goes to
+ * `file:///C:/Program%20Files/Git/api/auth/login`, which the browser blocks.
+ *
+ * CI's existing guard cannot see this: it checks that the API machinery is
+ * present, not that the value is usable, so a mangled build passes it. Caught
+ * by serving a real dist and trying to log in.
+ *
+ * A valid base is empty (same-origin, what `/` becomes once trailing slashes
+ * are stripped), a root-relative path, or an http(s) URL. Anything carrying a
+ * drive letter or a file: scheme is a broken artifact, and failing here is much
+ * cheaper than discovering it on the VPS.
+ */
+function assertUsableApiBase(): void {
+  const raw = process.env.VITE_API_URL;
+  if (raw === undefined || raw === "") return;
+  const looksLikePath = /^[A-Za-z]:[\\/]/.test(raw) || raw.startsWith("file:");
+  const looksLikeUrl = /^https?:\/\//.test(raw);
+  const looksRootRelative = raw.startsWith("/");
+  if (looksLikePath || !(looksLikeUrl || looksRootRelative)) {
+    throw new Error(
+      `VITE_API_URL is not a usable API base: ${JSON.stringify(raw)}\n` +
+      `  Expected "/" (same-origin) or an http(s) URL.\n` +
+      `  On Git Bash / MSYS the shell rewrites a lone "/" into the MSYS root — ` +
+      `prefix the command with MSYS_NO_PATHCONV=1, or build from PowerShell.`,
+    );
+  }
+}
+assertUsableApiBase();
+
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react(), tailwindcss(), brandStatics(), viteSingleFile()],

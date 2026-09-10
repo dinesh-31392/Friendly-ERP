@@ -185,7 +185,23 @@ export default function Leads() {
   const [noteInput, setNoteInput] = useState('');
   const [refreshKey, setRefreshKey] = useState(0);
   const [showDuplicates, setShowDuplicates] = useState(false);
-  const [viewMode, setViewMode] = useState<'kanban' | 'list' | 'grid'>('list');
+  /**
+   * Phones open on cards, desktops on the table.
+   *
+   * The list view is an eight-column table, and five of those columns are
+   * hidden below md — Received, Contact, Value, Owner and Actions. Nothing
+   * scrolls them into reach either: the wrapper is overflow-x visible, so on a
+   * 375px phone they are not narrow, they are gone. A rep looking at their own
+   * pipeline saw a name and a stage, with no number to call, no deal value and
+   * no way to act on the row.
+   *
+   * The grid view already carries all three on a full-width card, so this is a
+   * default rather than a new layout. Only the INITIAL value: switching views
+   * still works, and the choice sticks for the rest of the session.
+   */
+  const [viewMode, setViewMode] = useState<'kanban' | 'list' | 'grid'>(
+    () => (typeof window !== 'undefined' && window.matchMedia('(max-width: 767px)').matches ? 'grid' : 'list'),
+  );
 
   // Bulk actions
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());

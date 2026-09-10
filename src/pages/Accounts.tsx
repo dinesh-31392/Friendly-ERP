@@ -698,13 +698,13 @@ export default function Accounts() {
             )}
           </div>
           <div className="overflow-x-auto">
-            <table className="w-full">
+            <table className="min-w-[680px] w-full">
               <thead>
                 <tr className="bg-zinc-50/30 border-b border-zinc-100">
                   <th className="text-left px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">Code</th>
                   <th className="text-left px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">Account</th>
-                  <th className="text-right px-4 py-3 text-xs font-semibold text-zinc-500 uppercase hidden sm:table-cell">Debits</th>
-                  <th className="text-right px-4 py-3 text-xs font-semibold text-zinc-500 uppercase hidden sm:table-cell">Credits</th>
+                  <th className="text-right px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">Debits</th>
+                  <th className="text-right px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">Credits</th>
                   <th className="text-right px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">Balance</th>
                   <th className="text-center px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">Status</th>
                 </tr>
@@ -723,8 +723,8 @@ export default function Accounts() {
                         <tr key={a.id} className="border-b border-zinc-50 hover:bg-zinc-50/30 transition-colors">
                           <td className="px-4 py-2.5 text-xs font-mono font-semibold text-indigo-600">{a.code}</td>
                           <td className="px-4 py-2.5 text-sm text-zinc-800">{a.name}{a.isSystem && <span className="ml-1.5 text-[9px] font-semibold text-zinc-400 uppercase">sys</span>}</td>
-                          <td className="px-4 py-2.5 text-sm text-zinc-600 text-right hidden sm:table-cell">{bal ? formatCurrency(bal.debit, currency) : '—'}</td>
-                          <td className="px-4 py-2.5 text-sm text-zinc-600 text-right hidden sm:table-cell">{bal ? formatCurrency(bal.credit, currency) : '—'}</td>
+                          <td className="px-4 py-2.5 text-sm text-zinc-600 text-right">{bal ? formatCurrency(bal.debit, currency) : '—'}</td>
+                          <td className="px-4 py-2.5 text-sm text-zinc-600 text-right">{bal ? formatCurrency(bal.credit, currency) : '—'}</td>
                           <td className="px-4 py-2.5 text-sm font-semibold text-zinc-900 text-right">{bal ? formatCurrency(bal.net, currency) : '—'}</td>
                           <td className="px-4 py-2.5 text-center">
                             <button

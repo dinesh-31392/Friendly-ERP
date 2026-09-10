@@ -553,7 +553,14 @@ export default function Login() {
       </div>
 
       {/* Right: Form */}
-      <div className="flex-1 flex items-center justify-center p-6">
+      {/* min-w-0 is load-bearing, not tidying. A flex item defaults to
+          min-width:auto, so this column was sized to its content's min-content
+          width (441px) instead of the 375px phone it was being shown on — the
+          sign-in screen, the first thing a site engineer sees, scrolled
+          sideways by 66px before they had typed anything. The marketing panel
+          beside it is correctly display:none at this width; the overflow was
+          entirely this column refusing to shrink. */}
+      <div className="flex-1 min-w-0 flex items-center justify-center p-4 sm:p-6">
         <div className="w-full max-w-md">
           {/* Mobile logo */}
           <div className="lg:hidden flex items-center gap-3 mb-10 justify-center">

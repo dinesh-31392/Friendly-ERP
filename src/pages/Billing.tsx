@@ -739,13 +739,13 @@ export default function Billing() {
           </div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full">
+            <table className="min-w-[680px] w-full">
               <thead>
                 <tr className="bg-zinc-50/30 border-b border-zinc-100">
                   <th className="text-left px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">Bill</th>
                   <th className="text-left px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">Vendor</th>
-                  <th className="text-left px-4 py-3 text-xs font-semibold text-zinc-500 uppercase hidden md:table-cell">Project</th>
-                  <th className="text-left px-4 py-3 text-xs font-semibold text-zinc-500 uppercase hidden sm:table-cell">Cost Head</th>
+                  <th className="text-left px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">Project</th>
+                  <th className="text-left px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">Cost Head</th>
                   <th className="text-right px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">Amount</th>
                   <th className="text-left px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">Due</th>
                   <th className="text-center px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">Status</th>
@@ -763,8 +763,8 @@ export default function Billing() {
                         <p className="text-[11px] text-zinc-400">{fmtDate(bill.billDate)}{po ? ` · ${formatPoNumber(po.number)}` : ''}</p>
                       </td>
                       <td className="px-4 py-3 text-sm text-zinc-600">{vendorName(bill.vendorId)}</td>
-                      <td className="px-4 py-3 text-sm text-zinc-600 hidden md:table-cell">{projectName(bill.projectId)}</td>
-                      <td className="px-4 py-3 text-sm text-zinc-600 hidden sm:table-cell">{bill.category}</td>
+                      <td className="px-4 py-3 text-sm text-zinc-600">{projectName(bill.projectId)}</td>
+                      <td className="px-4 py-3 text-sm text-zinc-600">{bill.category}</td>
                       <td className="px-4 py-3 text-sm font-semibold text-zinc-900 text-right">{formatCurrency(bill.amount, currency)}</td>
                       <td className={`px-4 py-3 text-sm ${isOver ? 'text-red-600 font-semibold' : 'text-zinc-500'}`}>
                         {fmtDate(bill.dueDate)}{isOver ? ' ⚠' : ''}

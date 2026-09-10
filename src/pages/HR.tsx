@@ -457,12 +457,12 @@ export default function HR() {
             </div>
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full">
+              <table className="min-w-[680px] w-full">
                 <thead>
                   <tr className="bg-zinc-50/30 border-b border-zinc-100">
                     <th className="text-left px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">Name</th>
-                    <th className="text-left px-4 py-3 text-xs font-semibold text-zinc-500 uppercase hidden md:table-cell">Department</th>
-                    <th className="text-left px-4 py-3 text-xs font-semibold text-zinc-500 uppercase hidden sm:table-cell">Site</th>
+                    <th className="text-left px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">Department</th>
+                    <th className="text-left px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">Site</th>
                     <th className="text-right px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">Pay</th>
                     <th className="text-center px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">Status</th>
                     <th className="px-4 py-3" />
@@ -480,8 +480,8 @@ export default function HR() {
                           </span>
                         </p>
                       </td>
-                      <td className="px-4 py-3 text-sm text-zinc-600 hidden md:table-cell">{emp.department}</td>
-                      <td className="px-4 py-3 text-sm text-zinc-600 hidden sm:table-cell">{emp.projectId ? projectName(emp.projectId) : 'Head office'}</td>
+                      <td className="px-4 py-3 text-sm text-zinc-600">{emp.department}</td>
+                      <td className="px-4 py-3 text-sm text-zinc-600">{emp.projectId ? projectName(emp.projectId) : 'Head office'}</td>
                       <td className="px-4 py-3 text-sm font-semibold text-zinc-900 text-right">
                         {emp.payHidden
                           ? <span className="text-xs font-medium text-zinc-400">Not shown</span>

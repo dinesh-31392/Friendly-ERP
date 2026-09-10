@@ -223,12 +223,12 @@ export default function Land() {
           </div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full">
+            <table className="min-w-[680px] w-full">
               <thead>
                 <tr className="bg-zinc-50/30 border-b border-zinc-100">
                   <th className="text-left px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">Parcel</th>
-                  <th className="text-left px-4 py-3 text-xs font-semibold text-zinc-500 uppercase hidden md:table-cell">Owner</th>
-                  <th className="text-right px-4 py-3 text-xs font-semibold text-zinc-500 uppercase hidden sm:table-cell">Ask</th>
+                  <th className="text-left px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">Owner</th>
+                  <th className="text-right px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">Ask</th>
                   <th className="text-center px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">Feasibility</th>
                   <th className="text-center px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">Status</th>
                   <th className="px-4 py-3" />
@@ -245,8 +245,8 @@ export default function Land() {
                       </p>
                       <p className="text-[11px] text-zinc-500 flex items-center gap-1"><MapPin className="h-3 w-3" /> {l.city}{l.state ? `, ${l.state}` : ''} · {l.areaAcres} ac</p>
                     </td>
-                    <td className="px-4 py-3 text-sm text-zinc-600 hidden md:table-cell">{l.ownerName}<p className="text-[11px] text-zinc-400">{l.referenceSource}</p></td>
-                    <td className="px-4 py-3 text-sm font-semibold text-zinc-900 text-right hidden sm:table-cell">{formatCurrency(l.askingPrice, currency)}</td>
+                    <td className="px-4 py-3 text-sm text-zinc-600">{l.ownerName}<p className="text-[11px] text-zinc-400">{l.referenceSource}</p></td>
+                    <td className="px-4 py-3 text-sm font-semibold text-zinc-900 text-right">{formatCurrency(l.askingPrice, currency)}</td>
                     <td className="px-4 py-3 text-center">
                       <span className={`inline-flex items-center gap-1 text-xs font-bold px-2.5 py-1 rounded-full ${scoreBadge(l.latestScore)}`}>
                         <Gauge className="h-3 w-3" /> {l.latestScore ?? '—'}

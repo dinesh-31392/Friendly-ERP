@@ -182,12 +182,12 @@ export default function BD() {
             <div className="py-16 text-center"><Handshake className="h-12 w-12 text-zinc-300 mx-auto mb-3" /><p className="text-sm text-zinc-500">No deals yet. Log your first land or JV opportunity.</p></div>
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full">
+              <table className="min-w-[680px] w-full">
                 <thead>
                   <tr className="bg-zinc-50/30 border-b border-zinc-100">
                     <th className="text-left px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">Counterparty</th>
-                    <th className="text-left px-4 py-3 text-xs font-semibold text-zinc-500 uppercase hidden md:table-cell">Type</th>
-                    <th className="text-right px-4 py-3 text-xs font-semibold text-zinc-500 uppercase hidden sm:table-cell">Deal Value</th>
+                    <th className="text-left px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">Type</th>
+                    <th className="text-right px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">Deal Value</th>
                     <th className="text-center px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">Stage</th>
                     <th className="px-4 py-3" />
                   </tr>
@@ -199,8 +199,8 @@ export default function BD() {
                         <p className="text-sm font-medium text-zinc-900">{d.counterpartyName}</p>
                         <p className="text-[11px] text-zinc-500 flex items-center gap-1"><MapPin className="h-3 w-3" /> {d.city} · {d.source.replace('_', ' ')}</p>
                       </td>
-                      <td className="px-4 py-3 text-sm text-zinc-600 hidden md:table-cell">{BD_OPPORTUNITY_TYPES.find(t => t.id === d.opportunityType)?.label}</td>
-                      <td className="px-4 py-3 text-sm font-semibold text-zinc-900 text-right hidden sm:table-cell">{formatCurrency(d.estimatedDealValue, currency)}</td>
+                      <td className="px-4 py-3 text-sm text-zinc-600">{BD_OPPORTUNITY_TYPES.find(t => t.id === d.opportunityType)?.label}</td>
+                      <td className="px-4 py-3 text-sm font-semibold text-zinc-900 text-right">{formatCurrency(d.estimatedDealValue, currency)}</td>
                       <td className="px-4 py-3 text-center">
                         <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-1 rounded-full bg-zinc-100 text-zinc-600">
                           <span className={`h-1.5 w-1.5 rounded-full ${stageMeta(d.stage).color}`} />{stageMeta(d.stage).label}

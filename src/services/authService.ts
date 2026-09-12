@@ -421,7 +421,11 @@ export function hasPermission(user: User, action: string): boolean {
       'view_brokers', 'manage_brokers',
       'view_execution', 'manage_execution', 'approve_change_orders',
       'view_procurement', 'manage_procurement', 'approve_purchase_orders',
-      'view_hr', 'manage_hr', 'manage_attendance',
+      // manage_hr_all: HR across every project rather than only the sites this
+      // person is posted to. The admin always holds it; an hr_manager
+      // deliberately does not, because a manager posted to a site IS the
+      // per-project case (server: app_hr_all, migration 061).
+      'view_hr', 'manage_hr', 'manage_attendance', 'manage_hr_all',
       'view_accounts', 'manage_accounts', 'approve_vendor_bills', 'signoff_ra_bills',
       'create_quotations', 'approve_discounts', 'manage_approval_rules',
       // Land acquisition: admin holds every gate (maker + both checkers)
@@ -463,7 +467,13 @@ export function hasPermission(user: User, action: string): boolean {
       'view_dashboard', 'view_projects', 'view_reports',
       'view_accounts', 'manage_accounts',
       'view_finance', 'manage_finance',
+      // The second signature on a contractor RA bill. Migration 068 granted it
+      // to existing workspaces; this is the copy new ones are built from.
+      'approve_vendor_bills',
       'view_procurement', 'view_bookings', 'view_documents',
+      // Finance work is dated work — month-end close, GST and TDS deadlines.
+      // Granted to existing workspaces by migration 066.
+      'view_calendar',
       // Prepares the owner payout statement but cannot release it — the
       // maker/checker split that migration 036 enforces in the database too
       'view_leasing', 'view_owner_payouts', 'manage_owner_payouts',

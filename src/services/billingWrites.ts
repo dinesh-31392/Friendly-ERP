@@ -67,12 +67,38 @@ export function mapBudget(r: ApiBudget, tenantId: string): ProjectBudget {
   };
 }
 
-/** API mode: bills + compliance filings + budgets, mapped to SPA shapes. */
-export async function fetchBillingData(tenantId: string): Promise<{
+/**
+ * API mode: bills + compliance filings + budgets, mapped to SPA shapes.
+ *
+ * The three slices are fetched INDEPENDENTLY, and a slice the caller may not
+ * read comes back empty instead of failing the whole load.
+ *
+ * This was a Promise.all, which made the page as narrow as its narrowest
+ * permission. Billing sits behind view_finance; statutory filings sit behind
+ * view_accounts. A sales_manager holds the first and not the second, so their
+ * compliance call 403s — and with Promise.all that one refusal rejected the
+ * whole thing, so bills and budgets they were fully entitled to vanished too.
+ * The caller then reported "API unreachable — showing local data", which was
+ * false twice over: the API answered, and there was no local data to show.
+ *
+ * A genuine outage still surfaces: every slice fails, all three come back
+ * empty, and the page reads as empty rather than pretending otherwise.
+ */
+export async function fetchBillingData(tenantId: string, opts?: { compliance?: boolean }): Promise<{
   bills: VendorBill[]; compliance: ComplianceItem[]; budgets: ProjectBudget[];
 } | null> {
   if (!isApiEnabled()) return null;
-  const [b, c, bu] = await Promise.all([apiGetVendorBills(), apiGetComplianceItems(), apiGetBudgets()]);
+  const slice = async <T>(load: () => Promise<T[]>): Promise<T[]> => {
+    try { return await load(); } catch { return []; }
+  };
+  const [b, c, bu] = await Promise.all([
+    slice(apiGetVendorBills),
+    // Skipped outright when the caller knows the role cannot read it, rather
+    // than fired and discarded. The guard above would cope either way; not
+    // asking keeps a clean console meaningful as a signal.
+    opts?.compliance === false ? Promise.resolve([]) : slice(apiGetComplianceItems),
+    slice(apiGetBudgets),
+  ]);
   return {
     bills: b.map(x => mapBill(x, tenantId)),
     compliance: c.map(x => mapCompliance(x, tenantId)),

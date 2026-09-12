@@ -1,10 +1,15 @@
 import { useState, useMemo, useEffect } from 'react';
 import {
   Handshake, Plus, X, IndianRupee, Users, CheckCircle2, Trash2, Phone, Mail,
+  Banknote, FileText, Loader2,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { getByTenant, update, remove, logAudit } from '../services/db';
-import { isApiEnabled, apiGetBrokers } from '../services/apiClient';
+import {
+  isApiEnabled, apiGetBrokers,
+  apiGetPayoutRuns, apiGetPayoutRun, apiBuildPayoutRun, apiSetPayoutRunStatus, apiPayoutRunPdf,
+  type ApiPayoutRun,
+} from '../services/apiClient';
 import { createBroker, patchBroker, deleteBroker } from '../services/brokerWrites';
 import { formatCurrency } from '../utils/format';
 import { invitePartner, portalPath } from '../services/portalService';
@@ -25,7 +30,95 @@ export default function Brokers() {
   const [refreshKey, setRefreshKey] = useState(0);
   const refresh = () => setRefreshKey(k => k + 1);
 
-  const [tab, setTab] = useState<'partners' | 'commissions'>('partners');
+  const [tab, setTab] = useState<'partners' | 'commissions' | 'payouts'>('partners');
+
+  // Payout runs. Every figure on screen comes from the server — the TDS rules
+  // are not something to reimplement in a browser.
+  const [runs, setRuns] = useState<ApiPayoutRun[]>([]);
+  const [openRun, setOpenRun] = useState<ApiPayoutRun | null>(null);
+  const [runBusy, setRunBusy] = useState<string | null>(null);
+  const [building, setBuilding] = useState(false);
+  // Defaults to the month just gone, which is when a payout run is actually done.
+  const [periodStart, setPeriodStart] = useState(() => {
+    const d = new Date(); d.setMonth(d.getMonth() - 1, 1);
+    return d.toISOString().slice(0, 10);
+  });
+  const [periodEnd, setPeriodEnd] = useState(() => {
+    const d = new Date(); d.setDate(0);
+    return d.toISOString().slice(0, 10);
+  });
+  const [defaultGstPct, setDefaultGstPct] = useState(18);
+
+  useEffect(() => {
+    if (!isApiEnabled()) return;
+    let cancelled = false;
+    apiGetPayoutRuns()
+      .then(r => { if (!cancelled) setRuns(r); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [tenantId, refreshKey]);
+
+  const buildRun = async () => {
+    setBuilding(true);
+    try {
+      const run = await apiBuildPayoutRun({ periodStart, periodEnd, defaultGstPct });
+      // An empty run is the normal result of re-running a period, not a
+      // failure — say so, rather than leaving someone wondering.
+      toast.success(run.lines.length
+        ? `Run #${run.runNo} built — ${run.lines.length} partner(s)`
+        : `Run #${run.runNo} is empty — every commission in that period is already on a run`);
+      refresh();
+      setOpenRun(await apiGetPayoutRun(run.id));
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Could not build the run');
+    } finally {
+      setBuilding(false);
+    }
+  };
+
+  const openRunDetail = async (id: string) => {
+    try { setOpenRun(await apiGetPayoutRun(id)); }
+    catch (e) { toast.error(e instanceof Error ? e.message : 'Could not open the run'); }
+  };
+
+  const setRunStatus = async (id: string, status: 'approved' | 'cancelled') => {
+    try {
+      await apiSetPayoutRunStatus(id, status);
+      toast.success(`Run ${status}`);
+      if (openRun?.id === id) setOpenRun(await apiGetPayoutRun(id));
+      refresh();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Could not update the run');
+    }
+  };
+
+  const payRun = async (id: string) => {
+    // The server refuses a payout without one, because a payment nobody can
+    // find in a bank statement is not evidence of anything.
+    const ref = prompt('Payment reference (UTR, cheque number, or transaction id):')?.trim();
+    if (!ref) return;
+    try {
+      await apiSetPayoutRunStatus(id, 'paid', ref);
+      toast.success('Run marked paid — the commissions are settled');
+      if (openRun?.id === id) setOpenRun(await apiGetPayoutRun(id));
+      refresh();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Could not record the payment');
+    }
+  };
+
+  const openAdvice = async (id: string) => {
+    setRunBusy(id);
+    try {
+      const { url } = await apiPayoutRunPdf(id);
+      window.open(url, '_blank', 'noopener,noreferrer');
+      window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Could not render the advice');
+    } finally {
+      setRunBusy(null);
+    }
+  };
   const [showAdd, setShowAdd] = useState(false);
 
   // Feature flag: with an API URL configured, brokers are read from the Fastify
@@ -187,7 +280,7 @@ export default function Brokers() {
       </div>
 
       <div className="flex items-center gap-2 bg-white border border-zinc-200 rounded-xl p-1 inline-flex">
-        {([['partners', 'Partners'], ['commissions', 'Commissions']] as const).map(([id, label]) => (
+        {([['partners', 'Partners'], ['commissions', 'Commissions'], ['payouts', 'Payout Runs']] as const).map(([id, label]) => (
           <button key={id} onClick={() => setTab(id)}
             className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${tab === id ? 'bg-indigo-600 text-white shadow-sm' : 'text-zinc-500 hover:text-zinc-700'}`}
           >{label}</button>
@@ -201,7 +294,7 @@ export default function Brokers() {
               <div className="flex items-start justify-between mb-3">
                 <div className="flex items-center gap-3">
                   <div className="h-11 w-11 rounded-xl bg-gradient-to-br from-indigo-50 to-violet-50 flex items-center justify-center">
-                    <span className="text-sm font-bold text-indigo-600">{b.name.split(' ').map(n => n[0]).join('')}</span>
+                    <span className="text-sm font-bold text-indigo-600">{(b.name ?? '').split(' ').filter(Boolean).map(n => n[0]).join('').slice(0, 2) || '?'}</span>
                   </div>
                   <div>
                     <p className="text-sm font-semibold text-zinc-900">{b.name}</p>
@@ -261,6 +354,165 @@ export default function Brokers() {
               <h3 className="text-sm font-semibold text-zinc-700">No channel partners yet</h3>
             </div>
           )}
+        </div>
+      )}
+
+      {tab === 'payouts' && (
+        <div className="space-y-4">
+          {!isApiEnabled() ? (
+            <div className="bg-white rounded-2xl border border-zinc-200/60 py-14 text-center">
+              <Banknote className="h-10 w-10 text-zinc-200 mx-auto mb-2" />
+              <p className="text-sm font-medium text-zinc-600">Payout runs need the API</p>
+              <p className="text-xs text-zinc-400 mt-1 max-w-sm mx-auto">
+                The 194-H deduction depends on the financial-year aggregate across every earlier
+                run, so it is computed on the server and has no local-only version.
+              </p>
+            </div>
+          ) : (
+            <>
+              {canManage && (
+                <div className="bg-white rounded-2xl border border-zinc-200/60 p-4 flex items-end gap-3 flex-wrap">
+                  <div>
+                    <label className="block text-[11px] font-semibold text-zinc-500 uppercase mb-1">From</label>
+                    <input type="date" value={periodStart} onChange={e => setPeriodStart(e.target.value)}
+                      className="px-3 py-2 bg-zinc-50 border border-zinc-200 rounded-xl text-sm" />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-semibold text-zinc-500 uppercase mb-1">To</label>
+                    <input type="date" value={periodEnd} onChange={e => setPeriodEnd(e.target.value)}
+                      className="px-3 py-2 bg-zinc-50 border border-zinc-200 rounded-xl text-sm" />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-semibold text-zinc-500 uppercase mb-1">GST %</label>
+                    <input type="number" min={0} max={100} value={defaultGstPct}
+                      onChange={e => setDefaultGstPct(Number(e.target.value))}
+                      className="w-20 px-3 py-2 bg-zinc-50 border border-zinc-200 rounded-xl text-sm tabular-nums" />
+                    <p className="text-[10px] text-zinc-400 mt-0.5">18 if registered</p>
+                  </div>
+                  <button onClick={buildRun} disabled={building}
+                    className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 disabled:opacity-60">
+                    {building && <Loader2 className="h-4 w-4 animate-spin" />}{building ? 'Building…' : 'Build run'}
+                  </button>
+                  <p className="text-[11px] text-zinc-400 basis-full">
+                    Commissions already on a run are never picked up twice, so re-running a period is safe.
+                  </p>
+                </div>
+              )}
+
+              <div className="bg-white rounded-2xl border border-zinc-200/60 overflow-hidden">
+                {runs.length === 0 ? (
+                  <div className="py-14 text-center">
+                    <Banknote className="h-10 w-10 text-zinc-200 mx-auto mb-2" />
+                    <p className="text-sm font-medium text-zinc-600">No payout runs yet</p>
+                  </div>
+                ) : (
+                  <div className="divide-y divide-zinc-50">
+                    {runs.map(r => (
+                      <div key={r.id} className="px-5 py-3 flex items-center gap-4 flex-wrap">
+                        <button onClick={() => openRunDetail(r.id)} className="text-sm font-semibold text-indigo-600 hover:underline">
+                          Run #{r.runNo}
+                        </button>
+                        <div className="flex-1 min-w-[160px]">
+                          <p className="text-[11px] text-zinc-400">
+                            {r.periodStart?.slice(0, 10)} → {r.periodEnd?.slice(0, 10)} · {r.lines?.length ?? 0} partner(s)
+                          </p>
+                        </div>
+                        <div className="text-right">
+                          <p className="text-sm font-semibold text-zinc-900 tabular-nums">{formatCurrency(r.netTotal, currency)}</p>
+                          <p className="text-[11px] text-zinc-400 tabular-nums">
+                            {formatCurrency(r.grossTotal, currency)} brokerage
+                            {r.gstTotal > 0 && ` + ${formatCurrency(r.gstTotal, currency)} GST`}
+                            {r.tdsTotal > 0 && ` − ${formatCurrency(r.tdsTotal, currency)} TDS`}
+                          </p>
+                        </div>
+                        <span className={`text-[11px] font-semibold px-2.5 py-1 rounded-full capitalize ${
+                          r.status === 'paid' ? 'bg-emerald-50 text-emerald-700'
+                          : r.status === 'approved' ? 'bg-blue-50 text-blue-700'
+                          : r.status === 'cancelled' ? 'bg-red-50 text-red-600'
+                          : 'bg-zinc-100 text-zinc-600'}`}>{r.status}</span>
+                        <div className="flex items-center gap-1.5">
+                          <button onClick={() => openAdvice(r.id)} disabled={runBusy === r.id}
+                            className="flex items-center gap-1 px-2.5 py-1.5 border border-zinc-200 rounded-lg text-[11px] font-semibold text-zinc-600 hover:bg-zinc-50 disabled:opacity-50">
+                            {runBusy === r.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <FileText className="h-3 w-3" />} Advice
+                          </button>
+                          {canManage && r.status === 'draft' && (
+                            <button onClick={() => setRunStatus(r.id, 'approved')}
+                              className="px-2.5 py-1.5 bg-indigo-600 text-white rounded-lg text-[11px] font-semibold hover:bg-indigo-700">Approve</button>
+                          )}
+                          {canManage && r.status === 'approved' && (
+                            <button onClick={() => payRun(r.id)}
+                              className="px-2.5 py-1.5 bg-emerald-600 text-white rounded-lg text-[11px] font-semibold hover:bg-emerald-700">Mark paid</button>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {openRun && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex justify-end" onClick={() => setOpenRun(null)}>
+          <div className="bg-white w-full max-w-2xl h-full overflow-y-auto p-6" onClick={e => e.stopPropagation()}>
+            <div className="flex items-start justify-between mb-4">
+              <div>
+                <h3 className="text-lg font-semibold text-zinc-900">Payout run #{openRun.runNo}</h3>
+                <p className="text-sm text-zinc-500">
+                  {openRun.periodStart?.slice(0, 10)} → {openRun.periodEnd?.slice(0, 10)} · TDS {openRun.tdsPct}% over {formatCurrency(openRun.tdsThreshold, currency)} per financial year
+                </p>
+              </div>
+              <button onClick={() => setOpenRun(null)} className="p-1.5 rounded-lg hover:bg-zinc-100"><X className="h-4 w-4 text-zinc-500" /></button>
+            </div>
+
+            {openRun.lines.length === 0 ? (
+              <p className="text-sm text-zinc-500 py-8 text-center">
+                Nothing to pay for this period — every commission in it is already on a run.
+              </p>
+            ) : (
+              <div className="space-y-3">
+                {openRun.lines.map(l => (
+                  <div key={l.id} className="rounded-xl border border-zinc-200 p-3">
+                    <div className="flex items-baseline justify-between mb-1.5">
+                      <p className="text-sm font-medium text-zinc-900">
+                        {l.brokerName}{l.agencyName && <span className="text-zinc-400 font-normal"> · {l.agencyName}</span>}
+                      </p>
+                      <p className="text-sm font-semibold tabular-nums">{formatCurrency(l.netAmount, currency)}</p>
+                    </div>
+                    <div className="space-y-0.5 text-[12px] text-zinc-500">
+                      <div className="flex justify-between"><span>Brokerage</span><span className="tabular-nums">{formatCurrency(l.grossAmount, currency)}</span></div>
+                      {l.gstAmount > 0 && (
+                        <div className="flex justify-between"><span>GST @ {l.gstPct}%</span><span className="tabular-nums">{formatCurrency(l.gstAmount, currency)}</span></div>
+                      )}
+                      {l.tdsAmount > 0 && (
+                        <div className="flex justify-between"><span>Less: TDS u/s 194-H @ {l.tdsPct}%</span><span className="tabular-nums">({formatCurrency(l.tdsAmount, currency)})</span></div>
+                      )}
+                      {/* The catch-up is the figure a broker will query. Show
+                          the basis rather than making them work it out. */}
+                      {l.fyPriorGross > 0 && l.tdsAmount > 0 && (
+                        <p className="text-[11px] text-zinc-400 pt-0.5">
+                          Computed on the year-to-date aggregate of {formatCurrency(l.fyPriorGross + l.grossAmount, currency)}
+                          {l.fyPriorTds > 0 && `, less ${formatCurrency(l.fyPriorTds, currency)} already deducted`}.
+                        </p>
+                      )}
+                      {l.tdsAmount === 0 && l.grossAmount > 0 && (
+                        <p className="text-[11px] text-zinc-400 pt-0.5">
+                          Below the {formatCurrency(openRun.tdsThreshold, currency)} threshold for the year — no deduction.
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <button onClick={() => openAdvice(openRun.id)}
+              className="w-full mt-5 flex items-center justify-center gap-2 px-4 py-2.5 border border-zinc-200 rounded-xl text-sm font-semibold text-zinc-700 hover:bg-zinc-50">
+              <FileText className="h-4 w-4" /> Open the payment advice
+            </button>
+          </div>
         </div>
       )}
 

@@ -11,6 +11,7 @@ import {
 import type { IntegrationProviderDef } from '../services/integrationService';
 import { isApiEnabled, apiSaveWhatsAppInstance } from '../services/apiClient';
 import MyWhatsAppCard from './MyWhatsAppCard';
+import ChannelIntegrations from './ChannelIntegrations';
 
 function timeAgo(iso?: string): string {
   if (!iso) return 'Never';
@@ -418,6 +419,11 @@ export default function IntegrationsPanel() {
           </div>
         </div>
       )}
+
+      {/* Portal feeds, telephony and the payment gateway — the three
+          channels that talk to the outside world, each holding a credential
+          this workspace owns. */}
+      <ChannelIntegrations currency={tenant?.currency || 'INR'} />
     </div>
     </div>
   );

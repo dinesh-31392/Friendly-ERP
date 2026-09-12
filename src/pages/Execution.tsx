@@ -536,11 +536,11 @@ export default function Execution() {
             </div>
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full">
+              <table className="min-w-[680px] w-full">
                 <thead>
                   <tr className="bg-zinc-50/30 border-b border-zinc-100">
                     <th className="text-left px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">Task</th>
-                    <th className="text-left px-4 py-3 text-xs font-semibold text-zinc-500 uppercase hidden md:table-cell">Assignee</th>
+                    <th className="text-left px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">Assignee</th>
                     <th className="text-left px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">Due</th>
                     <th className="text-left px-4 py-3 text-xs font-semibold text-zinc-500 uppercase w-44">Progress</th>
                     <th className="text-center px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">Status</th>
@@ -566,7 +566,7 @@ export default function Execution() {
                             </div>
                           </div>
                         </td>
-                        <td className="px-4 py-3 text-sm text-zinc-600 hidden md:table-cell">{userName(task.assignedTo)}</td>
+                        <td className="px-4 py-3 text-sm text-zinc-600">{userName(task.assignedTo)}</td>
                         <td className={`px-4 py-3 text-sm ${overdue ? 'text-red-600 font-semibold' : 'text-zinc-500'}`}>{fmtDate(task.dueDate)}</td>
                         <td className="px-4 py-3">
                           <div className="flex items-center gap-2">

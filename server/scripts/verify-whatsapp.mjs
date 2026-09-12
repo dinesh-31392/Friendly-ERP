@@ -125,7 +125,14 @@ ok('session starts connecting', c1.body?.session?.status === 'connecting');
 const inst1 = c1.body?.session?.instanceName ?? '';
 ok('instance name is tenant+user scoped', /^erp-[0-9a-f]{10}-[0-9a-f]{10}$/.test(inst1), inst1);
 const created1 = calls.create.find(c => c.instanceName === inst1);
-ok('gateway got a per-session webhook URL with the token', !!created1 && /\/api\/whatsapp\/webhook\/[0-9a-f]{48}$/.test(created1.webhook?.url ?? ''), created1?.webhook?.url);
+// ABSOLUTE, not just ending in the right path. This assertion used to be
+// anchored at the end only, so it passed while the server was handing the
+// gateway "/api/whatsapp/webhook/<token>" — a path with no host. The session
+// connected, showed a QR, and no inbound message ever arrived. A webhook the
+// gateway cannot resolve is not a webhook.
+ok('gateway got an ABSOLUTE per-session webhook URL with the token',
+  !!created1 && /^https?:\/\/[^/]+\/api\/whatsapp\/webhook\/[0-9a-f]{48}$/.test(created1.webhook?.url ?? ''),
+  created1?.webhook?.url);
 
 const c2 = await call(repTok, 'POST', '/api/whatsapp/connect');
 const inst2 = c2.body?.session?.instanceName ?? '';

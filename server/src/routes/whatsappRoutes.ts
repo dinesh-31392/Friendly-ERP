@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { randomBytes } from 'node:crypto';
 import { withTenantContext, platformPool } from '../db.js';
 import { requireAuth } from '../auth.js';
+import { env } from '../env.js';
 import { enqueueAutoReply, drainOutbox } from '../autoReply.js';
 import { resolveGateway, ensureInstance, requestQr, connectionStatus, logoutInstance, sendWhatsAppMessage, sendWhatsAppMedia, type MediaKind } from '../evolution.js';
 
@@ -319,6 +320,21 @@ export async function whatsappRoutes(app: FastifyInstance): Promise<void> {
       const gw = await resolveGateway(db);
       if (!gw) return reply.code(503).send({ error: 'Evolution gateway is not configured — set the container URL and API key under Integrations → WhatsApp' });
 
+      // The gateway calls US back, so a public host is not optional. Unset, the
+      // webhook was registered as "/api/whatsapp/webhook/<token>" — a path with
+      // no host — and the session connected, showed a QR, and then silently
+      // never received an inbound message. Refuse up front and say which
+      // variable is missing, rather than half-connecting.
+      //
+      // Both spellings resolve in env.ts now, so this route and telephony
+      // cannot disagree about which one the deployment set.
+      const publicUrl = env.publicBaseUrl;
+      if (!/^https?:\/\//i.test(publicUrl)) {
+        return reply.code(503).send({
+          error: 'This server has no public URL configured, so WhatsApp could not call back. Set PUBLIC_URL to the address this API is reachable at.',
+        });
+      }
+
       const name = instanceNameFor(req.ctx.tenantId, req.ctx.userId!);
       // Upsert the session row FIRST so the webhook token exists before the
       // gateway could possibly call back.
@@ -331,7 +347,6 @@ export async function whatsappRoutes(app: FastifyInstance): Promise<void> {
         [req.ctx.userId, name, token]);
       const session = rows[0];
 
-      const publicUrl = (process.env.PUBLIC_URL || '').replace(/\/+$/, '');
       const webhookUrl = `${publicUrl}/api/whatsapp/webhook/${session.webhook_token}`;
       try {
         await ensureInstance(gw, name, webhookUrl);

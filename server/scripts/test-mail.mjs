@@ -8,6 +8,9 @@
  * with a 503. Better to find out here.
  */
 import 'dotenv/config';
+
+// Same override the server and SPA use — see src/config/brand.ts.
+const BRAND_NAME = process.env.BRAND_NAME || 'Friendly ERP';
 import nodemailer from 'nodemailer';
 
 const to = process.argv[2];
@@ -65,8 +68,8 @@ try {
   const info = await t.sendMail({
     from: SMTP_FROM || SMTP_USER,
     to,
-    subject: '123456 is your Friendly ERP sign-in code',
-    text: 'This is a test of the Friendly ERP mail configuration. If you received it, sign-in codes will arrive.',
+    subject: `123456 is your ${BRAND_NAME} sign-in code`,
+    text: `This is a test of the ${BRAND_NAME} mail configuration. If you received it, sign-in codes will arrive.`,
   });
   console.log('ok');
   console.log(`\nmessage id  ${info.messageId}`);

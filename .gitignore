@@ -24,8 +24,18 @@ localdb/*.log
 .vscode/
 .idea/
 Thumbs.db
+# Machine-specific Claude config, at any depth.
 **/.claude/settings.local.json
-.claude/
+**/.claude/launch.json
+# Everything else directly under the root .claude/ — as CONTENTS, not the
+# directory. `.claude/` would exclude the folder itself, and git does not
+# descend into an excluded folder, so no negation below it can ever apply.
+.claude/*
+# Skills are shared knowledge rather than machine settings: they encode the
+# procedures this repo gets wrong silently — a permission key that must land in
+# five files, the environment the verify suites need. They belong with the code.
+!.claude/skills/
+!.claude/skills/**
 
 # A separate product that happens to share this parent folder — the Origin Corp
 # marketing site. It is not part of the ERP and does not belong in this repo.
@@ -37,3 +47,8 @@ origincorp-revamp/
 # container refuses to start — a loud failure instead of a silent one.
 deploy/security-headers.conf
 deploy/security-headers-embed.conf
+
+# Uploaded files. The bytes belong on a mounted volume (FILE_STORAGE_DIR), never
+# in the repository — a customer's KYC scans committed by accident cannot be
+# un-published, and the default path sits inside the working tree.
+server/var/

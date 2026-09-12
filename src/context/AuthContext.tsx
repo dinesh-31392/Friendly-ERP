@@ -1,8 +1,10 @@
 import { createContext, useContext, useState, useEffect, ReactNode, useCallback } from 'react';
 import type { User, Tenant } from '../types';
 import * as authService from '../services/authService';
-import { isApiEnabled, apiLogin, apiVerifyLoginCode, isMfaChallenge, clearApiToken, apiLogout, getStoredApiSession } from '../services/apiClient';
+import { isApiEnabled, apiLogin, apiVerifyLoginCode, isMfaChallenge, clearApiToken, apiLogout, getStoredApiSession, apiGetWorkspace, patchStoredApiSession } from '../services/apiClient';
 import { hydrateLedger } from '../services/accountsService';
+import { syncPipelineFromServer } from '../services/metaService';
+import { syncApprovalRules } from '../services/approvalService';
 import { initializeDatabase } from '../services/db';
 import { ensureBranchMigration } from '../services/branchService';
 import { isTrialExpired } from '../services/planService';
@@ -64,9 +66,41 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // the synchronous finance statements (trial balance / P&L / fund flow, on
   // Accounts, Billing, Dashboard, Reports) fold over server-authoritative data.
   // Runs on login and on refresh-restored sessions. No-op in demo mode.
+  //
+  // Only for roles that hold view_accounts. This fired for EVERY sign-in, so a
+  // telecaller, a site engineer or an HR manager each opened their session with
+  // a request the server was always going to refuse — swallowed by the catch,
+  // visible only as a 403 in the console of a working app. Asking first is both
+  // honest and two round-trips cheaper on every one of those logins.
   useEffect(() => {
     if (!isApiEnabled() || !tenant?.id) return;
+    if (!user || !authService.hasPermission(user, 'view_accounts')) return;
     hydrateLedger(tenant.id).catch(() => { /* pages fall back to whatever's cached */ });
+  }, [tenant?.id, user]);
+
+  // The tenant's own lead pipeline. Every screen that draws a stage — the
+  // kanban columns, the stage filter, the dashboard's pipeline summary — read
+  // a hardcoded default until this ran, so a workspace using any pipeline but
+  // that default had leads sitting in stages the UI did not render.
+  //
+  // Here rather than on the Leads page because Dashboard and Reports read the
+  // same stages, and because /api/meta has no permission gate: it is UI
+  // metadata every role needs.
+  useEffect(() => {
+    if (!isApiEnabled() || !tenant?.id) return;
+    syncPipelineFromServer(tenant.id).catch(() => { /* keep the cached pipeline */ });
+  }, [tenant?.id]);
+
+  // Approval thresholds. needsApproval() is called inline while rows render, so
+  // it has to answer synchronously from a cache — this is what makes that cache
+  // the SERVER's answer rather than a browser-local invention. Until it existed,
+  // a threshold set in Settings never left the device that set it.
+  //
+  // A failure keeps whatever is cached rather than reverting to defaults:
+  // silently loosening an approval gate is the worst available failure mode.
+  useEffect(() => {
+    if (!isApiEnabled() || !tenant?.id) return;
+    syncApprovalRules(tenant.id).catch(() => { /* keep the cached thresholds */ });
   }, [tenant?.id]);
 
   const verifyLoginCode = useCallback(async (challengeId: string, code: string) => {
@@ -218,11 +252,42 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return authService.hasPermission(user, action);
   }, [user]);
 
-  // Re-read user + tenant from storage so UI reflects saves immediately.
-  // In API mode the JWT session is the identity source — a local re-read
-  // would clobber it with stale demo data, so it is skipped.
+  /**
+   * Re-read user + tenant so the UI reflects a save immediately.
+   *
+   * IN API MODE THIS USED TO DO NOTHING. The early return was right about its
+   * premise — a local re-read WOULD clobber the JWT session with stale demo
+   * data — and wrong about the conclusion, because it left no way to refresh
+   * at all. The session's tenant is captured once at login and persisted, so
+   * after saving branding the workspace kept rendering the copy from before
+   * the change, across reloads, until the user happened to sign out and back
+   * in. The toast said "your portal and workspace now use it" and the sidebar
+   * disagreed.
+   *
+   * So in API mode it re-fetches the workspace instead of reading storage, and
+   * writes the brand fields back into the stored session so a reload keeps
+   * them. Only branding is merged: name, plan and status are the server's to
+   * change, and identity stays the JWT's.
+   *
+   * Failure is deliberately silent. This runs after a save that has already
+   * succeeded; a second toast saying the refresh failed would be alarming
+   * about something the next reload fixes anyway.
+   */
   const refreshSession = useCallback(() => {
-    if (getStoredApiSession()) return;
+    if (getStoredApiSession()) {
+      apiGetWorkspace().then(ws => {
+        const brand: Partial<Tenant> = {
+          name: ws.name,
+          company: ws.company,
+          logo: ws.logoUrl ?? '',
+          primaryColor: ws.primaryColor || undefined,
+          slug: ws.slug || undefined,
+        };
+        patchStoredApiSession(brand);
+        setTenant(prev => (prev ? { ...prev, ...brand } : prev));
+      }).catch(() => { /* the save already succeeded; a reload will pick it up */ });
+      return;
+    }
     const session = authService.getCurrentUser();
     if (session) {
       setUser(session.user);

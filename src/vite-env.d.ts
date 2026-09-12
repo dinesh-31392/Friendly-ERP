@@ -10,6 +10,18 @@ interface ImportMetaEnv {
    *   VITE_API_URL=  npm run build     # same-origin /api (recommended behind nginx)
    */
   readonly VITE_API_URL?: string;
+
+  /**
+   * Re-branding, all optional — see src/config/brand.ts. A deployment that
+   * ships under its own name sets these at build time rather than editing
+   * strings:
+   *   VITE_BRAND_NAME="Acme Cloud" VITE_PORTAL_DOMAIN="acme.app" npm run build
+   * They cover only what a person READS. The JWT issuer, localStorage prefix
+   * and database name keep their historical spelling on purpose.
+   */
+  readonly VITE_BRAND_NAME?: string;
+  readonly VITE_BRAND_TAGLINE?: string;
+  readonly VITE_PORTAL_DOMAIN?: string;
   /** Vite built-ins. DEV/PROD are booleans; MODE is the build mode name. */
   readonly DEV: boolean;
   readonly PROD: boolean;

@@ -7,6 +7,7 @@ import { ingestLead } from '../services/integrationService';
 import { formatCurrency } from '../utils/format';
 import type { Project, Tenant, Unit, Tower } from '../types';
 import toast from 'react-hot-toast';
+import { BRAND } from '../config/brand';
 
 /**
  * Public project microsite — the LeadRat-style hosted landing page. No auth:
@@ -179,7 +180,7 @@ export default function Microsite() {
       </main>
 
       <footer className="border-t border-zinc-100 py-6 text-center text-[11px] text-zinc-400">
-        {tenant.name} · Powered by Friendly ERP{tenant.rera ? ` · RERA ${tenant.rera}` : ''}
+        {tenant.name} · Powered by {BRAND.name}{tenant.rera ? ` · RERA ${tenant.rera}` : ''}
       </footer>
     </div>
   );

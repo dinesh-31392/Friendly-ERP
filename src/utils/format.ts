@@ -38,6 +38,12 @@ export function localeFor(currency?: string): string {
  */
 export function formatCurrency(amount: number, currency: string = 'INR'): string {
   const sym = currencySymbol(currency);
+  // A missing figure renders as a zero, not as a white screen. The types say
+  // this cannot happen; an API payload that omits a field says otherwise, and
+  // it happened — the partner portal died on `undefined.toLocaleString()` and
+  // took the whole page with it. A money formatter is called from hundreds of
+  // render paths, and none of them are worth crashing over a hole in the data.
+  if (typeof amount !== 'number' || !Number.isFinite(amount)) amount = 0;
   const abs = Math.abs(amount);
   if (currency === 'INR') {
     if (abs >= 1e7) return `${sym}${(amount / 1e7).toFixed(1)} Cr`;
@@ -52,6 +58,7 @@ export function formatCurrency(amount: number, currency: string = 'INR'): string
 
 /** Full (non-compact) money display, e.g. for invoices: ₹4,50,000 / $450,000 */
 export function formatCurrencyFull(amount: number, currency: string = 'INR'): string {
+  if (typeof amount !== 'number' || !Number.isFinite(amount)) amount = 0;   // see formatCurrency
   try {
     return new Intl.NumberFormat(currency === 'INR' ? 'en-IN' : 'en-US', {
       style: 'currency', currency, maximumFractionDigits: 0,

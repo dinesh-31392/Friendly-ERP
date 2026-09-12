@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { platformPool, withTenantContext } from '../db.js';
 import { startEmailChallenge, verifyEmailChallenge } from '../mfa.js';
-import { signToken, verifyPassword, hashPassword, requireAuth } from '../auth.js';
+import { signToken, verifyToken, verifyPassword, hashPassword, requireAuth } from '../auth.js';
 import { env } from '../env.js';
 
 /**
@@ -64,6 +64,46 @@ interface LoginBody {
   tenantSlug?: string;
 }
 
+/**
+ * Record a sign-in.
+ *
+ * Written through the PLATFORM pool for the same reason last_login_at is: at
+ * this moment there is no tenant context to run inside, because the caller has
+ * only just become somebody. The tenant id comes off the user row already
+ * loaded, never off the request.
+ *
+ * The jti is read back out of the token just minted, so the row names the exact
+ * session. Without it a sign-out on a laptop could close the phone.
+ *
+ * Best effort, and deliberately so: a failure here must never cost somebody
+ * their login. A missing session row is a gap in a presence report; a failed
+ * login because an audit insert threw is an outage.
+ */
+async function recordLogin(
+  req: { ip?: string; headers: Record<string, unknown>; log: { warn: (o: unknown, m: string) => void } },
+  token: string, userId: string, tenantId: string,
+): Promise<void> {
+  const ip = req.ip ?? '';
+  const userAgent = String(req.headers['user-agent'] ?? '');
+  try {
+    const claims = verifyToken(token) as unknown as { jti?: string; exp?: number };
+    await platformPool.query(
+      // The conflict target repeats the index's WHERE clause because
+      // uq_user_sessions_jti is PARTIAL. Without the predicate Postgres cannot
+      // match a partial unique index and rejects the whole statement — which
+      // it did, silently, until the suite noticed no rows were being written.
+      `INSERT INTO user_sessions (tenant_id, user_id, jti, expires_at, ip, user_agent)
+       VALUES ($1, $2, $3, to_timestamp($4), $5, $6)
+       ON CONFLICT (jti) WHERE jti IS NOT NULL DO NOTHING`,
+      [tenantId, userId, claims.jti ?? null, claims.exp ?? 0,
+       ip.slice(0, 60), userAgent.slice(0, 300)]);
+  } catch (err) {
+    // Still best effort — a login must not fail because an audit insert did —
+    // but LOGGED, not swallowed. Silence here cost an afternoon: every insert
+    // was failing and the only symptom was an empty table.
+    req.log.warn({ err, userId }, 'could not record the sign-in session');
+  }
+}
 export async function authRoutes(app: FastifyInstance): Promise<void> {
   /**
    * POST /api/auth/login
@@ -169,6 +209,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     }
 
     const token = signToken({ sub: user.id, tid: user.tenant_id, rol: user.role_name });
+    await recordLogin(req, token, user.id, user.tenant_id);
     return {
       token,
       // mustChangePassword drives the blocking ForcePasswordChange screen. It
@@ -237,6 +278,11 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       // anyway. Doing this here means there is no scheduled job to forget to
       // deploy, and the cost lands on the rare request rather than every one.
       await db.query(`DELETE FROM revoked_tokens WHERE expires_at < now()`);
+      // Close the presence record for THIS session. Keyed on the jti so a
+      // sign-out on one device never closes another still in use.
+      await db.query(
+        `UPDATE user_sessions SET logout_at = now(), ended_by = 'logout'
+          WHERE jti = $1 AND logout_at IS NULL`, [req.ctx.jti]);
       reply.code(200);
       return { ok: true, scope: 'this-session' };
     }),
@@ -315,6 +361,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
 
     await platformPool.query('UPDATE users SET last_login_at = now() WHERE id = $1', [user.id]);
     const token = signToken({ sub: user.id, tid: user.tenant_id, rol: user.role_name });
+    await recordLogin(req, token, user.id, user.tenant_id);
     return {
       token,
       user: {

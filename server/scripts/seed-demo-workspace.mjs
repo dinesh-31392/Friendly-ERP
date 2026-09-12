@@ -27,12 +27,30 @@ const { rows: [t] } = await c.query(
    RETURNING id`, [SLUG]);
 
 // Roles with their real grants, same map the provisioning endpoint uses.
+//
+// ALL ELEVEN workspace roles, deliberately. This used to define five, which
+// meant a demo workspace could not demonstrate the other six and — worse —
+// there was no account to sign in with when checking that each role reaches
+// what it should. The sign-in picker offers eleven; a seeder that produces five
+// cannot be used to verify any of them.
 const ROLE_PERMS = {
   builder_admin: null,   // everything
-  sales_manager: ['view_dashboard','view_leads','manage_leads','assign_leads','add_notes','manage_team','view_reports','view_inventory','view_projects','view_sales_performance','view_finance','view_messages','send_messages','view_documents','view_service','manage_service','view_calendar','schedule_visits','use_ai_studio','create_bookings','approve_reminders','view_campaigns','manage_campaigns','view_bookings','manage_bookings','view_brokers','view_execution','create_quotations','approve_discounts','view_invoices'],
+  sales_manager: ['view_dashboard','view_leads','manage_leads','assign_leads','add_notes','manage_team','view_reports','view_inventory','view_projects','view_sales_performance','view_finance','view_messages','send_messages','view_documents','view_service','manage_service','view_calendar','schedule_visits','use_ai_studio','create_bookings','approve_reminders','view_campaigns','manage_campaigns','view_bookings','manage_bookings','view_brokers','view_execution','create_quotations','approve_discounts','view_invoices','view_leasing','manage_leasing'],
   sales_executive: ['view_dashboard','view_leads','manage_own_leads','add_notes','view_inventory','view_projects','view_messages','send_messages','view_documents','view_calendar','schedule_visits','use_ai_studio','create_bookings','view_bookings','create_quotations'],
-  accountant: ['view_dashboard','view_projects','view_reports','view_accounts','manage_accounts','view_finance','manage_finance','view_procurement','view_bookings','view_documents','view_invoices','manage_invoices'],
+  telecaller: ['view_dashboard','view_leads','manage_own_leads','add_notes','view_projects','view_calendar','schedule_visits','view_messages','send_messages'],
+  // approve_vendor_bills is the second signature on a contractor RA bill. The
+  // route checks that key rather than manage_finance (068), so a demo seeded
+  // without it has an accountant who cannot approve the RA bill this seeder
+  // creates — which is exactly what happened the first time.
+  accountant: ['view_dashboard','view_projects','view_reports','view_accounts','manage_accounts','view_calendar','view_finance','manage_finance','approve_vendor_bills','view_procurement','view_bookings','view_documents','view_invoices','manage_invoices','view_leasing','view_owner_payouts','manage_owner_payouts'],
   site_engineer: ['view_dashboard','view_projects','view_execution','manage_execution','view_procurement','manage_procurement','view_hr','manage_attendance','view_documents','view_calendar','view_messages','send_messages','signoff_ra_bills'],
+  // No manage_hr_all: this manager is posted to a site below, and a posted
+  // manager IS the per-project case migration 061 exists to serve. The admin
+  // holds the company-wide key.
+  hr_manager: ['view_dashboard','view_hr','manage_hr','manage_attendance','view_documents','view_projects','view_reports','view_calendar','view_messages','send_messages'],
+  land_manager: ['view_dashboard','view_projects','view_documents','view_land','manage_land','view_bd','view_calendar','view_messages','send_messages'],
+  bd_manager: ['view_dashboard','view_projects','view_reports','view_bd','manage_bd','view_land','approve_land_qualify','view_documents','view_calendar','view_messages','send_messages'],
+  auditor: ['view_dashboard','view_leads','view_projects','view_inventory','view_bookings','view_sales_performance','view_campaigns','view_calendar','view_reports','view_messages','view_documents','view_finance','view_service','view_brokers','view_execution','view_procurement','view_hr','view_accounts','view_audit_log','view_invoices','view_leasing','view_owner_payouts'],
 };
 const { rows: allPerms } = await c.query(`SELECT key FROM permissions`);
 const catalog = allPerms.map(r => r.key);
@@ -42,7 +60,11 @@ for (const [name, keys] of Object.entries(ROLE_PERMS)) {
   const { rows: [r] } = await c.query(
     `INSERT INTO roles (tenant_id, name, is_system) VALUES ($1,$2,true) RETURNING id`, [t.id, name]);
   roleId[name] = r.id;
-  const grant = keys ?? catalog.filter(k => !['approve_reminders','manage_team'].includes(k));
+  // Mirrors BUILDER_ADMIN_EXCLUDES in seed.ts / tenantRoutes.ts. The platform
+  // keys are the important two: a workspace owner must not hold the rights
+  // that gate the platform console.
+  const grant = keys ?? catalog.filter(k =>
+    !['view_platform', 'manage_branch', 'approve_reminders', 'manage_team'].includes(k));
   for (const k of grant) {
     if (!catalog.includes(k)) continue;
     await c.query(`INSERT INTO role_permissions (role_id, permission_key) VALUES ($1,$2) ON CONFLICT DO NOTHING`, [r.id, k]);
@@ -65,12 +87,19 @@ await c.query(
   ]})]);
 
 console.log('→ people');
+// One account per role. Signing in as each of them is the only way to check
+// that a role reaches what it should and nothing more, so every role gets one.
 const users = [
   ['admin',    'builder_admin',   'Anita Desai'],
   ['manager',  'sales_manager',   'Rohit Menon'],
   ['sales',    'sales_executive', 'Priya Sharma'],
+  ['tele',     'telecaller',      'Sneha Kamat'],
   ['accounts', 'accountant',      'Vikram Rao'],
   ['site',     'site_engineer',   'Imran Qureshi'],
+  ['hr',       'hr_manager',      'Deepa Nair'],
+  ['land',     'land_manager',    'Suresh Patil'],
+  ['bd',       'bd_manager',      'Kavita Reddy'],
+  ['auditor',  'auditor',         'Nitin Shah'],
 ];
 const userId = {};
 for (const [slug, role, name] of users) {
@@ -84,6 +113,20 @@ for (const [slug, role, name] of users) {
 console.log('→ project, towers, units');
 const { rows: [proj] } = await c.query(
   `INSERT INTO projects (tenant_id, name, city, status) VALUES ($1,'Acme Skyline','Pune','under_construction') RETURNING id`, [t.id]);
+
+// A SECOND site, so project-scoped HR has something to scope. With one
+// project every manager sees everything and the feature is invisible: the
+// demo would show a filter with one option and prove nothing.
+const { rows: [proj2] } = await c.query(
+  `INSERT INTO projects (tenant_id, name, city, status) VALUES ($1,'Acme Riverfront','Nashik','under_construction') RETURNING id`, [t.id]);
+
+// Deepa runs HR for Skyline only. She holds manage_hr and no manage_hr_all,
+// so this posting is what narrows her — and the whole point of the demo is
+// that she cannot see Riverfront's crew or their pay.
+await c.query(
+  `INSERT INTO user_project_assignments (tenant_id, user_id, project_id, role_note)
+   VALUES ($1,$2,$3,'HR for this site') ON CONFLICT DO NOTHING`,
+  [t.id, userId.hr, proj.id]);
 const { rows: [tower] } = await c.query(
   `INSERT INTO towers (tenant_id, project_id, name, floors, units_per_floor) VALUES ($1,$2,'Tower A',12,4) RETURNING id`, [t.id, proj.id]);
 
@@ -105,26 +148,78 @@ const { rows: [broker] } = await c.query(
   `INSERT INTO brokers (tenant_id, name, agency_name, phone, email, commission_structure, status)
    VALUES ($1,'Meera Iyer','Iyer Realty','9811111111','meera@iyer.test','{"type":"percentage","value":2}','active') RETURNING id`, [t.id]);
 
+// Every lead carries an email. Without one the Leads table's Email column, the
+// detail panel's mail action and the "give this buyer portal access" flow all
+// have nothing to show or send to — and a blank column reads as a broken
+// feature rather than as missing data.
+//
+// One lead is deliberately left without an address: a real pipeline has walk-ins
+// who only ever gave a phone number, and the UI has to look right for them too.
+/**
+ * The eighth column is WHOSE lead it is, and it is the reason this list is
+ * not all one rep's any more.
+ *
+ * Every lead used to be assigned to `sales`. Three consequences, all of which
+ * made the product look broken to anybody evaluating it by role:
+ *
+ *   · The TELECALLER — whose entire job is working enquiries — opened a
+ *     dashboard with nothing on it, because no lead was theirs.
+ *   · The own-vs-all boundary was invisible. A sales executive holds
+ *     manage_own_leads and a sales manager holds manage_leads, but both saw
+ *     the same seven rows, so the difference could not be seen or demonstrated.
+ *   · Nobody could tell correct scoping from a broken query, because both
+ *     produce the same number when one person owns everything.
+ *
+ * Split so the counts differ and the boundary shows: the manager sees all
+ * seven, the executive four, the telecaller three.
+ */
 const LEADS = [
-  ['Sanjay Gupta','9820000001','new',        'Website',   null,       6000000],
-  ['Neha Kulkarni','9820000002','contacted',  'WhatsApp',  null,       7500000],
-  ['Arun Pillai','9820000003','qualified',   'Referral',  broker.id,  8200000],
-  ['Divya Nair','9820000004','site_visit',   'Walk-in',   null,       6800000],
-  ['Karan Shah','9820000005','negotiation',  'Website',   broker.id,  9100000],
-  ['Farah Khan','9820000006','new',          'Portal',    null,       5500000],
-  ['Vivek Joshi','9820000007','lost',        'Website',   null,       4800000, 'Bought elsewhere'],
+  ['Sanjay Gupta',  '9820000001', 'new',         'Website',  null,      6000000, 'sanjay.gupta@example.com', 'sales', null],
+  ['Neha Kulkarni', '9820000002', 'contacted',   'WhatsApp', null,      7500000, 'neha.kulkarni@example.com', 'tele', null],
+  ['Arun Pillai',   '9820000003', 'qualified',   'Referral', broker.id, 8200000, 'arun.pillai@example.com', 'sales', null],
+  ['Divya Nair',    '9820000004', 'site_visit',  'Walk-in',  null,      6800000, '', 'sales', null],
+  ['Karan Shah',    '9820000005', 'negotiation', 'Website',  broker.id, 9100000, 'karan.shah@example.com', 'sales', null],
+  ['Farah Khan',    '9820000006', 'new',         'Portal',   null,      5500000, 'farah.khan@example.com', 'tele', null],
+  ['Vivek Joshi',   '9820000007', 'lost',        'Website',  null,      4800000, 'vivek.joshi@example.com', 'tele', 'Bought elsewhere'],
 ];
+/**
+ * How long ago each enquiry arrived.
+ *
+ * Inserted all at once, every lead showed the same minute — which left the
+ * Received column and the date-range filter (Today / This week / This month)
+ * with nothing to tell apart. A demo cannot show a feature when every row
+ * answers it identically.
+ *
+ * Spread so the pipeline reads as one: a lead that has reached negotiation has
+ * had weeks to get there, while today's arrivals are still 'new'. Keyed by name
+ * rather than appended to LEADS, whose last field is already optional.
+ */
+const ENQUIRED_DAYS_AGO = {
+  'Vivek Joshi':   21,   // lost — the oldest, and it went nowhere
+  'Arun Pillai':   17,   // qualified, later booked
+  'Karan Shah':    14,   // negotiation, later booked
+  'Divya Nair':     9,   // site visit done
+  'Neha Kulkarni':  5,   // contacted
+  'Sanjay Gupta':   2,   // still new — worth chasing
+  'Farah Khan':     0,   // came in today
+};
+
 const leadIds = [];
-for (const [name, phone, stage, source, brokerId, budget, lostReason] of LEADS) {
+for (const [name, phone, stage, source, brokerId, budget, email, owner, lostReason] of LEADS) {
+  const daysAgo = String(ENQUIRED_DAYS_AGO[name] ?? 0);
   const { rows: [l] } = await c.query(
-    `INSERT INTO leads (tenant_id, name, phone, stage, source, project, budget, assigned_to, broker_id, lost_reason)
-     VALUES ($1,$2,$3,$4,$5,'Acme Skyline',$6,$7,$8,$9) RETURNING id`,
-    [t.id, name, phone, stage, source, budget, userId.sales, brokerId, lostReason ?? null]);
+    `INSERT INTO leads (tenant_id, name, phone, email, stage, source, project, budget, assigned_to, broker_id, lost_reason,
+                        created_at, enquired_at, last_contact_at)
+     VALUES ($1,$2,$3,$4,$5,$6,'Acme Skyline',$7,$8,$9,$10,
+             now() - ($11 || ' days')::interval,
+             now() - ($11 || ' days')::interval,
+             now() - ($11 || ' days')::interval) RETURNING id`,
+    [t.id, name, phone, email, stage, source, budget, userId[owner], brokerId, lostReason ?? null, daysAgo]);
   leadIds.push(l.id);
   await c.query(
     `INSERT INTO lead_activities (tenant_id, lead_id, user_id, type, notes)
      VALUES ($1,$2,$3,'call',$4)`,
-    [t.id, l.id, userId.sales, `Intro call with ${name.split(' ')[0]}`]);
+    [t.id, l.id, userId[owner], `Intro call with ${name.split(' ')[0]}`]);
 }
 
 console.log('→ bookings (with the full server cascade)');
@@ -134,8 +229,12 @@ for (const [i, leadIdx] of [[0, 2], [1, 4]]) {
   const lead = leadIds[leadIdx];
   const value = 8200000 + i * 900000;
   const { rows: [bk] } = await c.query(
-    `INSERT INTO bookings (tenant_id, lead_id, unit_id, created_by, booking_amount, total_consideration, payment_plan, stage, status)
-     VALUES ($1,$2,$3,$4,300000,$5,'30-70','agreement','active') RETURNING id`,
+    // delay_interest_pct defaults to 0, which makes every demand letter read
+    // "incl. ₹0 interest" — arithmetically right and useless as a demo of a
+    // dunning module. 12% p.a. is a normal delayed-payment rate on an Indian
+    // builder agreement.
+    `INSERT INTO bookings (tenant_id, lead_id, unit_id, created_by, booking_amount, total_consideration, payment_plan, stage, status, delay_interest_pct)
+     VALUES ($1,$2,$3,$4,300000,$5,'30-70','agreement','active',12) RETURNING id`,
     [t.id, lead, unit, userId.sales, value]);
   await c.query(`UPDATE units SET status='booked' WHERE id=$1`, [unit]);
   await c.query(`UPDATE leads SET stage='booked' WHERE id=$1`, [lead]);
@@ -149,34 +248,345 @@ for (const [i, leadIdx] of [[0, 2], [1, 4]]) {
     `INSERT INTO invoices (tenant_id, lead_id, booking_id, lead_name, project, type, amount, due_date, status)
      VALUES ($1,$2,$3,$4,'Acme Skyline','Booking Token',300000, CURRENT_DATE + 7, $5)`,
     [t.id, lead, bk.id, LEADS[leadIdx][0], i === 0 ? 'Paid' : 'Pending']);
+
+  // The payment plan behind the booking: 30-70, three milestones.
+  //
+  // The FIRST is deliberately overdue and only part-paid, because that is what
+  // the Demands tab is FOR — milestone_outstanding() reads payments rather
+  // than the status column, so a partly-paid overdue milestone is exactly the
+  // case a collections desk chases and the one worth having in a demo.
+  const MILESTONES = [
+    ['On Booking',   1, 30, Math.round(value * 0.30), -21],
+    ['On Agreement', 2, 40, Math.round(value * 0.40),  14],
+    ['On Handover',  3, 30, value - Math.round(value * 0.30) - Math.round(value * 0.40), 120],
+  ];
+  for (const [name, seq, pct, amount, dueInDays] of MILESTONES) {
+    const { rows: [ms] } = await c.query(
+      `INSERT INTO payment_schedules (tenant_id, booking_id, milestone_name, sequence, percentage, amount, due_date, status)
+       VALUES ($1,$2,$3,$4,$5,$6, CURRENT_DATE + $7::int, 'pending') RETURNING id`,
+      [t.id, bk.id, name, seq, pct, amount, dueInDays]);
+    // Part payment against the overdue first milestone on the first booking
+    // only — so one booking is chaseable and one is clean.
+    if (dueInDays < 0 && i === 0) {
+      await c.query(
+        `INSERT INTO payments (tenant_id, payment_schedule_id, amount, payment_date, mode)
+         VALUES ($1,$2,$3, CURRENT_DATE - 18, 'bank_transfer')`,
+        [t.id, ms.id, Math.round(amount * 0.4)]);
+    }
+  }
 }
 
+console.log('→ RERA registration and escrow');
+// The designated account and the seventy per cent obligation it carries.
+// Without a registration the RERA tab can only show its empty state, and the
+// obligation this module exists to measure is invisible.
+const { rows: [designated] } = await c.query(
+  `INSERT INTO bank_accounts (tenant_id, account_name, bank_name, account_number, opening_balance)
+   VALUES ($1,'Acme Skyline — RERA Designated','HDFC Bank','50200012345678', 2500000) RETURNING id`, [t.id]);
+await c.query(`UPDATE projects SET rera_number = 'P52100047890' WHERE id = $1`, [proj.id]);
+await c.query(
+  `INSERT INTO rera_registrations (tenant_id, project_id, registered_on, valid_until, escrow_pct, designated_bank_account_id)
+   VALUES ($1,$2, CURRENT_DATE - 400, CURRENT_DATE + 700, 70, $3)
+   ON CONFLICT (project_id) DO NOTHING`, [t.id, proj.id, designated.id]);
+// Allocate what has been received. Idempotent by construction — one allocation
+// per payment, enforced by a unique index.
+await c.query(`
+  INSERT INTO escrow_allocations
+    (tenant_id, payment_id, project_id, receipt_amount, escrow_amount, free_amount, escrow_pct)
+  SELECT $1, pay.id, u.project_id, pay.amount, s.escrow, s.free, r.escrow_pct
+    FROM payments pay
+    JOIN payment_schedules ps ON ps.id = pay.payment_schedule_id
+    JOIN bookings bk          ON bk.id = ps.booking_id
+    JOIN units u              ON u.id = bk.unit_id
+    JOIN rera_registrations r ON r.project_id = u.project_id AND r.status = 'active'
+    CROSS JOIN LATERAL escrow_split(pay.amount, r.escrow_pct) s
+  ON CONFLICT (payment_id) DO NOTHING`, [t.id]);
+
 console.log('→ calendar, HR, materials');
-for (const [title, cat, days] of [['Call Neha about floor plan','follow_up',1],['Site visit — Divya','visit',2],['Collect token from Karan','payment',3]]) {
+/**
+ * A task belongs to the person who has to do it — crm_tasks.user_id, which the
+ * route scopes on. All three used to belong to `sales`, so every other role
+ * opened a calendar and a "Needs Attention" panel with nothing in them and no
+ * way to tell an empty queue from a broken one.
+ *
+ * One per working role now, in that role's own language, so each dashboard has
+ * something true on it and the scoping is visible: each person sees theirs, the
+ * roles that see all see all.
+ */
+for (const [owner, title, cat, days] of [
+  ['sales',    'Call Neha about floor plan',            'follow_up', 1],
+  ['sales',    'Collect token from Karan',              'payment',   3],
+  ['tele',     'First call — Farah Khan',               'follow_up', 1],
+  ['tele',     'Re-attempt Vivek Joshi',                'follow_up', 4],
+  ['manager',  'Review this week’s pipeline with Priya','follow_up', 2],
+  ['site',     'Walk Tower A slab with the contractor', 'visit',     1],
+  ['hr',       'Approve Sunita’s leave request',        'follow_up', 1],
+  // The accountant's task was removed when this role held no view_calendar —
+  // it was a row nobody could open. Migration 066 gave finance its calendar,
+  // because month-end close, GSTR-1 on the 11th and TDS on the 7th are all
+  // dated work, so the task is back and reachable.
+  ['accounts', 'Reconcile August receipts',             'payment',   2],
+  ['accounts', 'GSTR-3B for August — file by the 20th', 'payment',   5],
+  ['land',     'Chase title report for Wakad parcel',   'follow_up', 3],
+  ['bd',       'Send heads of terms to Pune landowner', 'follow_up', 2],
+]) {
   await c.query(
     `INSERT INTO crm_tasks (tenant_id, user_id, title, due_date, priority, status, category, created_by)
      VALUES ($1,$2,$3, now() + ($4 || ' days')::interval, 'hot','pending',$5,$2)`,
-    [t.id, userId.sales, title, String(days), cat]);
+    [t.id, userId[owner], title, String(days), cat]);
 }
-for (const [name, desig, dept, sal] of [['Imran Qureshi','Site Engineer','Execution',65000],['Sunita Bhosale','Accountant','Finance',55000],['Ramesh Yadav','Supervisor','Execution',38000]]) {
+// The fourth column is the LOGIN this employee is, where there is one.
+// Without it the demo seeded an employee called Imran Qureshi and a user
+// called Imran Qureshi and left them strangers to each other — so /api/hr/me
+// found nothing, and "My Attendance & Pay" could only ever show the
+// no-record-linked state for a person who plainly has a record.
+const employeeIds = [];
+// The fifth column is the SITE. Ramesh is on Riverfront so the two crews are
+// genuinely separate — Deepa, who is posted to Skyline, sees Imran and Sunita
+// and not him. With everybody on one site the scoping would be invisible.
+for (const [name, desig, dept, sal, login, site] of [
+  ['Imran Qureshi',  'Site Engineer', 'Execution', 65000, 'site',     proj.id],
+  ['Sunita Bhosale', 'Accountant',    'Finance',   55000, 'accounts', proj.id],
+  // No login on purpose: a supervisor who is paid but does not use the ERP is
+  // the normal case on a site, and the page has to handle being asked about
+  // somebody who never signs in.
+  ['Ramesh Yadav',   'Supervisor',    'Execution', 38000, null,       proj2.id],
+]) {
+  const { rows: [e] } = await c.query(
+    `INSERT INTO employees (tenant_id, name, phone, designation, department, type, project_id, monthly_salary, join_date, active, user_id,
+                            uan, bank_ifsc, pt_monthly)
+     VALUES ($1,$2,'9830000000',$3,$4,'staff',$5,$6, CURRENT_DATE - 200, true, $7,
+             $8,'HDFC0001234',200) RETURNING id`,
+    [t.id, name, desig, dept, site, sal, login ? userId[login] : null,
+     // A UAN each, so the PF columns on a payslip are not all blank.
+     String(100000000000 + employeeIds.length + 1)]);
+  employeeIds.push(e.id);
+}
+
+// Attendance, a leave request and last month's payroll — the three things an
+// HR manager's dashboard reports. Without them their tiles all read zero and
+// the workspace cannot demonstrate the module it ships.
+for (const id of employeeIds.slice(0, 2)) {
   await c.query(
-    `INSERT INTO employees (tenant_id, name, phone, designation, department, type, project_id, monthly_salary, join_date, active)
-     VALUES ($1,$2,'9830000000',$3,$4,'staff',$5,$6, CURRENT_DATE - 200, true)`,
-    [t.id, name, desig, dept, proj.id, sal]);
+    `INSERT INTO attendance (tenant_id, employee_id, date, check_in, project_id, method)
+     VALUES ($1,$2,CURRENT_DATE,'09:15',$3,'manual')`, [t.id, id, proj.id]);
 }
+// On a SKYLINE employee, so the HR manager posted there has something pending
+// to decide. A request on the Riverfront supervisor would be correctly hidden
+// from her and the leave tab would read as empty.
+await c.query(
+  `INSERT INTO leave_requests (tenant_id, employee_id, type, from_date, to_date, days, reason, status)
+   VALUES ($1,$2,'casual', CURRENT_DATE + 3, CURRENT_DATE + 4, 2, 'Family function', 'pending')`,
+  [t.id, employeeIds[1]]);
+
+// An outstanding advance, so payroll has a deduction to recover and the
+// "Advance" column on the run is not uniformly blank.
+await c.query(
+  `INSERT INTO employee_advances (tenant_id, employee_id, amount, per_month, reason, issued_on)
+   VALUES ($1,$2,12000,4000,'Advance against salary', CURRENT_DATE - 20)`,
+  [t.id, employeeIds[0]]);
+// A processed run with its LINES, not an empty array. `items` is what the
+// payroll screen renders and what a payslip is drawn from, so seeding `[]`
+// left an HR manager looking at an empty table totalling zero and an employee
+// with no payslip — the module shipped, and the demo could not show it.
+//
+// It is also the only way to see the redaction work: a site engineer opening
+// this run is told how many people are in it and not what they were paid.
+// ONE RUN PER SITE, which is what migration 061 made possible. A single
+// company-wide run would be invisible to a site HR manager — she is not
+// company-wide — and the demo would show her an empty payroll tab.
+//
+// The lines carry the full computation, not just gross: PF capped at the
+// ₹15,000 statutory wage (₹1,800), professional tax, and net. A demo that
+// shows gross only teaches the wrong thing about what payroll is.
+const line = (id, name, desig, gross, pf, pt, adv) => ({
+  employeeId: id, name, designation: desig, empType: 'staff', projectId: null,
+  basis: 'Monthly salary', daysPresent: 26, overtimeHours: 0,
+  basic: gross, overtimePay: 0, gross,
+  pfEmployee: pf, esiEmployee: 0, professionalTax: pt, advanceRecovery: adv,
+  unpaidLeaveDeduction: 0, deductions: pf + pt + adv, net: gross - pf - pt - adv,
+  pfEmployer: pf, esiEmployer: 0, employerCost: gross + pf,
+});
+
+const skylineItems = [
+  line(employeeIds[0], 'Imran Qureshi',  'Site Engineer', 65000, 1800, 200, 4000),
+  line(employeeIds[1], 'Sunita Bhosale', 'Accountant',    55000, 1800, 200, 0),
+];
+const riverItems = [
+  line(employeeIds[2], 'Ramesh Yadav', 'Supervisor', 38000, 1800, 200, 0),
+];
+const sum = (rows, k) => rows.reduce((s, r) => s + r[k], 0);
+
+for (const [site, rows] of [[proj.id, skylineItems], [proj2.id, riverItems]]) {
+  await c.query(
+    `INSERT INTO payroll_runs (tenant_id, month, project_id, status, items, processed_at,
+                               gross_total, deduction_total, net_total, employer_cost)
+     VALUES ($1, to_char(CURRENT_DATE - interval '1 month', 'YYYY-MM'), $2, 'processed', $3::jsonb, now(),
+             $4, $5, $6, $7)`,
+    [t.id, site, JSON.stringify(rows),
+     sum(rows, 'gross'), sum(rows, 'deductions'), sum(rows, 'net'), sum(rows, 'employerCost')]);
+}
+console.log('→ site visits');
+// The middle of the funnel, across every state the page distinguishes: two
+// still to happen, one held and converted, one held and not, one nobody turned
+// up to. Without a completed visit the conversion figure has no denominator
+// and the page can only ever show 0%.
+//
+// leadIds order matches LEADS: 0 Sanjay, 1 Neha, 2 Arun, 3 Divya, 4 Karan,
+// 5 Farah, 6 Vivek.
+const VISITS = [
+  // [lead, daysFromNow, status, outcome, feedback]
+  [leadIds[1], 2,   'scheduled', null,             ''],
+  [leadIds[5], 4,   'confirmed', null,             ''],
+  [leadIds[2], -15, 'completed', 'booked',         'Loved the east-facing 2BHK — closed the same week.'],
+  [leadIds[3], -7,  'completed', 'needs_followup', 'Wants to bring family before deciding.'],
+  [leadIds[0], -3,  'no_show',   null,             ''],
+];
+for (const [leadId, days, status, outcome, feedback] of VISITS) {
+  await c.query(
+    `INSERT INTO site_visits (tenant_id, lead_id, project_id, assigned_to, scheduled_at,
+                              duration_minutes, status, outcome, feedback, created_by,
+                              completed_at)
+     VALUES ($1,$2,$3,$4, now() + ($5 || ' days')::interval, 60, $6, $7, $8, $4,
+             CASE WHEN $6 IN ('completed','no_show') THEN now() + ($5 || ' days')::interval END)`,
+    [t.id, leadId, proj.id, userId.sales, String(days), status, outcome, feedback]);
+}
+
+console.log('→ land parcels, BD opportunities');
+// The acquisition pipeline. A land manager and a BD manager have no leads, no
+// inventory and no ledger — these two tables are their entire working set, so
+// a demo workspace without them cannot show either role anything at all.
+//
+// Spread across the statuses their dashboards count, and across the two
+// approval queues the dashboard raises as alerts:
+//
+//   scored but not yet qualified  → the BD manager's "awaiting qualification"
+//   qualified                     → the admin's "ready to convert"
+//   converted                     → finished; must NOT count as active pipeline
+//
+// The score matters: landToQualify only picks up parcels that have been scored
+// (latestScore > 0), are unencumbered and carry no litigation. A parcel at
+// score 0 is still being worked up and is nobody's decision yet.
+const LAND = [
+  ['broker',     'Shantaram Pawar', '9840000001', 'Wagholi',  'Pune', 4.2,  38000000, 'feasibility_working', 71],
+  ['direct',     'Kamala Deshmukh', '9840000002', 'Hinjewadi','Pune', 2.75, 61000000, 'property_details',     0],
+  ['auction',    'MIDC Plot 44',    '9840000003', 'Chakan',   'Pune', 8.0,  92000000, 'qualified',           78],
+  ['government', 'Pune Metro Land', '9840000004', 'Kharadi',  'Pune', 1.5,  45000000, 'converted_to_project', 82],
+];
+for (const [src, owner, contact, loc, city, acres, price, status, score] of LAND) {
+  await c.query(
+    `INSERT INTO land_leads (tenant_id, reference_source, owner_name, owner_contact, location, city,
+                             area_acres, asking_price, status, ownership_type, litigation_status,
+                             is_encumbered, latest_score, created_by)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'freehold','none',false,$10,$11)`,
+    [t.id, src, owner, contact, loc, city, acres, price, status, score, userId.admin]);
+}
+
+const BD = [
+  ['jv',       'Referral', 'Sunrise Developers', '9850000001', 'Pune', 'terms_negotiation',  120000000],
+  ['jv',       'Direct',   'Meridian Estates',   '9850000002', 'Pune', 'initial_discussion',  85000000],
+  ['outright', 'Broker',   'Green Acres LLP',    '9850000003', 'Pune', 'identified',          40000000],
+];
+for (const [type, src, name, contact, city, stage, value] of BD) {
+  await c.query(
+    `INSERT INTO bd_leads (tenant_id, opportunity_type, source, counterparty_name, counterparty_contact,
+                           city, stage, estimated_deal_value, owned_by, created_by)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9)`,
+    [t.id, type, src, name, contact, city, stage, value, userId.bd]);
+}
+
 for (const [name, cat, unit] of [['OPC 53 Cement','Cement','bag'],['TMT Bar 12mm','Steel','kg'],['River Sand','Aggregate','cft']]) {
   await c.query(`INSERT INTO materials (tenant_id, name, category, unit, reorder_level) VALUES ($1,$2,$3,$4,100)`, [t.id, name, cat, unit]);
 }
 
-console.log('→ customer portal login');
+console.log('→ vendors, purchase order, vendor bill, contractor RA bill');
+/**
+ * Accounts payable and procurement, which this workspace had none of.
+ *
+ * The tables were empty: no vendors, no purchase orders, no vendor bills, no RA
+ * bills. So Procurement, Billing & Payments and the RA tab of Accounts & Ledger
+ * all opened on nothing, for every role that runs them — the same "the module
+ * looks unbuilt rather than unpopulated" problem the crm_tasks block above was
+ * written to solve.
+ *
+ * It also hid a real defect for a long time. The contractor RA bill carries a
+ * two-signature workflow — the site engineer verifies progress, then finance
+ * approves — and the API gated both stages on manage_finance, so the site
+ * engineer's own button returned 403 while the accountant could sign both
+ * halves alone. Nobody hit it because no RA bill had ever existed here to
+ * click. The bill below is left at 'submitted' precisely so that flow can be
+ * walked end to end: sign in as site@, verify progress, then as accounts@,
+ * approve.
+ */
+const { rows: [contractor] } = await c.query(
+  `INSERT INTO vendors (tenant_id, name, vendor_type, category, contact_person, phone, email, status)
+   VALUES ($1,'Sharma Constructions','contractor','Civil works','Rakesh Sharma','9822011111','accounts@sharmaconstructions.example','active')
+   RETURNING id`, [t.id]);
+const { rows: [supplier] } = await c.query(
+  `INSERT INTO vendors (tenant_id, name, vendor_type, category, contact_person, phone, email, status)
+   VALUES ($1,'Deccan Building Supplies','supplier','Cement & steel','Meena Rao','9822022222','sales@deccansupplies.example','active')
+   RETURNING id`, [t.id]);
+
+const { rows: [po] } = await c.query(
+  // purchase_orders.number is an INTEGER sequence, not a formatted reference —
+  // the SPA renders "PO-0001" from it. Passing the display string fails the
+  // insert on a numeric parse, which is how this block failed the first time.
+  `INSERT INTO purchase_orders (tenant_id, number, vendor_id, project_id, status, lines, expected_date, notes, created_by)
+   VALUES ($1,1,$2,$3,'approved',$4::jsonb, CURRENT_DATE + 12,
+           'Tower A slab — cement and steel', $5) RETURNING id`,
+  // The line shape is the SPA's PurchaseOrderLine — qty/rate, and receivedQty
+  // so the receiving flow has somewhere to count into. Writing quantity/unitRate
+  // instead type-checks nowhere and fails silently: poTotal multiplies
+  // l.qty * l.rate, so the Procurement header read "₹0" beside "1 open order".
+  [t.id, supplier.id, proj.id, JSON.stringify([
+    { id: 'l1', description: 'OPC 53 Cement', unit: 'bag', qty: 400, rate: 410, receivedQty: 0 },
+    { id: 'l2', description: 'TMT Bar 12mm', unit: 'kg', qty: 6000, rate: 68, receivedQty: 0 },
+  ]), userId.site]);
+
+// Raised against that PO, so the procurement → payable chain is traceable
+// rather than two unrelated rows.
+//
+// 'submitted' is the awaiting-approval state here: 'pending_approval' belongs
+// to purchase_orders, and the vendor_bills CHECK rejects it. The two tables
+// spell the same idea differently.
+await c.query(
+  `INSERT INTO vendor_bills (tenant_id, vendor_id, project_id, purchase_order_id, bill_no, bill_date, due_date,
+                             amount, tax_amount, total_amount, status, category, notes, created_by)
+   VALUES ($1,$2,$3,$4,'DBS/2026/318', CURRENT_DATE - 6, CURRENT_DATE + 24,
+           572000, 102960, 674960, 'submitted', 'Materials',
+           'Against PO-2026-001', $5)`,
+  [t.id, supplier.id, proj.id, po.id, userId.accounts]);
+
+// 40% of the contract, less 5% retention — the shape an Indian construction
+// running-account bill actually takes.
+await c.query(
+  `INSERT INTO contractor_ra_bills (tenant_id, vendor_id, project_id, ra_number, work_progress_percentage,
+                                    site_progress_percentage, gross_amount, retention_amount, deductions,
+                                    net_payable, status, notes, created_by)
+   VALUES ($1,$2,$3,1,40,40,1200000,60000,$4::jsonb,1110000,'submitted',
+           'RA-1 — Tower A slab up to 4th floor', $5)`,
+  [t.id, contractor.id, proj.id,
+   JSON.stringify([{ label: 'Water & electricity', amount: 30000 }]), userId.site]);
+
+console.log('→ portal logins (customer + channel partner)');
 const { rows: [pu] } = await c.query(
   `SELECT column_name FROM information_schema.columns WHERE table_name='portal_users' AND column_name='lead_id'`);
 if (pu) {
+  // The CHECK constraint is exclusive: a customer carries a lead_id and no
+  // broker_id, a partner the reverse. There is no such thing as a portal user
+  // attached to both, and the seeder must not pretend otherwise.
   await c.query(
     `INSERT INTO portal_users (tenant_id, lead_id, email, password_hash, name, role, active)
      VALUES ($1,$2,'buyer@acme.test',$3,'Arun Pillai','customer',true)
      ON CONFLICT DO NOTHING`,
     [t.id, leadIds[2], hash]);
+  // The partner side had no account at all, so the Channel Partner half of the
+  // portal could never be opened on a demo workspace.
+  await c.query(
+    `INSERT INTO portal_users (tenant_id, broker_id, email, password_hash, name, role, active)
+     VALUES ($1,$2,'partner@acme.test',$3,'Meera Iyer','partner',true)
+     ON CONFLICT DO NOTHING`,
+    [t.id, broker.id, hash]);
 }
 
 console.log(`
@@ -184,17 +594,32 @@ console.log(`
   Workspace "Acme Builders"   workspace code: ${SLUG}
   Password for every account below: ${PW}
 
-  BUILDER LOGIN  (the "Builder" tab, workspace code "${SLUG}")
+  BUILDER LOGIN  (pick the role in the sign-in picker, workspace code "${SLUG}")
     admin@acme.test      Builder Admin    — sees everything
-    manager@acme.test    Sales Manager    — team + pipeline
+    manager@acme.test    Sales Manager    — team + pipeline + approvals
     sales@acme.test      Sales Executive  — only their own leads
+    tele@acme.test       Telecaller       — calls their list, books visits
     accounts@acme.test   Accountant       — finance, no CRM
     site@acme.test       Site Engineer    — execution + stores
+    hr@acme.test         HR Manager       — people, attendance, payroll
+    land@acme.test       Land Manager     — acquisition and title
+    bd@acme.test         BD Manager       — business development
+    auditor@acme.test    Auditor          — reads everything, writes nothing
 
-  PORTAL LOGIN   (the "Customer / Partner" tab)
+  PORTAL LOGIN   (the "Customer" / "Channel Partner" entries)
     buyer@acme.test      the booking, schedule and tickets for one buyer
+    partner@acme.test    referrals and commission statements for one agency
 
   Data: 48 units (2 booked), 7 leads across the pipeline, 2 bookings
-  with commissions and invoices, 3 tasks, 3 employees, 3 materials.
+  with commissions and invoices, 10 tasks, 3 materials.
+
+  Work is SPREAD ACROSS ROLES on purpose: 4 leads to Priya and 3 to Sneha,
+  one task each for eight of the accounts. Sign in as any of them and the
+  dashboard has something true on it — and the own-vs-all boundary is
+  visible, because the manager sees seven leads where the executive sees
+  four.
+  People: 3 employees, 2 present today, 1 leave request pending, last
+  month's payroll processed.
+  Acquisition: 4 land parcels (1 converted), 3 BD opportunities.
 ──────────────────────────────────────────────────────────────`);
 await c.end();

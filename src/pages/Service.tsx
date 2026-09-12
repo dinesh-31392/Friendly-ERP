@@ -4,6 +4,7 @@ import { useAuth } from '../context/AuthContext';
 import { getByTenant } from '../services/db';
 import { isApiEnabled, apiGetTickets } from '../services/apiClient';
 import { createTicket, patchTicket, deleteTicket } from '../services/serviceWrites';
+import ServiceRequestsPanel from '../components/ServiceRequestsPanel';
 import { useTenantUsers } from '../hooks/useTenantUsers';
 import { localeFor } from '../utils/format';
 import type { Ticket, TicketPriority, TicketStatus, Project, Lead } from '../types';
@@ -35,6 +36,9 @@ export default function Service() {
   const [refreshKey, setRefreshKey] = useState(0);
   const refresh = () => setRefreshKey(k => k + 1);
 
+  // Tickets are the internal work item; requests are what a buyer asks for
+  // after paying. Two tables, two audiences, one desk — so, two tabs.
+  const [view, setView] = useState<'tickets' | 'requests'>('tickets');
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<TicketStatus | 'all'>('all');
   const [showAdd, setShowAdd] = useState(false);
@@ -155,16 +159,29 @@ export default function Service() {
     <div className="space-y-5 max-w-[1200px]">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-2xl font-bold text-zinc-900">Service Tickets</h2>
-          <p className="text-sm text-zinc-500 mt-0.5">Track defects, requests, and maintenance issues.</p>
+          <h2 className="text-2xl font-bold text-zinc-900">Customer Care</h2>
+          <p className="text-sm text-zinc-500 mt-0.5">Defects and maintenance, and what buyers ask for after handover.</p>
         </div>
-        {canManage && (
+        {canManage && view === 'tickets' && (
           <button onClick={() => setShowAdd(true)} className="flex items-center gap-2 px-4 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 transition-colors shadow-sm">
             <Plus className="h-4 w-4" /> New Ticket
           </button>
         )}
       </div>
 
+      <div className="flex items-center gap-1 border-b border-zinc-200">
+        {([['tickets', 'Tickets'], ['requests', 'Service requests']] as const).map(([id, label]) => (
+          <button
+            key={id} onClick={() => setView(id)}
+            className={`px-4 py-2.5 text-sm font-semibold border-b-2 -mb-px transition-colors ${
+              view === id ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-zinc-500 hover:text-zinc-700'}`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {view === 'tickets' && (<>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {[
           { label: 'Open Tickets', value: openCount, icon: AlertCircle, color: 'text-red-500' },
@@ -239,6 +256,10 @@ export default function Service() {
           </div>
         )}
       </div>
+
+      </>)}
+
+      {view === 'requests' && <ServiceRequestsPanel canManage={canManage} />}
 
       {/* Ticket Detail Modal */}
       {selectedTicket && (

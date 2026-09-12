@@ -28,7 +28,36 @@ PGPASSWORD="$POSTGRES_PASSWORD" pg_dump -h "$DB_HOST" -U postgres -d "$DB_NAME" 
 
 echo "backup ok: $OUT ($(wc -c < "$OUT") bytes)"
 
-# Retention: delete all but the newest $KEEP encrypted dumps.
-ls -1t "$DIR"/friendly_crm-*.sql.gz.gpg 2>/dev/null | tail -n +"$((KEEP + 1))" | while read -r old; do
-  rm -f "$old" && echo "pruned old backup: $old"
+# ── Uploaded documents ───────────────────────────────────────────────────────
+#
+# The database stores a storage_key, never the bytes. So a backup of Postgres
+# alone restores a complete file LIST in which every download 404s — which for
+# a product holding signed agreements, KYC scans and demand letters is not a
+# partial restore, it is a lost archive that looks intact.
+#
+# Same encryption as the dump, same retention, and written as its own artefact
+# so the two can be restored independently.
+#
+# UPLOADS_DIR is skipped rather than failed when absent: a workspace that has
+# never had an upload has no directory, and that is not an error worth waking
+# somebody for. An unreadable directory IS an error and is reported.
+UPLOADS_DIR="${UPLOADS_DIR:-/data/uploads}"
+if [ -d "$UPLOADS_DIR" ]; then
+  FILES_OUT="$DIR/friendly_crm-files-$STAMP.tar.gz.gpg"
+  # -C so the archive holds relative paths and can be restored anywhere.
+  tar -C "$UPLOADS_DIR" -cf - . \
+    | gzip -9 \
+    | gpg --batch --yes --symmetric --cipher-algo AES256 \
+          --passphrase "$BACKUP_PASSPHRASE" -o "$FILES_OUT"
+  echo "backup ok: $FILES_OUT ($(wc -c < "$FILES_OUT") bytes)"
+else
+  echo "note: $UPLOADS_DIR does not exist — no uploaded files to archive yet"
+fi
+
+# Retention: delete all but the newest $KEEP of each artefact.
+for pattern in "friendly_crm-*.sql.gz.gpg" "friendly_crm-files-*.tar.gz.gpg"; do
+  # shellcheck disable=SC2086
+  ls -1t $DIR/$pattern 2>/dev/null | tail -n +"$((KEEP + 1))" | while read -r old; do
+    rm -f "$old" && echo "pruned old backup: $old"
+  done
 done

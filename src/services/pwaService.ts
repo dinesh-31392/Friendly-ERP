@@ -104,11 +104,46 @@ export function initPwa(): void {
   // Service workers need a secure context: HTTPS, or localhost for development.
   // On a plain-IP http:// deployment this silently does nothing and the app
   // stays installable-but-not-offline — see DEPLOY.md.
-  if ('serviceWorker' in navigator) {
+  //
+  // NOT IN DEVELOPMENT, and this is not a preference.
+  //
+  // public/sw.js is a caching worker. Vite serves modules individually and
+  // re-transforms them on every edit, so a cache in front of that hands the
+  // browser JavaScript that no longer exists on disk. The symptom is not an
+  // error — it is a function that is suddenly `undefined`, a component that
+  // renders nothing, or a blank shell after a hard reload, all of which look
+  // like bugs in the code being written rather than in the cache serving it.
+  // Diagnosing it costs an hour and the answer is always the same.
+  //
+  // A production build is unaffected: its filenames are content-hashed, which
+  // is the situation this worker was written for.
+  //
+  // To exercise the worker deliberately, build and preview:
+  //   npm run build && npx vite preview
+  if ('serviceWorker' in navigator && !import.meta.env.DEV) {
     window.addEventListener('load', () => {
       navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch((err) => {
         console.warn('[pwa] service worker registration failed:', err?.message ?? err);
       });
     });
+  }
+
+  // A worker registered by an EARLIER dev session outlives this change — it is
+  // installed in the browser, not in the bundle — so a developer who has one
+  // would keep getting stale modules forever with no way to connect the two.
+  // Unregister on sight in dev, and say so, because a silent fix here is
+  // indistinguishable from the bug.
+  if ('serviceWorker' in navigator && import.meta.env.DEV) {
+    navigator.serviceWorker.getRegistrations().then(async (regs) => {
+      if (regs.length === 0) return;
+      for (const r of regs) await r.unregister();
+      if ('caches' in window) {
+        for (const key of await caches.keys()) await caches.delete(key);
+      }
+      console.info(
+        '[pwa] removed a service worker left over from a previous session — '
+        + 'it caches modules and makes dev edits appear not to apply. Reload once.',
+      );
+    }).catch(() => { /* a browser that blocks this is not one we can fix here */ });
   }
 }

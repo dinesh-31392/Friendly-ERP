@@ -49,8 +49,24 @@ const toApiTenant = (r: Record<string, unknown>) => ({
  * scripts/seed.ts — the two must change together, and migration 028 exists
  * because they drifted once already.
  */
+/**
+ * What builder_admin does NOT get, despite otherwise holding the catalog.
+ * Mirrors BUILDER_ADMIN_EXCLUDES in scripts/seed.ts — the two must change
+ * together, like the ROLE_PERMS copies they sit beside.
+ *
+ * view_platform and manage_branch gate the PLATFORM console. Handing them to
+ * every workspace owner was inert only because the SPA keeps its own
+ * permission map that omits them and no route gates on either — two accidents,
+ * not a design. approve_reminders and manage_team are workflow rights a
+ * workspace owner delegates rather than holds.
+ */
+const BUILDER_ADMIN_EXCLUDES = [
+  'view_platform', 'manage_branch',
+  'approve_reminders', 'manage_team',
+];
+
 const ROLE_PERMS: Record<string, string[]> = {
-  builder_admin: [],   // filled from the catalog below, minus the two exceptions
+  builder_admin: [],   // filled from the catalog below, minus BUILDER_ADMIN_EXCLUDES
   sales_manager: ['view_dashboard','view_leads','manage_leads','assign_leads','add_notes','manage_team',
     'view_reports','view_inventory','view_projects','view_sales_performance','view_finance','view_messages',
     'send_messages','view_documents','view_service','manage_service','view_calendar','schedule_visits',
@@ -66,8 +82,14 @@ const ROLE_PERMS: Record<string, string[]> = {
     'send_messages','signoff_ra_bills'],
   telecaller: ['view_dashboard','view_leads','manage_own_leads','add_notes','view_projects','view_calendar',
     'schedule_visits','view_messages','send_messages'],
-  accountant: ['view_dashboard','view_projects','view_reports','view_accounts','manage_accounts',
+  // view_calendar: finance work is dated work (migration 066). Tasks are
+  // scoped per person, so this is their own list, not the sales pipeline.
+  accountant: ['view_dashboard','view_projects','view_reports','view_accounts','manage_accounts','view_calendar',
     'view_finance','manage_finance','view_procurement','view_bookings','view_documents',
+    // The second signature on a contractor RA bill — the route checks this key
+    // rather than manage_finance (068). A self-serve workspace provisioned
+    // without it would have nobody able to approve a vendor bill.
+    'approve_vendor_bills',
     'view_invoices','manage_invoices',
     // Prepares the owner payout; releasing it stays with the account owner, so
     // approve_owner_payouts is deliberately absent (036 enforces this in the DB).
@@ -160,13 +182,15 @@ export async function tenantRoutes(app: FastifyInstance): Promise<void> {
           [b.name, b.company || b.name, b.slug, b.plan || 'trial',
            b.country || 'India', b.currency || 'INR', b.email, b.phone || null]);
 
-        // Roles + grants. builder_admin gets the whole catalog bar two workflow
-        // rights that belong to a sales manager.
+        // Roles + grants. builder_admin gets the whole catalog bar the
+        // exclusions — two workflow rights that belong to a sales manager, and
+        // the two PLATFORM keys, which are not a workspace's to hold. See
+        // BUILDER_ADMIN_EXCLUDES.
         const { rows: allPerms } = await client.query(`SELECT key FROM permissions`);
         const catalog = allPerms.map(r => r.key as string);
         const perms: Record<string, string[]> = {
           ...ROLE_PERMS,
-          builder_admin: catalog.filter(k => !['approve_reminders', 'manage_team'].includes(k)),
+          builder_admin: catalog.filter(k => !BUILDER_ADMIN_EXCLUDES.includes(k)),
         };
 
         const roleIds: Record<string, string> = {};

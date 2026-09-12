@@ -56,6 +56,59 @@ localStorage.removeItem('friendly_crm_api_url'); location.reload();
 - Every INSERT/UPDATE/DELETE on business tables is captured by the audit
   trigger with actor, IP, and full before/after state.
 
+## Running the verification suites locally
+
+The `verify:*` scripts are integration tests: they drive a **running API over
+HTTP** against a **separate database**. They do not start either for you, and
+they fail with `ECONNREFUSED` rather than a message saying so, which is easy to
+misread as a broken build.
+
+The recipe below mirrors the `verify` job in `.github/workflows/ci.yml` — keep
+the two in step.
+
+```bash
+# 1. Postgres on 5433 (leave it running)
+node localdb/start-db.mjs
+
+# 2. Point everything at the TEST database, not your dev one.
+#    The suites hardcode erp_test and expect the API on 4055.
+export DATABASE_ADMIN_URL="postgres://postgres:postgres@localhost:5433/erp_test"
+export DATABASE_URL="postgres://app_user:<dev-pw>@localhost:5433/erp_test"
+export DATABASE_PLATFORM_URL="postgres://app_platform:<dev-pw>@localhost:5433/erp_test"
+export JWT_SECRET="ci-only-secret-not-used-anywhere-real-0123456789ab"
+export PORT=4055
+export PUBLIC_URL="http://localhost:4055"   # WhatsApp connect refuses without it
+export MAIL_TRANSPORT=console               # verify:mfa reads codes from the log
+export AUTH_RATE_LIMIT_MAX=200              # 5 would throttle suite 2 onward
+export EVOLUTION_API_URL="" EVOLUTION_API_KEY=""
+export RAZORPAY_KEY_ID=rzp_test_ci_only
+export RAZORPAY_KEY_SECRET=ci-only-not-a-real-secret-0123456789
+export RAZORPAY_WEBHOOK_SECRET=ci-only-webhook-secret-0123456789
+
+# 3. Schema, catalog, fixtures
+npx tsx scripts/migrate.ts
+ADMIN_EMAIL=ci@erptest.local ADMIN_PASSWORD=ci-bootstrap-password-not-reused \
+  npx tsx scripts/seed.ts
+node scripts/seed-test-fixtures.mjs
+
+# 4. API on 4055, then the suites
+npx tsx src/index.ts &
+npm run verify:rls          # or any other verify:* script
+```
+
+Two traps worth knowing about, both of which have cost real time:
+
+- **`AUTH_RATE_LIMIT_MAX`** defaults to 5. Every suite signs in, so without
+  raising it here everything past the first fails on throttling rather than on
+  what it tests.
+- **A long-lived `erp_test` rots.** Fixture addresses are upserted per
+  `(tenant_id, email)`, so a renamed fixture tenant used to leave the same admin
+  in two workspaces. The login route resolves an email without a tenant slug and
+  refuses when it is ambiguous — reporting the same "Invalid email or password"
+  it gives a wrong password, by design — so three isolation suites failed with no
+  hint at the cause. `seed-test-fixtures.mjs` now deletes strays, so re-running
+  it repairs the database.
+
 ## What's next (per the cutover plan)
 
 1. Lead **writes** (POST/PATCH) + stage validation against `schema_definitions`

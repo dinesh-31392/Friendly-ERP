@@ -1,10 +1,15 @@
 import { useState, useMemo, useEffect } from 'react';
 import {
   BookOpenCheck, Plus, X, IndianRupee, CheckCircle2, Clock, FileText, Trash2, ChevronRight,
+  Loader2, AlertTriangle,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { getByTenant, create, update, remove, logAudit } from '../services/db';
-import { isApiEnabled, apiGetBookings, apiGetLeads, apiGetUnits, apiGetTowers, apiGetQuotations } from '../services/apiClient';
+import {
+  isApiEnabled, apiGetBookings, apiGetLeads, apiGetUnits, apiGetTowers, apiGetQuotations,
+  apiPreviewRefund, apiCancelBooking,
+  type ApiRefundPreview, type CancellationReason,
+} from '../services/apiClient';
 import { createBooking, patchBooking, deleteBooking } from '../services/bookingWrites';
 import { createQuotation, patchQuotation } from '../services/quotationWrites';
 import { patchUnit } from '../services/inventoryWrites';
@@ -44,6 +49,20 @@ export default function Bookings() {
 
   const [showAdd, setShowAdd] = useState(false);
   const [selected, setSelected] = useState<Booking | null>(null);
+
+  // Cancellation with a refund. The terms are inputs; every figure derived from
+  // them comes back from the server.
+  const [refundFor, setRefundFor] = useState<Booking | null>(null);
+  const [refundPreview, setRefundPreview] = useState<ApiRefundPreview | null>(null);
+  const [refundSaving, setRefundSaving] = useState(false);
+  // Ten per cent is the common agreement term, not a rule — it is editable, and
+  // whatever is set here is what gets frozen onto the cancellation record.
+  const [forfeiturePct, setForfeiturePct] = useState(10);
+  const [otherDeductions, setOtherDeductions] = useState(0);
+  const [gstRemitted, setGstRemitted] = useState(0);
+  const [gstRefundable, setGstRefundable] = useState(false);
+  const [refundReasonCategory, setRefundReasonCategory] = useState<CancellationReason>('buyer_finance');
+  const [refundReason, setRefundReason] = useState('');
   const [preSelectedLeadId, setPreSelectedLeadId] = useState<string>('');
   const [preSelectedUnitId, setPreSelectedUnitId] = useState<string>('');
   // Set when a booking is started from an accepted quotation — carries the
@@ -324,6 +343,54 @@ export default function Bookings() {
     toast.success(`Moved to ${BOOKING_STAGES.find(s => s.id === next)?.label}`);
   };
 
+  /**
+   * Cancel a booking that has money against it.
+   *
+   * The figures are previewed live from the server rather than computed here:
+   * forfeiture is a percentage of the CONSIDERATION, not of what the buyer
+   * happened to have paid, so the refund can legitimately come out NEGATIVE —
+   * the buyer owes the balance. A second implementation in the browser is a
+   * second chance to clamp that at zero and quietly write the shortfall off.
+   */
+  const openRefund = (b: Booking) => {
+    setRefundFor(b);
+    setRefundPreview(null);
+    apiPreviewRefund(b.id, { forfeiturePct, otherDeductions, gstRemitted, gstRefundable })
+      .then(setRefundPreview)
+      .catch(e => toast.error(e instanceof Error ? e.message : 'Could not price the refund'));
+  };
+
+  // Re-price whenever a term changes, so the number on screen is always the
+  // number that will be recorded.
+  useEffect(() => {
+    if (!refundFor) return;
+    let cancelled = false;
+    apiPreviewRefund(refundFor.id, { forfeiturePct, otherDeductions, gstRemitted, gstRefundable })
+      .then(p => { if (!cancelled) setRefundPreview(p); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [refundFor, forfeiturePct, otherDeductions, gstRemitted, gstRefundable]);
+
+  const confirmRefund = async () => {
+    if (!refundFor) return;
+    setRefundSaving(true);
+    try {
+      await apiCancelBooking({
+        bookingId: refundFor.id,
+        forfeiturePct, otherDeductions, gstRemitted, gstRefundable,
+        reasonCategory: refundReasonCategory, reason: refundReason,
+      });
+      toast.success('Booking cancelled — the refund is with finance for approval');
+      setRefundFor(null);
+      setSelected(null);
+      refresh();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Could not cancel the booking');
+    } finally {
+      setRefundSaving(false);
+    }
+  };
+
   const handleCancel = async (b: Booking) => {
     if (!canManage) { toast.error('No permission'); return; }
     const lead = getLead(b.leadId);
@@ -337,6 +404,11 @@ export default function Bookings() {
       || getByTenant<Invoice>('invoices', tenantId)
         .some(i => i.leadId === b.leadId && i.type === 'Booking Token' && i.status === 'Paid');
     if (hasCollections) {
+      // This used to be a dead end: "reverse/refund them first" with nothing in
+      // the product that could. A booking with money against it is precisely the
+      // one that needs a cancellation RECORD — a forfeiture computed from the
+      // agreement, a refund figure, and a statement the buyer can be shown.
+      if (isApiEnabled()) { openRefund(b); return; }
       toast.error('This booking has collected payments — reverse/refund them first so the ledger stays balanced.');
       return;
     }
@@ -1083,6 +1155,114 @@ export default function Bookings() {
                 <button type="submit" className="flex-1 px-4 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 shadow-sm">Create Booking</button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* ── Cancel with a refund ─────────────────────────────────────────── */}
+      {refundFor && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => setRefundFor(null)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto p-6" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-1">
+              <h3 className="text-lg font-semibold text-zinc-900">Cancel booking</h3>
+              <button onClick={() => setRefundFor(null)} className="p-1.5 rounded-lg hover:bg-zinc-100"><X className="h-4 w-4 text-zinc-500" /></button>
+            </div>
+            <p className="text-xs text-zinc-500 mb-4">
+              {getLead(refundFor.leadId)?.name ?? 'Purchaser'} · unit {getUnit(refundFor.unitId)?.number ?? '—'}.
+              The unit is released immediately; the refund goes to finance for approval.
+            </p>
+
+            <div className="grid grid-cols-2 gap-3 mb-3">
+              <div>
+                <label className="block text-xs font-semibold text-zinc-500 uppercase mb-1">Forfeiture %</label>
+                <input type="number" min={0} max={100} step="any" value={forfeiturePct}
+                  onChange={e => setForfeiturePct(Number(e.target.value))}
+                  className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm tabular-nums" />
+                <p className="text-[10px] text-zinc-400 mt-1">Of the consideration, per the agreement.</p>
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-zinc-500 uppercase mb-1">Other deductions</label>
+                <input type="number" min={0} step="any" value={otherDeductions}
+                  onChange={e => setOtherDeductions(Number(e.target.value))}
+                  className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm tabular-nums" />
+                <p className="text-[10px] text-zinc-400 mt-1">Brokerage already paid, admin charges.</p>
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-zinc-500 uppercase mb-1">GST already remitted</label>
+                <input type="number" min={0} step="any" value={gstRemitted}
+                  onChange={e => setGstRemitted(Number(e.target.value))}
+                  className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm tabular-nums" />
+              </div>
+              <div className="flex items-end pb-1">
+                <label className="flex items-start gap-2 text-xs text-zinc-600">
+                  <input type="checkbox" checked={gstRefundable} onChange={e => setGstRefundable(e.target.checked)} className="mt-0.5" />
+                  <span>
+                    Credit note still possible
+                    {/* s.34(2) CGST: not after 30 November following the end of
+                        the financial year of the supply. Past that the builder
+                        cannot recover it, and refunding it means paying twice. */}
+                    <span className="block text-[10px] text-zinc-400">Under s.34(2) CGST. If not, the GST is withheld.</span>
+                  </span>
+                </label>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3 mb-4">
+              <div>
+                <label className="block text-xs font-semibold text-zinc-500 uppercase mb-1">Reason</label>
+                <select value={refundReasonCategory} onChange={e => setRefundReasonCategory(e.target.value as CancellationReason)}
+                  className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm">
+                  <option value="buyer_finance">Buyer finance fell through</option>
+                  <option value="buyer_personal">Buyer personal</option>
+                  <option value="project_delay">Project delay</option>
+                  <option value="builder_initiated">Builder initiated</option>
+                  <option value="transfer">Transfer</option>
+                  <option value="other">Other</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-zinc-500 uppercase mb-1">Note</label>
+                <input value={refundReason} onChange={e => setRefundReason(e.target.value)} placeholder="Optional"
+                  className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm" />
+              </div>
+            </div>
+
+            {refundPreview ? (
+              <div className="rounded-xl border border-zinc-200 p-3 space-y-1.5 text-sm mb-4">
+                <div className="flex justify-between text-zinc-500"><span>Consideration</span><span className="tabular-nums">{formatCurrency(refundPreview.consideration, currency)}</span></div>
+                <div className="flex justify-between text-zinc-500"><span>Received from the buyer</span><span className="tabular-nums">{formatCurrency(refundPreview.totalReceived, currency)}</span></div>
+                <div className="flex justify-between text-zinc-500"><span>Less: forfeiture @ {refundPreview.forfeiturePct}%</span><span className="tabular-nums">({formatCurrency(refundPreview.forfeitureAmount, currency)})</span></div>
+                {refundPreview.otherDeductions > 0 && (
+                  <div className="flex justify-between text-zinc-500"><span>Less: other deductions</span><span className="tabular-nums">({formatCurrency(refundPreview.otherDeductions, currency)})</span></div>
+                )}
+                {!refundPreview.gstRefundable && refundPreview.gstRemitted > 0 && (
+                  <div className="flex justify-between text-zinc-500"><span>Less: GST no longer recoverable</span><span className="tabular-nums">({formatCurrency(refundPreview.gstRemitted, currency)})</span></div>
+                )}
+                {/* A refund and a shortfall must never look the same. */}
+                <div className={`flex justify-between font-semibold border-t border-zinc-100 pt-2 ${refundPreview.buyerOwes ? 'text-red-600' : 'text-zinc-900'}`}>
+                  <span>{refundPreview.buyerOwes ? 'Payable BY the buyer' : 'Refundable to the buyer'}</span>
+                  <span className="tabular-nums">{formatCurrency(Math.abs(refundPreview.refundAmount), currency)}</span>
+                </div>
+                {refundPreview.buyerOwes && (
+                  <p className="text-[11px] text-red-500 flex items-start gap-1 pt-1">
+                    <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-px" />
+                    The forfeiture exceeds what the buyer has paid. This is a demand, not a refund.
+                  </p>
+                )}
+              </div>
+            ) : (
+              <div className="rounded-xl border border-zinc-200 p-6 flex justify-center mb-4">
+                <Loader2 className="h-5 w-5 text-zinc-300 animate-spin" />
+              </div>
+            )}
+
+            <div className="flex gap-3">
+              <button type="button" onClick={() => setRefundFor(null)} className="flex-1 px-4 py-2.5 border border-zinc-200 rounded-xl text-sm font-medium text-zinc-600 hover:bg-zinc-50">Keep the booking</button>
+              <button onClick={confirmRefund} disabled={refundSaving || !refundPreview}
+                className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-red-600 text-white rounded-xl text-sm font-semibold hover:bg-red-700 disabled:opacity-60">
+                {refundSaving && <Loader2 className="h-4 w-4 animate-spin" />}{refundSaving ? 'Cancelling…' : 'Cancel booking'}
+              </button>
+            </div>
           </div>
         </div>
       )}

@@ -154,12 +154,29 @@ if (!pt) {
      VALUES ($1,$2,'MFA Fresh Platform',$3,$4,true,false) RETURNING id`,
     [pt.id, prole.id, `${MARK.toLowerCase()}fresh@mfa.test`, hash]);
 
-  // The exact UPDATE migration 031 runs.
+  // The exact predicate migration 031 runs — scoped to THIS SUITE'S rows.
+  //
+  // It used to run unscoped, exactly as the migration does. That is fine in a
+  // migration, which runs once against a fresh deployment, and wrong in a test,
+  // which runs against a database twenty other suites share: it enrolled every
+  // platform super_admin and tech_team present, including the fixtures
+  // admin@erptest.local and tech@erptest.local, and clean() below only removes
+  // rows matching this suite's own MARK — so the flag stayed on for good.
+  //
+  // Nothing caught it because until verify-role-logins existed, no later suite
+  // signed in as those two. Then they started returning an MFA challenge
+  // instead of a token and the failure pointed at the roles code, which was
+  // fine, rather than here.
+  //
+  // The role/tenant predicate is still what is under test; the email filter
+  // only stops the blast radius from reaching rows this suite does not own.
   await admin.query(
     `UPDATE users u SET mfa_email_enabled = true
        FROM roles r, tenants t
       WHERE r.id = u.role_id AND t.id = u.tenant_id
-        AND t.slug = 'platform' AND r.name IN ('super_admin','tech_team')`);
+        AND t.slug = 'platform' AND r.name IN ('super_admin','tech_team')
+        AND u.email LIKE $1`,
+    [`${MARK.toLowerCase()}%@mfa.test`]);
 
   const { rows: [after] } = await admin.query(`SELECT mfa_email_enabled FROM users WHERE id=$1`, [fresh.id]);
   ok('the migration enrols a platform admin that lacked a second factor', after.mfa_email_enabled === true);

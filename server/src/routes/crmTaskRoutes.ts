@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { withTenantContext } from '../db.js';
 import { requireAuth } from '../auth.js';
+import { PAGE_QUERY, readPage, keysetWhere, takePage } from '../pagination.js';
 
 /**
  * CRM tasks (migration 030) — the Calendar's follow-ups.
@@ -42,16 +43,30 @@ export async function crmTaskRoutes(app: FastifyInstance): Promise<void> {
    * A sales executive sees only their own tasks. Anyone who can manage the team
    * sees everyone's, because that is the point of assigning work.
    */
-  app.get('/api/crm-tasks', { preHandler: requireAuth }, async (req, reply) =>
-    withTenantContext(req.ctx, async (db) => {
-      if (!await gate(db, 'view_calendar')) return reply.code(403).send({ error: 'Missing permission: view_calendar' });
-      const seesAll = await gate(db, 'manage_team') || await gate(db, 'manage_leads');
-      const { rows } = seesAll
-        ? await db.query(`SELECT * FROM crm_tasks ORDER BY due_date NULLS LAST, created_at DESC`)
-        : await db.query(
-            `SELECT * FROM crm_tasks WHERE user_id = app_current_user() ORDER BY due_date NULLS LAST, created_at DESC`);
-      return { tasks: rows.map(toApi) };
-    }),
+  app.get<{ Querystring: { limit?: number; cursor?: string } }>(
+    '/api/crm-tasks',
+    { preHandler: requireAuth, schema: { querystring: { type: 'object', properties: PAGE_QUERY } } },
+    async (req, reply) =>
+      withTenantContext(req.ctx, async (db) => {
+        if (!await gate(db, 'view_calendar')) return reply.code(403).send({ error: 'Missing permission: view_calendar' });
+        const seesAll = await gate(db, 'manage_team') || await gate(db, 'manage_leads');
+        // Keyed on created_at rather than the due_date the list is ORDERED by:
+        // due_date is nullable and editable, and neither works as a cursor.
+        // The sort a user sees and the key the pages walk are allowed to differ
+        // as long as the key is total and stable — this one is.
+        const page = readPage(req.query);
+        const own = seesAll ? '' : 'user_id = app_current_user()';
+        const ks = keysetWhere(page, 'created_at', 'id', 1);
+        const where = [own, ks.sql].filter(Boolean).join(' AND ');
+        const { rows } = await db.query(
+          `SELECT * FROM crm_tasks
+            ${where ? `WHERE ${where}` : ''}
+            ORDER BY created_at DESC, id DESC
+            LIMIT ${page.limit + 1}`,
+          ks.params);
+        const out = takePage(rows, page, 'created_at');
+        return { tasks: out.rows.map(toApi), nextCursor: out.nextCursor };
+      }),
   );
 
   app.post<{ Body: Record<string, unknown> }>(

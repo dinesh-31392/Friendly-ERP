@@ -55,4 +55,52 @@ export const env = {
    * nothing to do with what it tests. CI raises this; nothing else should.
    */
   authRateLimitMax: Number(process.env.AUTH_RATE_LIMIT_MAX) || 5,
+
+  /**
+   * The address this API is reachable at from the outside world, with no
+   * trailing slash. Empty when the deployment has not been told.
+   *
+   * TWO NAMES, ONE MEANING, AND THE BUG THAT CAUSED.
+   *
+   * WhatsApp read `PUBLIC_URL || PUBLIC_BASE_URL`; telephony read only
+   * `PUBLIC_BASE_URL`. deploy/docker-compose.prod.yml sets only `PUBLIC_URL`.
+   * So a correct production deploy gave WhatsApp its webhook host and left
+   * click-to-call with an empty string — and click-to-call treats empty as
+   * "this deployment does not know its own address" and places the call with
+   * NO callback URL. The call connects; the status, duration and recording
+   * never come back; nothing errors. A silent half-working feature.
+   *
+   * Resolved once, here, so a third caller cannot invent a third spelling.
+   */
+  publicBaseUrl: (process.env.PUBLIC_URL || process.env.PUBLIC_BASE_URL || '')
+    .trim().replace(/\/+$/, ''),
+
+  /**
+   * The key that encrypts per-workspace integration credentials at rest.
+   *
+   * `tenant_keys` stores each builder's own gateway keys as pgp_sym_encrypt
+   * ciphertext. This key lives ONLY here, never in the database, which is what
+   * makes the arrangement safe: a database dump — a backup, a snapshot, a
+   * leaked replica — decrypts to nothing without it.
+   *
+   * OPTIONAL, and deliberately so. A deployment that has not set it keeps
+   * working exactly as before on platform-level credentials from the
+   * environment; only the per-workspace feature is unavailable, and the
+   * settings route says so rather than storing anything in the clear.
+   *
+   * Rotating it strands every stored credential — there is no re-encryption
+   * pass — so a rotation means asking each builder to re-enter their keys.
+   * Guarded to 32 characters for the same reason JWT_SECRET is.
+   */
+  kmsKey: (() => {
+    const v = process.env.KMS_KEY ?? '';
+    if (!v) return '';
+    if (/change[_-]?me/i.test(v)) {
+      throw new Error('KMS_KEY is still the example placeholder — generate one: openssl rand -base64 48');
+    }
+    if (v.length < 32) {
+      throw new Error(`KMS_KEY must be at least 32 characters (got ${v.length}) — openssl rand -base64 48`);
+    }
+    return v;
+  })(),
 };

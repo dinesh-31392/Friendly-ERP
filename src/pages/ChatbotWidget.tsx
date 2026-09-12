@@ -9,6 +9,7 @@ import { getChatbotConfig, computeQualification, defaultChatbotConfig, type Cust
 import { isApiEnabled, apiGetPublicChatbot, apiCreatePublicLead } from '../services/apiClient';
 import { formatCurrency } from '../utils/format';
 import type { Project } from '../types';
+import { BRAND } from '../config/brand';
 
 type Msg = { from: 'bot' | 'user'; text: string };
 type WProject = { id: string; name: string; location: string; priceRange: [number, number] };
@@ -319,7 +320,7 @@ function Conversation({ data }: { data: WData }) {
           <div className="px-4 py-3 border-t border-zinc-100">
             {error && <p className="text-xs text-red-500 mb-1.5">{error}</p>}
             {inputArea()}
-            <p className="mt-2 flex items-center justify-center gap-1 text-[10px] text-zinc-400"><ShieldCheck className="h-3 w-3" /> Secured by Friendly ERP</p>
+            <p className="mt-2 flex items-center justify-center gap-1 text-[10px] text-zinc-400"><ShieldCheck className="h-3 w-3" /> Secured by {BRAND.name}</p>
           </div>
         )}
       </div>

@@ -1,6 +1,7 @@
 import { getAll, getByTenant, getById, create, update, logAudit } from './db';
 import { isApiEnabled, apiPortalLogin, apiPortalInvite } from './apiClient';
 import type { PortalUser, Tenant, Lead, Broker } from '../types';
+import { BRAND, portalHost } from '../config/brand';
 
 // Portal auth lives under its OWN key so a portal login can never leak into
 // the internal CRM session (and vice versa).
@@ -230,8 +231,8 @@ export function isPremium(tenant: Tenant | null): boolean {
  *  subdomain; others share the generic portal with a ?builder= link. */
 export function portalUrl(tenant: Tenant): string {
   return isPremium(tenant)
-    ? `https://${tenant.slug}.friendlyerp.app/portal`
-    : `https://app.friendlyerp.app/portal?builder=${tenant.slug}`;
+    ? `https://${portalHost(tenant.slug)}/portal`
+    : `https://app.${BRAND.portalDomain}/portal?builder=${tenant.slug}`;
 }
 
 /** In-app portal link (works in this demo build). */

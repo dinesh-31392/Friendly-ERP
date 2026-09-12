@@ -461,13 +461,13 @@ export default function Procurement() {
             </div>
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full">
+              <table className="min-w-[680px] w-full">
                 <thead>
                   <tr className="bg-zinc-50/30 border-b border-zinc-100">
                     <th className="text-left px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">Vendor</th>
-                    <th className="text-left px-4 py-3 text-xs font-semibold text-zinc-500 uppercase hidden md:table-cell">Contact</th>
+                    <th className="text-left px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">Contact</th>
                     <th className="text-left px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">Rating</th>
-                    <th className="text-right px-4 py-3 text-xs font-semibold text-zinc-500 uppercase hidden sm:table-cell">Orders</th>
+                    <th className="text-right px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">Orders</th>
                     <th className="text-center px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">Status</th>
                     <th className="px-4 py-3" />
                   </tr>
@@ -481,7 +481,7 @@ export default function Procurement() {
                           <p className="text-sm font-medium text-zinc-900">{v.name}</p>
                           <p className="text-[11px] text-zinc-500">{v.category}{v.gst ? ` · GST ${v.gst}` : ''}</p>
                         </td>
-                        <td className="px-4 py-3 text-sm text-zinc-600 hidden md:table-cell">
+                        <td className="px-4 py-3 text-sm text-zinc-600">
                           {v.contactPerson || '—'}
                           <p className="text-[11px] text-zinc-400">{v.phone}</p>
                         </td>
@@ -494,7 +494,7 @@ export default function Procurement() {
                             ))}
                           </div>
                         </td>
-                        <td className="px-4 py-3 text-sm text-zinc-600 text-right hidden sm:table-cell">
+                        <td className="px-4 py-3 text-sm text-zinc-600 text-right">
                           {vendorPos.length}
                           <p className="text-[11px] text-zinc-400">{formatCurrency(vendorPos.reduce((s, p) => s + poTotal(p), 0), currency)}</p>
                         </td>
@@ -548,14 +548,14 @@ export default function Procurement() {
             </div>
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full">
+              <table className="min-w-[680px] w-full">
                 <thead>
                   <tr className="bg-zinc-50/30 border-b border-zinc-100">
                     <th className="text-left px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">PO</th>
                     <th className="text-left px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">Vendor</th>
-                    <th className="text-left px-4 py-3 text-xs font-semibold text-zinc-500 uppercase hidden md:table-cell">Site</th>
+                    <th className="text-left px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">Site</th>
                     <th className="text-right px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">Value</th>
-                    <th className="text-left px-4 py-3 text-xs font-semibold text-zinc-500 uppercase hidden sm:table-cell">Expected</th>
+                    <th className="text-left px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">Expected</th>
                     <th className="text-center px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">Status</th>
                     <th className="px-4 py-3" />
                   </tr>
@@ -568,9 +568,9 @@ export default function Procurement() {
                         <p className="text-[11px] text-zinc-400">{po.lines.length} line{po.lines.length === 1 ? '' : 's'} · {fmtDate(po.createdAt)}</p>
                       </td>
                       <td className="px-4 py-3 text-sm text-zinc-700">{vendorName(po.vendorId)}</td>
-                      <td className="px-4 py-3 text-sm text-zinc-600 hidden md:table-cell">{projectName(po.projectId)}</td>
+                      <td className="px-4 py-3 text-sm text-zinc-600">{projectName(po.projectId)}</td>
                       <td className="px-4 py-3 text-sm font-semibold text-zinc-900 text-right">{formatCurrency(poTotal(po), currency)}</td>
-                      <td className="px-4 py-3 text-sm text-zinc-500 hidden sm:table-cell">{fmtDate(po.expectedDate)}</td>
+                      <td className="px-4 py-3 text-sm text-zinc-500">{fmtDate(po.expectedDate)}</td>
                       <td className="px-4 py-3 text-center">
                         <span className={`text-[11px] font-semibold px-2.5 py-1 rounded-full ${poStatusCls[po.status]}`}>
                           {PO_STATUSES.find(s => s.id === po.status)?.label}
@@ -629,12 +629,12 @@ export default function Procurement() {
               </div>
             ) : (
               <div className="overflow-x-auto">
-                <table className="w-full">
+                <table className="min-w-[680px] w-full">
                   <thead>
                     <tr className="bg-zinc-50/30 border-b border-zinc-100">
                       <th className="text-left px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">Material</th>
                       <th className="text-right px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">On Hand</th>
-                      <th className="text-right px-4 py-3 text-xs font-semibold text-zinc-500 uppercase hidden sm:table-cell">Reorder At</th>
+                      <th className="text-right px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">Reorder At</th>
                       <th className="text-center px-4 py-3 text-xs font-semibold text-zinc-500 uppercase">Stock Health</th>
                       <th className="px-4 py-3" />
                     </tr>
@@ -650,7 +650,7 @@ export default function Procurement() {
                             <p className="text-[11px] text-zinc-500">{m.category}</p>
                           </td>
                           <td className="px-4 py-3 text-sm font-semibold text-zinc-900 text-right">{onHand} <span className="text-[11px] font-normal text-zinc-400">{m.unit}</span></td>
-                          <td className="px-4 py-3 text-sm text-zinc-500 text-right hidden sm:table-cell">{m.reorderLevel > 0 ? `${m.reorderLevel} ${m.unit}` : '—'}</td>
+                          <td className="px-4 py-3 text-sm text-zinc-500 text-right">{m.reorderLevel > 0 ? `${m.reorderLevel} ${m.unit}` : '—'}</td>
                           <td className="px-4 py-3 text-center">
                             {low ? (
                               <span className="inline-flex items-center gap-1 text-[11px] font-semibold px-2.5 py-1 rounded-full bg-red-50 text-red-600">

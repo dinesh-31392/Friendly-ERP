@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { withTenantContext } from '../db.js';
 import { requireAuth } from '../auth.js';
+import { PAGE_QUERY, readPage, keysetWhere, takePage } from '../pagination.js';
 
 /**
  * Invoices (migration 030) and the tenant audit trail.
@@ -40,14 +41,29 @@ const PROPS = {
 } as const;
 
 export async function invoiceRoutes(app: FastifyInstance): Promise<void> {
-  app.get('/api/invoices', { preHandler: requireAuth }, async (req, reply) =>
-    withTenantContext(req.ctx, async (db) => {
-      if (!await gate(db, 'view_invoices') && !await gate(db, 'view_finance')) {
-        return reply.code(403).send({ error: 'Missing permission: view_invoices' });
-      }
-      const { rows } = await db.query(`SELECT * FROM invoices ORDER BY issue_date DESC, created_at DESC`);
-      return { invoices: rows.map(toApiInvoice) };
-    }),
+  app.get<{ Querystring: { limit?: number; cursor?: string } }>(
+    '/api/invoices',
+    { preHandler: requireAuth, schema: { querystring: { type: 'object', properties: PAGE_QUERY } } },
+    async (req, reply) =>
+      withTenantContext(req.ctx, async (db) => {
+        if (!await gate(db, 'view_invoices') && !await gate(db, 'view_finance')) {
+          return reply.code(403).send({ error: 'Missing permission: view_invoices' });
+        }
+        // Ordered by created_at, not issue_date: the keyset needs a column that
+        // never moves, and an invoice's issue date can be corrected after the
+        // fact — which would slide a row across a page boundary and either
+        // duplicate it or skip it.
+        const page = readPage(req.query);
+        const ks = keysetWhere(page, 'created_at', 'id', 1);
+        const { rows } = await db.query(
+          `SELECT * FROM invoices
+            ${ks.sql ? `WHERE ${ks.sql}` : ''}
+            ORDER BY created_at DESC, id DESC
+            LIMIT ${page.limit + 1}`,
+          ks.params);
+        const out = takePage(rows, page, 'created_at');
+        return { invoices: out.rows.map(toApiInvoice), nextCursor: out.nextCursor };
+      }),
   );
 
   app.post<{ Body: Record<string, unknown> }>(

@@ -20,6 +20,46 @@ async function gate(db: import('pg').PoolClient, perm: string): Promise<boolean>
   return !!allowed;
 }
 
+/**
+ * Which permission a status change needs.
+ *
+ * Two transitions in the land pipeline and one in BD are approvals, not edits:
+ * qualifying a parcel commits the diligence budget, converting one commits the
+ * company to building, and handing a JV to the land team starts both. Migration
+ * 028 created a key for each and the SPA has always read them — Land.tsx picks
+ * its buttons from approve_land_qualify / approve_land_convert, and BD.tsx shows
+ * the maker "Awaiting hand-off approval". Only the API never checked them, so
+ * the separation of duties existed everywhere except where it counts.
+ *
+ * The approval key REPLACES the maker key for these transitions rather than
+ * adding to it, and that direction matters: bd_manager is the designated
+ * checker for qualification and deliberately does not hold manage_land. Requiring
+ * both would keep the role locked out of the one action it exists to perform.
+ *
+ * `carries` is the one field that belongs TO the approval rather than being a
+ * separate edit smuggled alongside it. Converting a parcel creates the project
+ * and links it in the same call (`{status:'converted_to_project', projectId}`),
+ * and a hand-off links the parcel it just created — so demanding the maker key
+ * for those would refuse the very call the approval exists to make. Every OTHER
+ * field still needs it.
+ */
+interface Approval { key: string; carries?: string }
+const LAND_APPROVAL: Record<string, Approval> = {
+  qualified: { key: 'approve_land_qualify' },
+  converted_to_project: { key: 'approve_land_convert', carries: 'projectId' },
+};
+const BD_APPROVAL: Record<string, Approval> = {
+  handed_to_land: { key: 'approve_bd_handoff', carries: 'landLeadId' },
+};
+
+/**
+ * True when the body changes anything beyond the transition itself — which the
+ * approver may only do if they also hold the maker key.
+ */
+function editsBeyond(body: Record<string, unknown>, transitionField: string, carries?: string): boolean {
+  return Object.keys(body).some(k => k !== transitionField && k !== carries && body[k] !== undefined);
+}
+
 export async function landBdRoutes(app: FastifyInstance): Promise<void> {
   // ── Land leads (parcels) ────────────────────────────────────────────────
   const landToApi = (r: Record<string, unknown>) => ({
@@ -96,8 +136,17 @@ export async function landBdRoutes(app: FastifyInstance): Promise<void> {
     },
     async (req, reply) =>
       withTenantContext(req.ctx, async (db) => {
-        if (!await gate(db, 'manage_land')) return reply.code(403).send({ error: 'Missing permission: manage_land' });
         const b = req.body;
+        // An approval transition needs its own key; every other edit — assigning,
+        // rejecting, moving through diligence — stays with the maker.
+        const approval = b.status ? LAND_APPROVAL[b.status] : undefined;
+        const needed = approval?.key ?? 'manage_land';
+        if (!await gate(db, needed)) return reply.code(403).send({ error: `Missing permission: ${needed}` });
+        // A body that approves AND edits must satisfy both, or a checker could
+        // change fields they have no rights to under cover of an approval.
+        if (approval && editsBeyond(b as Record<string, unknown>, 'status', approval.carries)) {
+          if (!await gate(db, 'manage_land')) return reply.code(403).send({ error: 'Missing permission: manage_land' });
+        }
         const { rows } = await db.query(
           `UPDATE land_leads SET status = COALESCE($1,status), assigned_to = COALESCE($2,assigned_to), rejection_reason = COALESCE($3,rejection_reason), project_id = COALESCE($4,project_id) WHERE id = $5 RETURNING *`,
           [b.status ?? null, b.assignedTo ?? null, b.rejectionReason ?? null, b.projectId ?? null, req.params.id]);
@@ -185,7 +234,13 @@ export async function landBdRoutes(app: FastifyInstance): Promise<void> {
     },
     async (req, reply) =>
       withTenantContext(req.ctx, async (db) => {
-        if (!await gate(db, 'manage_land')) return reply.code(403).send({ error: 'Missing permission: manage_land' });
+        // Verifying a title deed is diligence sign-off, not filing: the person
+        // who uploaded the document must not be the one who attests to it. The
+        // SPA has always agreed — Land.tsx gates this control on
+        // canVerifyDocs = approve_land_qualify — while the API asked for
+        // manage_land, so the checker was shown the button and refused, and the
+        // uploader could verify their own upload.
+        if (!await gate(db, 'approve_land_qualify')) return reply.code(403).send({ error: 'Missing permission: approve_land_qualify' });
         const verified = req.body.verificationStatus !== 'pending';
         const { rows } = await db.query(
           `UPDATE land_documents SET verification_status = $1,
@@ -243,8 +298,13 @@ export async function landBdRoutes(app: FastifyInstance): Promise<void> {
     },
     async (req, reply) =>
       withTenantContext(req.ctx, async (db) => {
-        if (!await gate(db, 'manage_bd')) return reply.code(403).send({ error: 'Missing permission: manage_bd' });
         const b = req.body;
+        const approval = b.stage ? BD_APPROVAL[b.stage] : undefined;
+        const needed = approval?.key ?? 'manage_bd';
+        if (!await gate(db, needed)) return reply.code(403).send({ error: `Missing permission: ${needed}` });
+        if (approval && editsBeyond(b as Record<string, unknown>, 'stage', approval.carries)) {
+          if (!await gate(db, 'manage_bd')) return reply.code(403).send({ error: 'Missing permission: manage_bd' });
+        }
         const { rows } = await db.query(
           `UPDATE bd_leads SET stage = COALESCE($1,stage), closed_lost_reason = COALESCE($2,closed_lost_reason), land_lead_id = COALESCE($3,land_lead_id) WHERE id = $4 RETURNING *`,
           [b.stage ?? null, b.closedLostReason ?? null, b.landLeadId ?? null, req.params.id]);
